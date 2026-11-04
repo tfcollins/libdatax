@@ -36,6 +36,7 @@ add_library(datax SHARED
   src/platform/table.c
   src/platform/family.c
   src/platform/ad936x.c
+  src/platform/adrv9009.c
   src/device.c)
 target_include_directories(datax
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

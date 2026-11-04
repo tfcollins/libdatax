@@ -163,7 +163,7 @@ const struct datax_family_ops datax_ad936x_ops = {
 	.get_gain = ad936x_get_gain,
 	.set_sample_rate = ad936x_set_sample_rate,
 	.set_bandwidth = ad936x_set_bandwidth,
-	.rx_channels = 2,
-	.tx_channels = 2,
+	.rx_channels_per_phy = 2,
+	.tx_channels_per_phy = 2,
 	.hop_table_depth = 8,
 };

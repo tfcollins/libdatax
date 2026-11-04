@@ -58,3 +58,22 @@ add_test(NAME test_device_ad936x
 set_tests_properties(test_device_ad936x PROPERTIES
   ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
   TIMEOUT 60)
+
+# adrv9009 pair (4R4T) and single-phy (2R2T) immediate verbs.
+add_executable(test_device_adrv9009 test_device_adrv9009.c)
+target_link_libraries(test_device_adrv9009 PRIVATE datax iio_dep m)
+target_include_directories(test_device_adrv9009 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(test_device_adrv9009 PRIVATE ${DATAX_WARNINGS})
+foreach(fx pair single)
+  if(fx STREQUAL "pair")
+    set(xml adrv9009-zu11eg)
+  else()
+    set(xml adrv9009-single)
+  endif()
+  add_test(NAME test_device_adrv9009_${fx}
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/${xml}.xml $<TARGET_FILE:test_device_adrv9009>)
+  set_tests_properties(test_device_adrv9009_${fx} PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_MODE=${fx}"
+    TIMEOUT 60)
+endforeach()

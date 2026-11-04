@@ -1,0 +1,93 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+
+env:
+  LIBIIO_APT: cmake build-essential pkg-config libxml2-dev libzstd-dev libaio-dev flex bison
+
+jobs:
+  # The pinned libiio fork is built in its own job (cold build can exceed the
+  # five minutes the test job is allowed) and handed over through actions/cache,
+  # keyed on the OS image (runs-on is pinned to ubuntu-24.04 so cached binaries
+  # always match the system libraries) and the revision in pins.json. A warm cache makes this job a no-op.
+  libiio:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read libiio pin
+        id: pin
+        run: echo "rev=$(jq -r .libiio.revision pins.json)" >> "$GITHUB_OUTPUT"
+      - name: Restore libiio cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: libiio
+          key: libiio-${{ runner.os }}-ubuntu-24.04-${{ steps.pin.outputs.rev }}
+      - name: Install libiio build dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y $LIBIIO_APT
+      - name: Build libiio at the pin
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          REV: ${{ steps.pin.outputs.rev }}
+        run: |
+          git clone --filter=blob:none https://github.com/tfcollins/libiio libiio
+          git -C libiio checkout "$REV"
+          cmake -S libiio -B libiio/build -DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON \
+            -DWITH_TESTS=OFF -DWITH_DOC=OFF -DWITH_USB_BACKEND=OFF \
+            -DWITH_SERIAL_BACKEND=OFF -DHAVE_DNS_SD=OFF -DWITH_EXAMPLES=OFF
+          cmake --build libiio/build -j"$(nproc)"
+
+  test:
+    needs: libiio
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      DATAX_LIBIIO_BUILD: ${{ github.workspace }}/libiio/build
+      # conftest.py turns every skipped test into a failure.
+      DATAX_REQUIRE_EMU: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read libiio pin
+        id: pin
+        run: echo "rev=$(jq -r .libiio.revision pins.json)" >> "$GITHUB_OUTPUT"
+      - name: Restore libiio cache
+        uses: actions/cache/restore@v4
+        with:
+          path: libiio
+          key: libiio-${{ runner.os }}-ubuntu-24.04-${{ steps.pin.outputs.rev }}
+          fail-on-cache-miss: true
+      - name: Install runtime/build dependencies
+        run: sudo apt-get update && sudo apt-get install -y $LIBIIO_APT
+      - name: Build libdatax
+        run: |
+          cmake -S . -B build -DDATAX_LIBIIO_SOURCE=libiio -DDATAX_LIBIIO_BUILD=libiio/build
+          cmake --build build -j"$(nproc)"
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python package
+        run: pip install -e . -r tests/python/requirements.txt
+      - name: pytest (emulator-backed, no skips allowed)
+        env:
+          DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
+        run: python -m pytest -q -rs tests/python
+
+  support:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate support.json
+        run: |
+          pip install "git+https://github.com/tfcollins/datax_sdk_sdr@25f6b3d"
+          datax-support check support.json --repo-root .

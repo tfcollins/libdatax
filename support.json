@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "project": "libdatax",
+  "platforms": {
+    "host": {
+      "features": {
+        "sdk-context": {
+          "status": "validated",
+          "tier": 1,
+          "software_only": true,
+          "workflow": "ci.yml",
+          "evidence": "https://github.com/tfcollins/libdatax#readme",
+          "note": "context, device, capabilities, Tick time, Python package; emulator-backed Tier 1"
+        }
+      }
+    },
+    "adrv9361-z7035": {
+      "features": {"streaming-rx": {"status": "planned", "note": "P2"}}
+    },
+    "adrv9009-zu11eg": {
+      "features": {"streaming-rx": {"status": "planned", "note": "P2"}}
+    }
+  }
+}

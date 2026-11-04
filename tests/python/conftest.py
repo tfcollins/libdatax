@@ -50,6 +50,33 @@ def tick_vendor():
     return type("TickVendor", (), {"descriptor": descriptor, "enums": enums})
 
 
+# ---- Strict mode: DATAX_REQUIRE_EMU=1 turns every skip into a failure --------
+
+def _strict():
+    return os.environ.get("DATAX_REQUIRE_EMU") == "1"
+
+
+def _fail_report(rep, what):
+    rep.outcome = "failed"
+    rep.longrepr = f"DATAX_REQUIRE_EMU=1: {what} was skipped: {rep.longrepr!r}"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+    if _strict() and rep.skipped and not hasattr(rep, "wasxfail"):
+        _fail_report(rep, item.nodeid)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    outcome = yield
+    rep = outcome.get_result()
+    if _strict() and rep.skipped:
+        _fail_report(rep, str(collector.nodeid))
+
+
 # ---- Python package fixtures -------------------------------------------------
 
 sys.path.insert(0, str(ROOT / "python"))

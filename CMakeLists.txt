@@ -33,7 +33,10 @@ add_library(datax SHARED
   src/stubs.c
   src/caps_access.c
   src/context.c
-  src/platform/table.c)
+  src/platform/table.c
+  src/platform/family.c
+  src/platform/ad936x.c
+  src/device.c)
 target_include_directories(datax
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>

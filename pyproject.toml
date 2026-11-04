@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datax"
+version = "0.1.0"
+description = "Python bindings (ctypes) for libdatax, the DataX SDR SDK core over libiio v1"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["datax"]

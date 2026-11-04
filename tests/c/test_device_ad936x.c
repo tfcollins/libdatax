@@ -60,6 +60,19 @@ CHECK(datax_device_set_frequency(dev, 0, 2450000000ULL, DATAX_TIME_NOW) == 0);
 	CHECK(datax_device_set_bandwidth(dev, 3, 12000000ULL) == 0);
 	CHECK(read_attr(ctx, "voltage1", 1, "rf_bandwidth") == 12000000LL);
 
+	/* Read-back round trip */
+	{
+		unsigned long long sps = 0, bw = 0;
+
+		CHECK(datax_device_get_sample_rate(dev, &sps) == 0 && sps == 30720000ULL);
+		CHECK(datax_device_get_bandwidth(dev, 1, &bw) == 0 && bw == 18000000ULL);
+		CHECK(datax_device_get_bandwidth(dev, 3, &bw) == 0 && bw == 12000000ULL);
+		CHECK(datax_device_get_bandwidth(dev, 4, &bw) == -EINVAL);
+		CHECK(datax_device_get_sample_rate(dev, NULL) == -EINVAL);
+		CHECK(datax_device_get_sample_rate(NULL, &sps) == -EINVAL);
+		CHECK(datax_device_get_bandwidth(NULL, 0, &bw) == -EINVAL);
+	}
+
 	/* Argument errors */
 	CHECK(datax_device_set_frequency(dev, 7, 1000000000ULL, DATAX_TIME_NOW) == -EINVAL);
 	CHECK(strstr(datax_context_get_last_error(ctx), "channel") != NULL);

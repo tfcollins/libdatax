@@ -97,8 +97,12 @@ int datax_device_set_gain(struct datax_device *dev, unsigned int ch,
 int datax_device_get_gain(const struct datax_device *dev, unsigned int ch, double *db);
 int datax_device_set_sample_rate(struct datax_device *dev,
 				 unsigned long long sps);   /* never timed */
+int datax_device_get_sample_rate(const struct datax_device *dev,
+				 unsigned long long *sps);
 int datax_device_set_bandwidth(struct datax_device *dev, unsigned int ch,
 			       unsigned long long hz);
+int datax_device_get_bandwidth(const struct datax_device *dev, unsigned int ch,
+			       unsigned long long *hz);
 
 /* Hop staging - milliseconds-scale, never timed; stage before scheduling. */
 int datax_device_stage_hop_table(struct datax_device *dev,

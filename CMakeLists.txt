@@ -12,6 +12,10 @@ set(DATAX_LIBIIO_BUILD "" CACHE PATH "libiio v1 build tree (libiio.so, iio-confi
 set(DATAX_WARNINGS -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual
     -Wstrict-prototypes -Wmissing-prototypes -Werror)
 
+if((DATAX_LIBIIO_SOURCE AND NOT DATAX_LIBIIO_BUILD) OR (DATAX_LIBIIO_BUILD AND NOT DATAX_LIBIIO_SOURCE))
+  message(FATAL_ERROR "set both DATAX_LIBIIO_SOURCE and DATAX_LIBIIO_BUILD, or neither (pkg-config)")
+endif()
+
 add_library(iio_dep INTERFACE)
 if(DATAX_LIBIIO_SOURCE AND DATAX_LIBIIO_BUILD)
   target_include_directories(iio_dep SYSTEM INTERFACE

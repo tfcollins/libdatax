@@ -7,10 +7,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 url="${DATAX_DOCS_URL:-https://raw.githubusercontent.com/tfcollins/datax_sdk_sdr/main/docs/api-c-core.md}"
 
-page="$(curl -fsSL --retry 3 "$url")"
+page="$(curl -fsSL --retry 3 --max-time 30 "$url")"
 # Only symbol lines ("  datax_foo;"), so words in map comments are ignored.
-symbols="$(grep -oE '^[[:space:]]*datax_[a-z0-9_]*;' "$root/src/libdatax.map" \
-  | tr -d ' \t;' | grep -v '^datax_internal_' | sort -u)"
+symbols="$({ grep -oE '^[[:space:]]*datax_[a-z0-9_]*;' "$root/src/libdatax.map" || true; } \
+  | tr -d ' \t;' | { grep -v '^datax_internal_' || true; } | sort -u)"
+if [ -z "$symbols" ]; then
+  echo "no public symbols found in src/libdatax.map" >&2
+  exit 1
+fi
 
 missing=()
 while IFS= read -r sym; do

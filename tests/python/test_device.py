@@ -16,17 +16,15 @@ def test_rx_tx_lo_gain(emu_uri):
         dev.rx_gain = 20
         assert dev.rx_gain == 20
         dev.sample_rate = 30.72e6
+        assert dev.sample_rate == 30.72e6
         dev.rx_bandwidth = 18e6
+        assert dev.rx_bandwidth == 18e6
         ch1 = dev.channel(1)
         ch1.rx_gain = 15
         assert ch1.rx_gain == 15
-
-
-@pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)
-def test_sample_rate_read_unsupported(emu_uri):
-    with datax.Context(emu_uri) as ctx:
-        with pytest.raises(datax.CapabilityError):
-            ctx.devices[0].sample_rate
+        ch1.rx_bandwidth = 12e6
+        assert ch1.rx_bandwidth == 12e6
+        assert dev.rx_bandwidth == 18e6
 
 
 @pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)

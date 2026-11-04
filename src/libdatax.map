@@ -1,5 +1,5 @@
 /* Public symbols only. Later tasks append the remaining datax_* functions
- * (and the two test-only datax_internal_* symbols) as they are implemented. */
+ * (and the datax_internal_* diagnostic symbols) as they are implemented. */
 LIBDATAX_0.1 {
   global:
     datax_caps_has;
@@ -21,6 +21,8 @@ LIBDATAX_0.1 {
     datax_device_get_gain;
     datax_device_set_sample_rate;
     datax_device_set_bandwidth;
+    datax_device_get_sample_rate;
+    datax_device_get_bandwidth;
     datax_device_stage_hop_table;
     datax_device_get_time;
     datax_device_set_time_next_pps;

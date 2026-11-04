@@ -17,8 +17,12 @@ struct datax_family_ops {
 	int (*get_gain)(const struct datax_device *dev, unsigned int ch,
 			double *db);
 	int (*set_sample_rate)(struct datax_device *dev, unsigned long long sps);
+	int (*get_sample_rate)(const struct datax_device *dev,
+			       unsigned long long *sps);
 	int (*set_bandwidth)(struct datax_device *dev, unsigned int ch,
 			     unsigned long long hz);
+	int (*get_bandwidth)(const struct datax_device *dev, unsigned int ch,
+			     unsigned long long *hz);
 	/* Channel counts are per phy; datax_fold_devices multiplies by the
 	 * number of phys folded into the device (1 for ad936x, 1-2 for adrv9009). */
 	unsigned int rx_channels_per_phy, tx_channels_per_phy;

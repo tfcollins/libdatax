@@ -23,3 +23,13 @@ Licence: MIT (declared in Tick's `pyproject.toml`; the UAPI header carries
   - revision: `ed6c8a4c955d1933eb5da33f3c1fefcb72d32123`
   - licence: MIT (SPDX header in file)
   - sha256: `1a373960289c229a78c1f8e9fc477716fb791967f59e519be3935db3f03639f9`
+
+`tests/vendor/tick/__init__.py` is a local, empty addition that does not come
+from upstream; it only makes the directory importable and is not hashed.
+
+The emulator fixture `tests/emu/ad936x.xml` comes from pyadi-iio (see
+`tests/emu/README.md`) under pyadi-iio's licence: the `LICENSE` file at the
+pinned revision is Analog Devices' BSD-style licence (copyright 2019-2023
+Analog Devices, Inc.; redistribution permitted with notice retained, no
+endorsement by ADI's name, and use restricted to software connected to, run on
+or loaded to an Analog Devices component).

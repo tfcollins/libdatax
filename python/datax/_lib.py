@@ -58,6 +58,8 @@ def get_lib():
     _sig(lib, "datax_device_get_gain", C.c_int, c_void_p, c_uint, P(C.c_double))
     _sig(lib, "datax_device_set_sample_rate", C.c_int, c_void_p, c_ull)
     _sig(lib, "datax_device_set_bandwidth", C.c_int, c_void_p, c_uint, c_ull)
+    _sig(lib, "datax_device_get_sample_rate", C.c_int, c_void_p, C.POINTER(c_ull))
+    _sig(lib, "datax_device_get_bandwidth", C.c_int, c_void_p, c_uint, C.POINTER(c_ull))
     _sig(lib, "datax_device_stage_hop_table", C.c_int, c_void_p, P(c_ull), C.c_size_t)
     _sig(lib, "datax_device_get_time", C.c_int, c_void_p, P(c_ull), P(c_ull))
     _sig(lib, "datax_device_set_time_next_pps", C.c_int, c_void_p, c_ull)

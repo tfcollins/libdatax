@@ -31,12 +31,15 @@ add_library(datax SHARED
   src/error.c
   src/version.c
   src/stubs.c
-  src/caps_access.c)
+  src/caps_access.c
+  src/context.c
+  src/platform/table.c)
 target_include_directories(datax
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>
   PRIVATE src)
 target_compile_options(datax PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(datax PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(datax PRIVATE iio_dep Threads::Threads)
 target_link_options(datax PRIVATE
   -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/libdatax.map)

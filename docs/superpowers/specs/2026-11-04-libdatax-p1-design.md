@@ -211,6 +211,37 @@ and capability flags (REQ-OOBE-005's seed).
   `libdatax` repo, added to the board with Phase P1, Sprint Next;
   issue #6 in the SDK repo becomes the epic linking them.
 
+## Rulings from the builder check (2026-11-04)
+
+1. **Capability flags mean "this SDK can do it here", not "the probe saw
+   hardware".** In P1 every flag the stubbed verbs would need
+   (`TIMED_COMMANDS`, `FHM_HOP`, `FASTLOCK_HOP`, `MCS`, and the rest)
+   is **false**. The probe is still written and tested, exposed only
+   through the test-only symbol `datax_internal_probe_flags(dev)`, so
+   P3 flips flags by removing a gate, not by writing a probe. `doctor`
+   prints both ("capabilities" and "detected hardware"). Cost if
+   wrong: one line per flag in `caps.c`.
+2. **Tick stays private; nothing in CI needs a token.** The descriptor
+   contract test uses `tick/src/tick/descriptor.py`, `enums.py` and
+   `kernel/uapi/linux/tick_timed_command.h` **vendored** under
+   `tests/vendor/tick/` with their upstream SHA-256 recorded in
+   `PROVENANCE.md` and checked by a test (hopcap's pattern).
+3. **Caps are read through accessors, never a struct** (object model:
+   "no exposed structs"): `enum datax_cap`, `bool datax_caps_has()`,
+   `enum datax_limit`, `int datax_caps_get_limit()`. The API page is
+   amended first with these, with `typedef unsigned long long
+   datax_time`, `DATAX_TIME_NOW`, `enum datax_direction`,
+   `struct datax_event`'s fields, and `DATAX_ERR_LATE = -ETIME`. That
+   SDK-repo change lands before the first libdatax code task.
+4. **`adrv9009-zu11eg.xml` is hand-written**; second phy named
+   `adrv9009-phy-b` as pyadi-iio assumes. No lab task in P1.
+5. **Only radios become `datax_device`s** (ad936x, adrv9009 families),
+   in IIO enumeration order. Other IIO devices (`ad7291`, `xadc`,
+   clock chips, streaming devices, Tick) stay reachable through
+   `datax_context_get_iio_context()`. The API page says so.
+6. **adrv9009 `hop_table_depth` is 0 in P1** (the driver exposes
+   range-based FHM, no table attribute); P3 defines it.
+
 ## Left to the builder
 
 - CMake details (install rules, `pkg-config` file, version from

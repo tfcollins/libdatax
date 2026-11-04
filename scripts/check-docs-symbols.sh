@@ -9,7 +9,7 @@ url="${DATAX_DOCS_URL:-https://raw.githubusercontent.com/tfcollins/datax_sdk_sdr
 
 page="$(curl -fsSL --retry 3 --max-time 30 "$url")"
 # Only symbol lines ("  datax_foo;"), so words in map comments are ignored.
-symbols="$(grep -oE '^[[:space:]]*datax_[a-z0-9_]*;' "$root/src/libdatax.map" \
+symbols="$({ grep -oE '^[[:space:]]*datax_[a-z0-9_]*;' "$root/src/libdatax.map" || true; } \
   | tr -d ' \t;' | { grep -v '^datax_internal_' || true; } | sort -u)"
 if [ -z "$symbols" ]; then
   echo "no public symbols found in src/libdatax.map" >&2

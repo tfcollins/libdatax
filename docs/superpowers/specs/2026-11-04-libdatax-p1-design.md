@@ -1,7 +1,7 @@
 # Design: libdatax P1 — SDK skeleton on libiio v1
 
 Date: 2026-11-04
-Status: draft for approval
+Status: approved; implemented 2026-11-04 (tfcollins/libdatax main dbce99a: tasks 1-9 via subagent-driven development, final review fixes merged; CI green; Python 24 tests, C 21 tests, 44 public symbols all on the API page)
 Board: issue #6 on <https://github.com/users/tfcollins/projects/4>
 
 ## Intent

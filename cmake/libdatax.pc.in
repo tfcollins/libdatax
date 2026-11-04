@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: libdatax
+Description: DataX SDR SDK core over libiio v1
+Version: @PROJECT_VERSION@
+Requires.private: libiio >= 1.0
+Libs: -L${libdir} -ldatax
+Cflags: -I${includedir}

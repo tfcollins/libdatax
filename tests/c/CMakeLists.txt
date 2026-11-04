@@ -20,3 +20,29 @@ foreach(fx ad936x adrv9009-zu11eg tick)
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 60)
 endforeach()
+
+# Context lifecycle and device folding, once per fixture.
+add_executable(test_context test_context.c)
+target_link_libraries(test_context PRIVATE datax iio_dep)
+target_include_directories(test_context PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(test_context PRIVATE ${DATAX_WARNINGS})
+foreach(fx ad936x adrv9009-zu11eg tick)
+  add_test(NAME test_context_${fx}
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/${fx}.xml $<TARGET_FILE:test_context>)
+  set_tests_properties(test_context_${fx} PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=${fx}"
+    TIMEOUT 60)
+endforeach()
+
+find_program(VALGRIND valgrind)
+if(VALGRIND)
+  add_test(NAME test_context_valgrind
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/ad936x.xml
+            ${VALGRIND} --error-exitcode=1 --leak-check=full
+            --errors-for-leak-kinds=definite $<TARGET_FILE:test_context>)
+  set_tests_properties(test_context_valgrind PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=ad936x"
+    TIMEOUT 120)
+endif()

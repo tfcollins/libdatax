@@ -4,7 +4,16 @@ LIBDATAX_0.1 {
   global:
     datax_caps_has;
     datax_caps_get_limit;
+    datax_context_create_from_uri;
+    datax_context_create_local;
+    datax_context_destroy;
+    datax_context_get_device_count;
+    datax_context_get_device;
+    datax_context_get_iio_context;
+    datax_context_set_event_callback;
     datax_context_get_last_error;
+    datax_device_get_name;
+    datax_device_get_caps;
     datax_context_get_version;
     datax_device_stage_hop_table;
     datax_device_set_time_next_pps;

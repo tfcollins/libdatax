@@ -31,7 +31,7 @@ finds it:
 
 Examples live under `examples/python/`. The emulator-backed tests need
 `DATAX_LIBIIO_BUILD=<libiio build>` (they skip without it; set
-`DATAX_REQUIRE_EMU=1` to turn those skips into failures, as CI does):
+`DATAX_REQUIRE_EMU=1` to turn any skipped test into a failure, as CI does):
 
     DATAX_LIBIIO_BUILD=libiio/build python -m pytest -q tests/python
 
@@ -41,7 +41,7 @@ Examples live under `examples/python/`. The emulator-backed tests need
 `libiio` job clones `tfcollins/libiio` at that revision and builds it with the
 emulator backend (`-DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON`; USB, serial,
 DNS-SD, tests, docs and examples off). The checkout and build tree are cached
-under the key `libiio-<revision>`, so a cold build happens only when the pin
+under the key `libiio-<os>-ubuntu-24.04-<revision>` (the runner image is pinned), so a cold build happens only when the pin
 changes. The `test` job (5 minute limit) restores that cache, builds libdatax,
 runs ctest and pytest with `DATAX_LIBIIO_BUILD` set. The `docs-symbols`
 workflow checks that every public symbol in `src/libdatax.map` is documented

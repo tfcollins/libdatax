@@ -11,9 +11,10 @@ env:
 jobs:
   # The pinned libiio fork is built in its own job (cold build can exceed the
   # five minutes the test job is allowed) and handed over through actions/cache,
-  # keyed on the revision in pins.json. A warm cache makes this job a no-op.
+  # keyed on the OS image (runs-on is pinned to ubuntu-24.04 so cached binaries
+  # always match the system libraries) and the revision in pins.json. A warm cache makes this job a no-op.
   libiio:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: libiio
-          key: libiio-${{ steps.pin.outputs.rev }}
+          key: libiio-${{ runner.os }}-ubuntu-24.04-${{ steps.pin.outputs.rev }}
       - name: Install libiio build dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y $LIBIIO_APT
@@ -43,11 +44,11 @@ jobs:
 
   test:
     needs: libiio
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       DATAX_LIBIIO_BUILD: ${{ github.workspace }}/libiio/build
-      # Turn emulator-fixture skips into failures: CI must exercise them.
+      # conftest.py turns every skipped test into a failure.
       DATAX_REQUIRE_EMU: "1"
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +59,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: libiio
-          key: libiio-${{ steps.pin.outputs.rev }}
+          key: libiio-${{ runner.os }}-ubuntu-24.04-${{ steps.pin.outputs.rev }}
           fail-on-cache-miss: true
       - name: Install runtime/build dependencies
         run: sudo apt-get update && sudo apt-get install -y $LIBIIO_APT
@@ -79,7 +80,7 @@ jobs:
         run: python -m pytest -q -rs tests/python
 
   support:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

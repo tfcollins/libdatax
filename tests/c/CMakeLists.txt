@@ -1,6 +1,7 @@
-foreach(t test_version test_stubs)
+foreach(t test_version test_stubs test_stub_errors)
   add_executable(${t} ${t}.c)
   target_link_libraries(${t} PRIVATE datax)
+  target_include_directories(${t} PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_compile_options(${t} PRIVATE ${DATAX_WARNINGS})
   add_test(NAME ${t} COMMAND ${t})
 endforeach()

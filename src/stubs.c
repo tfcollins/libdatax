@@ -1,39 +1,51 @@
 // SPDX-License-Identifier: MIT
 /*
  * P1 stubs: stream, scheduler, hop staging, MCS and PPS time-set are not
- * implemented yet. They return -ENOTSUP and tolerate NULL handles, so no
- * last-error is recorded.
+ * implemented yet and return -ENOTSUP.
+ *
+ * Device-taking stubs record "<verb>: arrives in P<n>" as the context's
+ * last error when dev is non-NULL; with a NULL dev they return the bare code.
+ * Stream/sched handle-taking stubs have no handle layout yet, so they return
+ * the bare code only (no last-error).
  */
 #include <errno.h>
 
 #include <datax/datax.h>
 
+#include "error.h"
+
+static int dev_stub(const struct datax_device *dev, const char *msg)
+{
+	if (dev)
+		return datax_error_ret(dev->ctx, ENOTSUP, "stub", "%s", msg);
+	return -ENOTSUP;
+}
+
 int datax_device_stage_hop_table(struct datax_device *dev,
 				 const unsigned long long *freqs_hz, size_t count)
 {
-	(void)dev; (void)freqs_hz; (void)count;
-	return -ENOTSUP;
+	(void)freqs_hz; (void)count;
+	return dev_stub(dev, "datax_device_stage_hop_table: arrives in P3");
 }
 
 int datax_device_set_time_next_pps(struct datax_device *dev,
 				   unsigned long long epoch_ticks)
 {
-	(void)dev; (void)epoch_ticks;
-	return -ENOTSUP;
+	(void)epoch_ticks;
+	return dev_stub(dev, "datax_device_set_time_next_pps: arrives in P3");
 }
 
 int datax_device_run_mcs(struct datax_device *dev)
 {
-	(void)dev;
-	return -ENOTSUP;
+	return dev_stub(dev, "datax_device_run_mcs: arrives in P3");
 }
 
 int datax_stream_create(struct datax_device *dev,
 			const struct datax_stream_config *cfg,
 			struct datax_stream **stream)
 {
-	(void)dev; (void)cfg; (void)stream;
-	return -ENOTSUP;
+	(void)cfg; (void)stream;
+	return dev_stub(dev, "datax_stream_create: arrives in P2");
 }
 
 void datax_stream_destroy(struct datax_stream *stream)
@@ -88,8 +100,8 @@ int datax_stream_put_block(struct datax_stream *stream, void *data)
 
 int datax_sched_create(struct datax_device *dev, struct datax_sched **sched)
 {
-	(void)dev; (void)sched;
-	return -ENOTSUP;
+	(void)sched;
+	return dev_stub(dev, "datax_sched_create: arrives in P3");
 }
 
 void datax_sched_destroy(struct datax_sched *sched)

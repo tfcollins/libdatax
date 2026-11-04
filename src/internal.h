@@ -41,4 +41,9 @@ struct datax_device {
 	struct datax_caps caps;
 };
 
+/* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */
+int datax_caps_build(struct datax_device *dev);
+/* caps.c, test-only exported: what the probe detected. */
+unsigned int datax_internal_probe_flags(const struct datax_device *dev);
+
 #endif

@@ -28,13 +28,6 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 	return dev_stub(dev, "datax_device_stage_hop_table: arrives in P3");
 }
 
-int datax_device_set_time_next_pps(struct datax_device *dev,
-				   unsigned long long epoch_ticks)
-{
-	(void)epoch_ticks;
-	return dev_stub(dev, "datax_device_set_time_next_pps: arrives in P3");
-}
-
 int datax_device_run_mcs(struct datax_device *dev)
 {
 	return dev_stub(dev, "datax_device_run_mcs: arrives in P3");

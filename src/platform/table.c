@@ -82,6 +82,8 @@ int datax_fold_devices(struct datax_context *ctx)
 			dev->nphy = 1;
 			dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = 2;
 			dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = 8;
+			dev->rx_channels = 2;
+			dev->tx_channels = 2;
 		} else {
 			struct iio_device *a = iio_context_find_device(ctx->iio, ADRV9009_PHY);
 			struct iio_device *b = iio_context_find_device(ctx->iio, ADRV9009_PHY_B);
@@ -92,6 +94,8 @@ int datax_fold_devices(struct datax_context *ctx)
 				dev->phy[dev->nphy++] = b;
 			dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = 2ull * dev->nphy;
 			dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = 0;
+			dev->rx_channels = 2 * dev->nphy;
+			dev->tx_channels = 2 * dev->nphy;
 			have_adrv = true;
 		}
 		ctx->devices[ctx->ndevices++] = dev;

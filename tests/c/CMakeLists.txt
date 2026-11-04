@@ -46,3 +46,15 @@ if(VALGRIND)
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=ad936x"
     TIMEOUT 120)
 endif()
+
+# ad936x immediate verbs against the emulator.
+add_executable(test_device_ad936x test_device_ad936x.c)
+target_link_libraries(test_device_ad936x PRIVATE datax iio_dep m)
+target_include_directories(test_device_ad936x PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(test_device_ad936x PRIVATE ${DATAX_WARNINGS})
+add_test(NAME test_device_ad936x
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+          ${PROJECT_SOURCE_DIR}/tests/emu/ad936x.xml $<TARGET_FILE:test_device_ad936x>)
+set_tests_properties(test_device_ad936x PROPERTIES
+  ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+  TIMEOUT 60)

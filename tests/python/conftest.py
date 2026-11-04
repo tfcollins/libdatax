@@ -69,6 +69,9 @@ def emu_uri(request):
     Usage: @pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)
     """
     if not _emu_available():
+        if os.environ.get("DATAX_REQUIRE_EMU") == "1":
+            pytest.fail("DATAX_REQUIRE_EMU=1 but iiod-emu is not available "
+                        "(set DATAX_LIBIIO_BUILD to a libiio build tree)")
         pytest.skip("iiod-emu not found: set DATAX_LIBIIO_BUILD to a libiio build tree")
     sys.path.insert(0, str(EMU_DIR))
     from emu import Emulator

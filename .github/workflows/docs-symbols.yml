@@ -1,0 +1,14 @@
+name: docs-symbols
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  docs-symbols:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every public symbol is documented in the SDK docs
+        run: bash scripts/check-docs-symbols.sh

@@ -1,0 +1,6 @@
+build/
+.worktrees/
+.superpowers/
+.venv*/
+__pycache__/
+*.egg-info/

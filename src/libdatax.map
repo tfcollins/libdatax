@@ -1,0 +1,33 @@
+/* Public symbols only. Later tasks append the remaining datax_* functions
+ * (and the two test-only datax_internal_* symbols) as they are implemented. */
+LIBDATAX_0.1 {
+  global:
+    datax_caps_has;
+    datax_caps_get_limit;
+    datax_context_get_last_error;
+    datax_context_get_version;
+    datax_device_stage_hop_table;
+    datax_device_set_time_next_pps;
+    datax_device_run_mcs;
+    datax_stream_create;
+    datax_stream_destroy;
+    datax_stream_start;
+    datax_stream_start_at;
+    datax_stream_stop;
+    datax_stream_recv;
+    datax_stream_send;
+    datax_stream_get_block;
+    datax_stream_put_block;
+    datax_sched_create;
+    datax_sched_destroy;
+    datax_sched_queue_gpio;
+    datax_sched_queue_marker;
+    datax_sched_queue_tune;
+    datax_sched_queue_stream_gate;
+    datax_sched_commit;
+    datax_sched_flush;
+    datax_sched_wait;
+    datax_sched_get_completions;
+  local:
+    *;
+};

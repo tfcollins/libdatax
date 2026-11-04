@@ -1,0 +1,6 @@
+foreach(t test_version test_stubs)
+  add_executable(${t} ${t}.c)
+  target_link_libraries(${t} PRIVATE datax)
+  target_compile_options(${t} PRIVATE ${DATAX_WARNINGS})
+  add_test(NAME ${t} COMMAND ${t})
+endforeach()

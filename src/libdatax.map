@@ -45,6 +45,8 @@ LIBDATAX_0.1 {
     datax_sched_wait;
     datax_sched_get_completions;
     datax_internal_probe_flags;
+    datax_internal_tick_descriptor_pack;
+    datax_internal_tick_enum;
   local:
     *;
 };

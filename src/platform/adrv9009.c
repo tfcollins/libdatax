@@ -148,6 +148,35 @@ static int adrv9009_set_sample_rate(struct datax_device *dev,
 			       "sample rate is fixed by the JESD profile");
 }
 
+static int adrv9009_get_sample_rate(const struct datax_device *dev,
+				    unsigned long long *sps)
+{
+	const struct iio_attr *a;
+	long long v;
+	int ret;
+
+	if (dev->nphy < 1 || !dev->phy[0])
+		return datax_error_ret(dev->ctx, ENODEV, "adrv9009", "no phy");
+	ret = lookup(dev, dev->phy[0], "voltage0", false, "sampling_frequency", &a);
+	if (ret)
+		return ret;
+	ret = iio_attr_read_longlong(a, &v);
+	if (ret < 0)
+		return datax_error_ret(dev->ctx, -ret, "adrv9009",
+				       "read of sampling_frequency failed");
+	*sps = (unsigned long long)v;
+	return 0;
+}
+
+static int adrv9009_get_bandwidth(const struct datax_device *dev,
+				  unsigned int ch, unsigned long long *hz)
+{
+	(void)ch;
+	(void)hz;
+	return datax_error_ret(dev->ctx, ENOTSUP, "adrv9009",
+			       "bandwidth: not exposed by the adrv9009 profile");
+}
+
 static int adrv9009_set_bandwidth(struct datax_device *dev, unsigned int ch,
 				  unsigned long long hz)
 {
@@ -163,7 +192,9 @@ const struct datax_family_ops datax_adrv9009_ops = {
 	.set_gain = adrv9009_set_gain,
 	.get_gain = adrv9009_get_gain,
 	.set_sample_rate = adrv9009_set_sample_rate,
+	.get_sample_rate = adrv9009_get_sample_rate,
 	.set_bandwidth = adrv9009_set_bandwidth,
+	.get_bandwidth = adrv9009_get_bandwidth,
 	.rx_channels_per_phy = CH_PER_PHY,
 	.tx_channels_per_phy = CH_PER_PHY,
 	.hop_table_depth = 0, /* driver has no table attribute; P3 defines it */

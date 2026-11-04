@@ -85,8 +85,10 @@ class _ChannelProps:
 
     @property
     def rx_bandwidth(self):
-        """Write-only in P1 (the C API has no bandwidth getter)."""
-        raise self._ctx._error(errno.ENOTSUP, "rx_bandwidth read-back arrives with P2")
+        self._check()
+        v = c_ull()
+        self._call(get_lib().datax_device_get_bandwidth(self._ptr, self._rx(), C.byref(v)))
+        return float(v.value)
 
     @rx_bandwidth.setter
     def rx_bandwidth(self, hz):
@@ -95,8 +97,10 @@ class _ChannelProps:
 
     @property
     def sample_rate(self):
-        """Write-only in P1 (the C API has no sample-rate getter)."""
-        raise self._ctx._error(errno.ENOTSUP, "sample_rate read-back arrives with P2")
+        self._check()
+        v = c_ull()
+        self._call(get_lib().datax_device_get_sample_rate(self._ptr, C.byref(v)))
+        return float(v.value)
 
     @sample_rate.setter
     def sample_rate(self, sps):

@@ -86,6 +86,15 @@ static void test_pair(const char *uri)
 	CHECK(datax_device_set_bandwidth(dev, 0, 100000000ULL) == -ENOTSUP);
 	CHECK(read_ll(ctx, "adrv9009-phy", "voltage0", 0, "rf_bandwidth") == 200000000LL);
 
+	{
+		unsigned long long sr = 0;
+
+		CHECK(datax_device_get_sample_rate(dev, &sr) == 0 && sr == 245760000ULL);
+		CHECK(datax_device_get_bandwidth(dev, 0, &sr) == -ENOTSUP);
+		CHECK(strstr(datax_context_get_last_error(ctx),
+			     "bandwidth: not exposed by the adrv9009 profile") != NULL);
+	}
+
 	/* Range errors use the folded channel count */
 	CHECK(datax_device_set_frequency(dev, 8, 1000000000ULL, DATAX_TIME_NOW) == -EINVAL);
 

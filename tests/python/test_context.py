@@ -36,6 +36,15 @@ def test_on_event_registers(emu_uri):
         assert ctx._event_cb is not None
 
 
+@pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)
+def test_on_event_none_clears(emu_uri):
+    with datax.Context(emu_uri) as ctx:
+        ctx.on_event(lambda *a: None)
+        assert ctx._event_cb is not None
+        ctx.on_event(None)
+        assert ctx._event_cb is None
+
+
 def test_bad_uri_raises():
     with pytest.raises(datax.Error) as ei:
         datax.Context("ip:127.0.0.1:1")

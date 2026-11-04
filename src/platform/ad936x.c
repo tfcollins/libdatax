@@ -142,6 +142,36 @@ static int ad936x_set_sample_rate(struct datax_device *dev,
 	return wr_ll(dev, a, (long long)sps);
 }
 
+static int ad936x_get_sample_rate(const struct datax_device *dev,
+				  unsigned long long *sps)
+{
+	const struct iio_attr *a;
+	long long v;
+	int ret = lookup(dev, "voltage0", false, "sampling_frequency", &a);
+
+	if (!ret)
+		ret = rd_ll(dev, a, &v);
+	if (ret)
+		return ret;
+	*sps = (unsigned long long)v;
+	return 0;
+}
+
+static int ad936x_get_bandwidth(const struct datax_device *dev, unsigned int ch,
+				unsigned long long *hz)
+{
+	const struct iio_attr *a;
+	long long v;
+	int ret = voltage_attr(dev, ch, "rf_bandwidth", &a);
+
+	if (!ret)
+		ret = rd_ll(dev, a, &v);
+	if (ret)
+		return ret;
+	*hz = (unsigned long long)v;
+	return 0;
+}
+
 static int ad936x_set_bandwidth(struct datax_device *dev, unsigned int ch,
 				unsigned long long hz)
 {
@@ -162,7 +192,9 @@ const struct datax_family_ops datax_ad936x_ops = {
 	.set_gain = ad936x_set_gain,
 	.get_gain = ad936x_get_gain,
 	.set_sample_rate = ad936x_set_sample_rate,
+	.get_sample_rate = ad936x_get_sample_rate,
 	.set_bandwidth = ad936x_set_bandwidth,
+	.get_bandwidth = ad936x_get_bandwidth,
 	.rx_channels_per_phy = 2,
 	.tx_channels_per_phy = 2,
 	.hop_table_depth = 8,

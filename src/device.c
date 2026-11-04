@@ -85,6 +85,28 @@ int datax_device_set_sample_rate(struct datax_device *dev,
 	return ret ? ret : ops->set_sample_rate(dev, sps);
 }
 
+int datax_device_get_sample_rate(const struct datax_device *dev,
+				 unsigned long long *sps)
+{
+	const struct datax_family_ops *ops;
+	int ret = prepare(dev, false, 0, &ops);
+
+	if (!ret && !sps)
+		return datax_error_ret(dev->ctx, EINVAL, "device", "NULL output");
+	return ret ? ret : ops->get_sample_rate(dev, sps);
+}
+
+int datax_device_get_bandwidth(const struct datax_device *dev, unsigned int ch,
+			       unsigned long long *hz)
+{
+	const struct datax_family_ops *ops;
+	int ret = prepare(dev, true, ch, &ops);
+
+	if (!ret && !hz)
+		return datax_error_ret(dev->ctx, EINVAL, "device", "NULL output");
+	return ret ? ret : ops->get_bandwidth(dev, ch, hz);
+}
+
 int datax_device_set_bandwidth(struct datax_device *dev, unsigned int ch,
 			       unsigned long long hz)
 {

@@ -76,6 +76,12 @@ class Context:
         The callback object is kept alive for the lifetime of the context.
         """
         self._check()
+        if fn is None:
+            rc = get_lib().datax_context_set_event_callback(self._ptr, EVENT_CB(), None)  # NULL fn pointer
+            if rc:
+                raise self._error(rc)
+            self._event_cb = None
+            return
 
         class _Evt(C.Structure):
             _fields_ = [("type", C.c_int), ("ticks", C.c_ulonglong),

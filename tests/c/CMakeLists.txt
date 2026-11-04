@@ -77,3 +77,33 @@ foreach(fx pair single)
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_MODE=${fx}"
     TIMEOUT 60)
 endforeach()
+
+# Capability probe and Tick time, per fixture (with and without the Tick device).
+foreach(t test_caps test_time)
+  add_executable(${t} ${t}.c)
+  target_link_libraries(${t} PRIVATE datax)
+  target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(${t} PRIVATE ${DATAX_WARNINGS})
+endforeach()
+foreach(fx ad936x ad936x+tick adrv9009-zu11eg adrv9009-single adrv9009+tick)
+  add_test(NAME test_caps_${fx}
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/${fx}.xml $<TARGET_FILE:test_caps>)
+  set_tests_properties(test_caps_${fx} PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=${fx}"
+    TIMEOUT 60)
+endforeach()
+add_test(NAME test_caps_bare_context
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+          ${PROJECT_SOURCE_DIR}/tests/emu/tick.xml $<TARGET_FILE:test_caps>)
+set_tests_properties(test_caps_bare_context PROPERTIES
+  ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=tick"
+  TIMEOUT 60)
+foreach(fx ad936x ad936x+tick adrv9009+tick)
+  add_test(NAME test_time_${fx}
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/${fx}.xml $<TARGET_FILE:test_time>)
+  set_tests_properties(test_time_${fx} PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=${fx}"
+    TIMEOUT 60)
+endforeach()

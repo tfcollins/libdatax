@@ -97,6 +97,7 @@ int datax_fold_devices(struct datax_context *ctx)
 		dev->tx_channels = ops->tx_channels_per_phy * dev->nphy;
 		dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = dev->rx_channels;
 		dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = ops->hop_table_depth;
+		datax_caps_build(dev);
 		ctx->devices[ctx->ndevices++] = dev;
 	}
 	return 0;

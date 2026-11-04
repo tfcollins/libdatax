@@ -48,3 +48,29 @@ def tick_vendor():
     from tick import descriptor, enums
     assert Path(pkg.__file__).resolve().parent == VENDOR / "tick"
     return type("TickVendor", (), {"descriptor": descriptor, "enums": enums})
+
+
+# ---- Python package fixtures -------------------------------------------------
+
+sys.path.insert(0, str(ROOT / "python"))
+os.environ.setdefault("DATAX_LIBRARY", str(ROOT / "build" / "libdatax.so"))
+EMU_DIR = ROOT / "tests" / "emu"
+
+
+def _emu_available():
+    build = os.environ.get("DATAX_LIBIIO_BUILD")
+    return bool(build) and (Path(build) / "iiod-emu" / "iiod-emu").is_file()
+
+
+@pytest.fixture
+def emu_uri(request):
+    """Start iiod-emu for the fixture named by the 'fixture' marker param.
+
+    Usage: @pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)
+    """
+    if not _emu_available():
+        pytest.skip("iiod-emu not found: set DATAX_LIBIIO_BUILD to a libiio build tree")
+    sys.path.insert(0, str(EMU_DIR))
+    from emu import Emulator
+    with Emulator(EMU_DIR / f"{request.param}.xml") as uri:
+        yield uri

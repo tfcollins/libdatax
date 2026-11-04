@@ -10,6 +10,7 @@
 
 #include <iio/iio.h>
 
+#include "family.h"
 #include "table.h"
 #include "../error.h"
 
@@ -63,6 +64,7 @@ int datax_fold_devices(struct datax_context *ctx)
 		struct iio_device *iod = iio_context_get_device(ctx->iio, i);
 		const char *name = iio_device_get_name(iod);
 		enum datax_family fam = datax_family_of(name);
+		const struct datax_family_ops *ops;
 		struct datax_device *dev;
 
 		if (fam == DATAX_FAMILY_UNKNOWN)
@@ -78,12 +80,7 @@ int datax_fold_devices(struct datax_context *ctx)
 		}
 
 		if (fam == DATAX_FAMILY_AD936X) {
-			dev->phy[0] = iod;
-			dev->nphy = 1;
-			dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = 2;
-			dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = 8;
-			dev->rx_channels = 2;
-			dev->tx_channels = 2;
+			dev->phy[dev->nphy++] = iod;
 		} else {
 			struct iio_device *a = iio_context_find_device(ctx->iio, ADRV9009_PHY);
 			struct iio_device *b = iio_context_find_device(ctx->iio, ADRV9009_PHY_B);
@@ -92,12 +89,14 @@ int datax_fold_devices(struct datax_context *ctx)
 				dev->phy[dev->nphy++] = a;
 			if (b)
 				dev->phy[dev->nphy++] = b;
-			dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = 2ull * dev->nphy;
-			dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = 0;
-			dev->rx_channels = 2 * dev->nphy;
-			dev->tx_channels = 2 * dev->nphy;
 			have_adrv = true;
 		}
+		/* One source of truth: the family ops carry the per-phy counts. */
+		ops = datax_family_ops(fam);
+		dev->rx_channels = ops->rx_channels_per_phy * dev->nphy;
+		dev->tx_channels = ops->tx_channels_per_phy * dev->nphy;
+		dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = dev->rx_channels;
+		dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = ops->hop_table_depth;
 		ctx->devices[ctx->ndevices++] = dev;
 	}
 	return 0;

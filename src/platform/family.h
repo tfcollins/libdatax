@@ -19,7 +19,10 @@ struct datax_family_ops {
 	int (*set_sample_rate)(struct datax_device *dev, unsigned long long sps);
 	int (*set_bandwidth)(struct datax_device *dev, unsigned int ch,
 			     unsigned long long hz);
-	unsigned int rx_channels, tx_channels, hop_table_depth;
+	/* Channel counts are per phy; datax_fold_devices multiplies by the
+	 * number of phys folded into the device (1 for ad936x, 1-2 for adrv9009). */
+	unsigned int rx_channels_per_phy, tx_channels_per_phy;
+	unsigned int hop_table_depth;
 };
 
 /* Ops for a family, or NULL if the family has none (unknown/unimplemented). */
@@ -27,5 +30,6 @@ const struct datax_family_ops *datax_family_ops(enum datax_family family);
 
 /* Provided by the per-family translation units. */
 extern const struct datax_family_ops datax_ad936x_ops;
+extern const struct datax_family_ops datax_adrv9009_ops;
 
 #endif

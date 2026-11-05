@@ -3,6 +3,7 @@
 Date: 2026-11-05
 Status: approved by the owner's standing instruction ("do not wait for my input"); every
 decision below is the implementer's call, marked as such, for the owner to check while reading.
+Decisions 2 and 3 are proven on `lablp` by the spike below; `tron` is proven by plan task 1.
 Board: issue #24 on <https://github.com/users/tfcollins/projects/4>
 
 ## Intent
@@ -45,6 +46,34 @@ change.
 5. **Python streams need numpy.** `RxStream.recv()` returns a complex64 array shaped
    `(channels, n)`; `recv_raw()` returns the int16 frame array. numpy stays an optional extra of
    the package; importing a stream without it raises `datax.CapabilityError` naming the extra.
+
+## Spike (2026-11-05, lablp, stock Kuiper 2023_R2_P1)
+
+A throwaway C program on the libiio fork's v1 build (`build-emu`), against `ip:10.0.0.167`:
+
+- **RX over the legacy `iiod` path works.** Buffer open, four 16384-sample blocks enqueued,
+  start, 64 dequeue/re-enqueue rounds: about 43 MB/s (10.8 MS/s for one I/Q channel pair).
+- **Cyclic TX works.** One 1024-sample block enqueued with `cyclic=true`, then start. The legacy
+  protocol needs cyclic at buffer open while v1 sets it per enqueue; the fork's fallback carries
+  it, so this is not a risk any more.
+- **Digital loopback is bit-exact.** With `ad9361-phy` debug attribute `loopback=1`, RX equals
+  the TX waveform shifted right by 4 (the 16-bit DAC word into the 12-bit ADC format, gain
+  exactly 1/16), 0 mismatches over 1024 samples after alignment. So the AD9361 loopback test
+  asserts bit-exactness after the shift, not just EVM.
+- **Core registers read through `direct_reg_access`.** Writing `0x80000000 | offset` selects an
+  AXI core register and reading returns it: RX core VERSION `0xA0300`; the status word at
+  offset `0x88` read `0x4` both before and after streaming. Which bit means overflow is still for
+  the builder to confirm from ADI HDL; the mechanism works.
+- **No RF loop is wired.** With loopback off and TX running, RX stayed near the noise floor.
+- Channel format on AD9361: 12 bits in 16, signed, no shift; the RX sample rate was 30.72 MS/s.
+- Lab facts learnt (now in `~/dev/infra/HOSTS.md`): the board's address is `10.0.0.167`, not the
+  place's stale `10.0.0.96`; `adi-lg request` has no part entry for this board; power goes
+  through the plugin `HomeAssistantPowerDriver`.
+
+Still unproven: the same path on `tron` (stock ZU11EG image; plan task 1), and Tier 1's coverage
+of the legacy protocol. `iiod-emu` speaks only the binary protocol, so Tier 1 exercises the
+libdatax logic and Tier 2 is the only coverage of the legacy wire path. That gap is accepted for
+P2 and listed in the platform page.
 
 ## Goals
 
@@ -197,8 +226,8 @@ a fix to the emulator itself goes to the libiio fork with its own PR and a pin b
 - **Digital loopback (REQ-TEST-030, P2 part):** enable the chip loopback (decision 3), transmit a
   known cyclic complex waveform (a pseudo-random QPSK sequence of one block) on each TX channel,
   capture on the matching RX channel, align by circular cross-correlation, fit one complex gain,
-  and assert EVM ≤ −40 dB per channel (digital paths should be near bit-exact; the measured value
-  is recorded). The test always restores the loopback attribute to 0, even on failure.
+  and assert EVM ≤ −40 dB per channel; on AD9361, where the spike showed the loop is bit-exact
+  after a 4-bit shift, also assert exact equality. The measured value is recorded. The test always restores the loopback attribute to 0, even on failure.
 - Evidence: JUnit plus a JSON per run (board, image hashes, libiio pin, measured throughput and
   EVM per channel) uploaded as the run's artifact (REQ-TEST-024).
 

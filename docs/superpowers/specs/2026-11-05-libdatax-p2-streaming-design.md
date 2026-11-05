@@ -146,10 +146,18 @@ returns `-ENOTSUP` from `stream_create` with last-error naming the missing devic
   for TX), enables the IIO channels, creates the `iio_buffer` and `block_count` blocks. Failure
   frees everything and sets last-error. A device holds at most one stream per direction
   (`-EBUSY` otherwise).
-- `start()`: RX enqueues every block, then enables the buffer. TX enables the buffer; blocks are
-  enqueued by `send`/`put_block`. Starting a started stream is `-EALREADY`.
-- `stop()`: disables and cancels the buffer; blocks return to the stream's free list; a later
-  `start()` begins a fresh capture. Stopping a stopped stream is 0.
+- `start()`: RX enqueues every block, then enables the buffer. One-shot TX enables the buffer;
+  blocks are enqueued by `send`/`put_block`. **Cyclic TX defers the hardware enable** to its single
+  `send`/`put_block`, which sizes the buffer, enqueues the block cyclic and then enables: over the
+  v0 `iiod` protocol cyclic is fixed at buffer OPEN, which libiio derives from the first enqueue
+  (libiio `buffer.c`/`block.c`; the spike's order). Enable errors of a cyclic stream therefore
+  surface at `send`. Starting a started stream is `-EALREADY`.
+- `stop()`: RX disables and cancels. **One-shot TX drains**: it zero-pads and enqueues a held
+  partial block, waits until every queued block has been handed to the device (each bounded by
+  the context timeout), then disables; it returns `-ETIMEDOUT` if a block did not drain, after
+  disabling anyway. When `stop()` returns 0, every sample passed to `send` has reached the DMA
+  (the tail may still be in flight in fabric). Cyclic TX disables at once. Blocks return to the
+  stream's free list; a later `start()` begins afresh. Stopping a stopped stream is 0.
 - `destroy()`: stops if needed, frees blocks, buffer and channel masks. NULL is a no-op.
 - `start_at()`: `-ENOTSUP` (P3).
 
@@ -162,8 +170,11 @@ returns `-ENOTSUP` from `stream_create` with last-error naming the missing devic
   describes the first block touched by this call.
 - `send(src, samples, timeout_ms)`: one-shot TX fills free blocks and enqueues each full block;
   a partial final block is held until the next `send` fills it or `stop()` flushes it padded
-  with zeros. Cyclic TX takes exactly one call whose `samples` ≤ `block_samples`; the block is
-  enqueued cyclic and repeats until `stop()`; a second `send` returns `-EBUSY`.
+  with zeros. Cyclic TX takes exactly one call whose `samples` ≤ `block_samples`; **exactly
+  `samples` instants repeat** (the buffer and block are sized to `samples` at that call, so
+  `create()` allocates no hardware buffer for a cyclic stream) until `stop()`; a second `send`
+  returns `-EBUSY`. Cyclic zero-copy: `get_block` lends a `block_samples` block and `put_block`
+  repeats all of it.
 - `get_block(&data, info, timeout_ms)`: RX returns the next filled block (`valid_samples` =
   `block_samples`); TX returns a free block to fill. `put_block(data)`: RX re-enqueues; TX
   enqueues the whole block (cyclic if the stream is cyclic). Mixing copying and zero-copy calls
@@ -264,6 +275,17 @@ running the suite against the board's address.
 - SDK `requirements-test.md`: REQ-TEST-030 split into the digital part (P2) and the RF part.
 - SDK `platform-*.md`: measured RX throughput and loopback EVM at exit.
 - libdatax README: streaming quick start.
+
+## Rulings from the builder check (2026-11-05)
+
+1. Cyclic TX defers the hardware enable to its single `send`/`put_block` (lifecycle above). The
+   v0 protocol fixes cyclic at OPEN, and the emulator's binary protocol would hide a wrong order,
+   so a Tier 2 test asserts the waveform repeats (the loopback test does).
+2. A cyclic `send` of `samples` < `block_samples` repeats exactly `samples` instants.
+3. One-shot TX `stop()` drains with a bounded wait and returns `-ETIMEDOUT` if it could not; the
+   Tier 1 read-back relies on the drain (the emulator writes TX data at dequeue).
+4. libdatax gets self-hosted runners on nemo (`hw-nemo`, for tron) and bq (`hw-bq`, for lablp),
+   registered like hopcap's; each needs the pinned libiio v1 built on the host.
 
 ## Left to the builder
 

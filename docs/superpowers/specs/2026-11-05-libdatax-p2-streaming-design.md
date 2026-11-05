@@ -152,7 +152,8 @@ returns `-ENOTSUP` from `stream_create` with last-error naming the missing devic
   v0 `iiod` protocol cyclic is fixed at buffer OPEN, which libiio derives from the first enqueue
   (libiio `buffer.c`/`block.c`; the spike's order). Enable errors of a cyclic stream therefore
   surface at `send`. Starting a started stream is `-EALREADY`.
-- `stop()`: RX disables and cancels. **One-shot TX drains**: it zero-pads and enqueues a held
+- `stop()`: RX drains its queued blocks (stopping at the first failure), then disables; cancel
+  left the buffer unable to restart (Task 2 finding). **One-shot TX drains**: it zero-pads and enqueues a held
   partial block, waits until every queued block has been handed to the device (each bounded by
   the context timeout), then disables; it returns `-ETIMEDOUT` if a block did not drain, after
   disabling anyway. When `stop()` returns 0, every sample passed to `send` has reached the DMA
@@ -286,6 +287,11 @@ running the suite against the board's address.
    Tier 1 read-back relies on the drain (the emulator writes TX data at dequeue).
 4. libdatax gets self-hosted runners on nemo (`hw-nemo`, for tron) and bq (`hw-bq`, for lablp),
    registered like hopcap's; each needs the pinned libiio v1 built on the host.
+
+5. (Task 2 review) `timeout_ms` is bounded by the libiio context timeout captured at block
+   creation on both protocols; `recv(0)` polling is unreliable over binary-protocol `iiod` until
+   datax_sdk_sdr#26; stop/destroy wait up to one context timeout on a stalled stream; stream
+   handles die with their context.
 
 ## Left to the builder
 

@@ -19,8 +19,19 @@ int main(void)
 	pthread_mutex_init(&ctx.lock, NULL);
 	dev.ctx = &ctx;
 
-	CHECK(datax_stream_create(&dev, NULL, &s) == -ENOTSUP);
-	CHECK(strstr(datax_context_get_last_error(&ctx), "arrives in P2"));
+	/* Stream create is implemented: a NULL config is -EINVAL with a
+	 * last-error; a valid config on a family without streaming is
+	 * -ENOTSUP (this fake device has no family). */
+	CHECK(datax_stream_create(&dev, NULL, &s) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(&ctx), "NULL config"));
+	{
+		struct datax_stream_config c = { DATAX_RX, 0x1, 1024, 4, false };
+
+		dev.rx_channels = 1;
+		CHECK(datax_stream_create(&dev, &c, &s) == -ENOTSUP);
+		CHECK(s == NULL);
+		CHECK(strstr(datax_context_get_last_error(&ctx), "no streaming support"));
+	}
 	CHECK(datax_sched_create(&dev, &sched) == -ENOTSUP);
 	CHECK(strstr(datax_context_get_last_error(&ctx), "arrives in P3"));
 	CHECK(strstr(datax_context_get_last_error(&ctx), "sched_create"));

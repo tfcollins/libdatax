@@ -12,6 +12,25 @@ without hardware.
 The emulator serves static values: writes are accepted but do not trigger
 driver behaviour (no queue, no clock).
 
+## RX sample data
+
+`iiod-emu` serves RX blocks from `<name>_buf0.bin` beside the XML (`<name>` is
+the device name, or its id when it has none, `:` replaced by `_`), wrapping at
+the end of the file. No such files are kept here: tests generate them at run
+time into a temporary copy of the fixture.
+
+- `make_pattern.py <xml> <device> <channels> <instants> [--channel-offset N]`
+  writes the counting pattern: instant k has I = k mod 32768, Q = -I on each
+  of the `<channels>` enabled radio channels (int16 LE, I then Q, channels
+  ascending). `--channel-offset N` (opt-in) adds N*c to channel c so tests can
+  check channel order.
+- `emu_pattern.sh <xml> <device|-> <channels> <offset> <cmd...>` copies the
+  fixture to a temporary directory, writes 32768 instants of the pattern
+  (one period, so the wrap is seamless; `-` writes none), exports
+  `DATAX_TEST_XML_DIR`, and runs `emu.sh` on the copy.
+
+A missing RX file makes the emulator fail the buffer enable (`-ENOENT`).
+
 ## Running a command under the emulator
 
 ```sh

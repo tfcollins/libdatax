@@ -61,6 +61,10 @@ void datax_context_destroy(struct datax_context *ctx)
 {
 	if (!ctx)
 		return;
+	/* Streams still alive hold IIO buffers of this context. */
+	for (unsigned int i = 0; i < ctx->ndevices; i++)
+		for (int d = DATAX_RX; d <= DATAX_TX; d++)
+			datax_stream_destroy(ctx->devices[i]->stream[d]);
 	for (unsigned int i = 0; i < ctx->ndevices; i++)
 		free(ctx->devices[i]);
 	free(ctx->devices);

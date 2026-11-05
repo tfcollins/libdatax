@@ -68,6 +68,48 @@ if(DATAX_LIBIIO_BUILD)
       TIMEOUT 120)
   endif()
 
+  # Stream lifecycle and RX copying. emu_pattern.sh serves a temporary copy
+  # of the fixture with the RX counting pattern beside it (make_pattern.py).
+  add_executable(test_stream_rx test_stream_rx.c)
+  target_link_libraries(test_stream_rx PRIVATE datax iio_dep)
+  target_include_directories(test_stream_rx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(test_stream_rx PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_stream_rx PRIVATE _POSIX_C_SOURCE=200809L)
+  # mode | fixture | pattern device ("-": no buffer file) | channels | offset
+  set(DATAX_STREAM_RX_CASES
+    "ad936x|ad936x|cf-ad9361-lpc|1|0"
+    "ad936x-2ch|ad936x|cf-ad9361-lpc|2|1000"
+    "adrv9009|adrv9009-zu11eg|axi-adrv9009-rx-hpc|1|0"
+    "adrv9009-single|adrv9009-single|-|1|0"
+    "nofile|ad936x|-|1|0")
+  foreach(case ${DATAX_STREAM_RX_CASES})
+    string(REPLACE "|" ";" f "${case}")
+    list(GET f 0 mode)
+    list(GET f 1 xml)
+    list(GET f 2 pdev)
+    list(GET f 3 nch)
+    list(GET f 4 off)
+    add_test(NAME test_stream_rx_${mode}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu_pattern.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/${xml}.xml ${pdev} ${nch} ${off}
+              $<TARGET_FILE:test_stream_rx>)
+    set_tests_properties(test_stream_rx_${mode} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_MODE=${mode}"
+      TIMEOUT 60)
+  endforeach()
+  # Destroying a started stream and destroying the context under a live
+  # stream must not leak: run that group under valgrind when it is on PATH.
+  if(VALGRIND)
+    add_test(NAME test_stream_rx_destroy_valgrind
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu_pattern.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/ad936x.xml cf-ad9361-lpc 1 0
+              ${VALGRIND} --error-exitcode=1 --leak-check=full
+              --errors-for-leak-kinds=definite $<TARGET_FILE:test_stream_rx>)
+    set_tests_properties(test_stream_rx_destroy_valgrind PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_MODE=destroy"
+      TIMEOUT 120)
+  endif()
+
   # ad936x immediate verbs against the emulator.
   add_executable(test_device_ad936x test_device_ad936x.c)
   target_link_libraries(test_device_ad936x PRIVATE datax iio_dep m)

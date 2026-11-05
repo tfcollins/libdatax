@@ -186,6 +186,22 @@ static int ad936x_set_bandwidth(struct datax_device *dev, unsigned int ch,
 	return wr_ll(dev, a, (long long)hz);
 }
 
+/* ad936x radio channel n is the scan pair voltage{2n}, voltage{2n+1}. */
+static int ad936x_stream_channel_ids(unsigned int radio_ch,
+				     enum datax_direction dir,
+				     const char **id_i, const char **id_q)
+{
+	static const char *const ids[] = { "voltage0", "voltage1", "voltage2",
+					   "voltage3" };
+
+	(void)dir;
+	if (radio_ch >= 2)
+		return -EINVAL;
+	*id_i = ids[2 * radio_ch];
+	*id_q = ids[2 * radio_ch + 1];
+	return 0;
+}
+
 const struct datax_family_ops datax_ad936x_ops = {
 	.set_frequency = ad936x_set_frequency,
 	.get_frequency = ad936x_get_frequency,
@@ -198,4 +214,7 @@ const struct datax_family_ops datax_ad936x_ops = {
 	.rx_channels_per_phy = 2,
 	.tx_channels_per_phy = 2,
 	.hop_table_depth = 8,
+	.rx_stream_dev = "cf-ad9361-lpc",
+	.tx_stream_dev = "cf-ad9361-dds-core-lpc",
+	.stream_channel_ids = ad936x_stream_channel_ids,
 };

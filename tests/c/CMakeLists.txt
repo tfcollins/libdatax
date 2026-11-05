@@ -36,6 +36,26 @@ if(DATAX_LIBIIO_BUILD)
       TIMEOUT 60)
   endforeach()
 
+  # Streaming device map: the family ops are not exported, so the test links
+  # the platform sources directly; the fold lookup runs against the library.
+  add_executable(test_stream_map test_stream_map.c
+    ${PROJECT_SOURCE_DIR}/src/platform/family.c
+    ${PROJECT_SOURCE_DIR}/src/platform/ad936x.c
+    ${PROJECT_SOURCE_DIR}/src/platform/adrv9009.c
+    ${PROJECT_SOURCE_DIR}/src/error.c)
+  target_link_libraries(test_stream_map PRIVATE datax iio_dep Threads::Threads)
+  target_include_directories(test_stream_map PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(test_stream_map PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_stream_map PRIVATE _POSIX_C_SOURCE=200809L)
+  foreach(fx ad936x adrv9009-zu11eg adrv9009-single)
+    add_test(NAME test_stream_map_${fx}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/${fx}.xml $<TARGET_FILE:test_stream_map>)
+    set_tests_properties(test_stream_map_${fx} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_XML=${fx}"
+      TIMEOUT 60)
+  endforeach()
+
   find_program(VALGRIND valgrind)
   if(VALGRIND)
     add_test(NAME test_context_valgrind

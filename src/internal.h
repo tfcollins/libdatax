@@ -7,6 +7,7 @@
 #include <datax/datax.h>
 
 struct iio_device;
+struct datax_stream;
 
 enum datax_family {
 	DATAX_FAMILY_UNKNOWN,
@@ -39,6 +40,11 @@ struct datax_device {
 	unsigned int nphy;
 	unsigned int rx_channels, tx_channels;
 	struct datax_caps caps;
+	/* Streaming (P2), indexed by enum datax_direction. stream_dev is the
+	 * DMA device (NULL when the platform lacks it), filled at fold time;
+	 * stream is the active stream or NULL. */
+	struct iio_device *stream_dev[2];
+	struct datax_stream *stream[2];
 };
 
 /* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */

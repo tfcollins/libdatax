@@ -27,6 +27,19 @@ struct datax_family_ops {
 	 * number of phys folded into the device (1 for ad936x, 1-2 for adrv9009). */
 	unsigned int rx_channels_per_phy, tx_channels_per_phy;
 	unsigned int hop_table_depth;
+
+	/* Streaming (P2). Names of the DMA-backed IIO devices that carry the
+	 * RX and TX sample streams; NULL-safe lookup happens at fold time.
+	 * Sources: ad936x, ADI Kuiper stock cf-ad9361-lpc (RX) and
+	 * cf-ad9361-dds-core-lpc (TX), present in tests/emu/ad936x.xml;
+	 * adrv9009, ADI Kuiper 2023_R2 zynqmp-adrv9009-zu11eg device tree
+	 * (axi-adrv9009-rx-hpc / axi-adrv9009-tx-hpc). The adrv9009 names are
+	 * not yet confirmed on hardware; the hardware task (plan Task 9) does. */
+	const char *rx_stream_dev, *tx_stream_dev;
+	/* Scan-channel ids of radio channel radio_ch in direction dir. The ids
+	 * point at static strings. Returns 0 or -EINVAL if out of range. */
+	int (*stream_channel_ids)(unsigned int radio_ch, enum datax_direction dir,
+				  const char **id_i, const char **id_q);
 };
 
 /* Ops for a family, or NULL if the family has none (unknown/unimplemented). */

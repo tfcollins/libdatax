@@ -11,7 +11,7 @@
  *   ad936x-2ch      2-channel pattern, channel offset 1000
  *   adrv9009        1-channel pattern on axi-adrv9009-rx-hpc (4R4T pair)
  *   adrv9009-single single-phy fixture without streaming devices
- *   nofile          ad936x with no RX buffer file
+ *   nofile          ad936x with no RX buffer file (start fails cleanly)
  *   destroy         the destroy/teardown group alone (run under valgrind)
  */
 #include <errno.h>
@@ -27,6 +27,7 @@
 #include <datax/datax_internal.h>
 
 #include "check.h"
+#include "stream.h" /* the rearm test reaches the stream's blocks */
 
 static const char *uri;
 
@@ -200,6 +201,8 @@ static void test_recv_block(void)
 	CHECK(info.discontinuous == false);
 	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.blocks_done == 1);
 	CHECK(datax_stream_stop(s) == 0);
+	/* The three blocks drained at stop were not delivered: not counted. */
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.blocks_done == 1);
 	datax_stream_destroy(s);
 	datax_context_destroy(ctx);
 	free(buf);
@@ -245,6 +248,50 @@ static void test_restart_begins_afresh(void)
 		check_pattern(buf, 2500, 1, 0, 0);
 		CHECK(datax_stream_stop(s) == 0);
 	}
+	datax_stream_destroy(s);
+	datax_context_destroy(ctx);
+	free(buf);
+}
+
+/*
+ * A block libiio no longer holds. On the legacy (v0 iiod) path a failed or
+ * timed-out read consumes the block, and the next dequeue gives -EPERM.
+ * The emulator's binary path never does that by itself, so the test takes
+ * the block from libiio behind the stream's back (the same state), then
+ * checks that recv re-arms it and continues in ring order (that block's
+ * samples are lost, the rest stay contiguous), and that stop/start still
+ * work. The real timed-out read is covered on hardware by
+ * tests/hardware/test_hw_stream_smoke.py::test_recv_timeout_recovers.
+ */
+static void test_recv_rearms_unqueued_block(void)
+{
+	struct datax_device *dev = NULL;
+	struct datax_context *ctx = open_ctx(&dev);
+	struct datax_stream *s = NULL;
+	struct datax_stream_config c = rx_cfg(0x1, 1000, 4);
+	struct datax_internal_stream_stats st;
+	int16_t *buf = calloc(4000, 4);
+
+	CHECK(buf != NULL);
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_recv(s, buf, 1000, NULL, 1000) == 1000);
+	check_pattern(buf, 1000, 1, 0, 0);
+	CHECK(s->cur == 1 && s->queued[1]);
+	/* Consume block 1 (instants 1000..1999) outside the stream. */
+	CHECK(iio_block_dequeue(s->blocks[1], false) == 0);
+	/* Block 1 is re-armed as the newest; recv continues with block 2. */
+	CHECK(datax_stream_recv(s, buf, 4000, NULL, 1000) == 4000);
+	check_pattern(buf, 4000, 1, 2000, 0);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.blocks_done == 5);
+	/* Steal again, then stop: the drain skips a block libiio no longer
+	 * holds, and the stream restarts from instant 0. */
+	CHECK(iio_block_dequeue(s->blocks[(s->cur + 1) % 4], false) == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	CHECK(s->bs != NULL); /* no reset was needed */
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_recv(s, buf, 2500, NULL, 1000) == 2500);
+	check_pattern(buf, 2500, 1, 0, 0);
 	datax_stream_destroy(s);
 	datax_context_destroy(ctx);
 	free(buf);
@@ -388,20 +435,23 @@ static void write_pattern(const char *dir)
 }
 
 /*
- * test_recv_timeout. Observed iiod-emu behaviour (libiio emu.c
- * emu_enable_buffer): a missing RX buffer file is rejected when the buffer
- * is ENABLED, so start() fails with -ENOENT and no data ever flows; the
- * stream is left stopped (blocks freed, buffer closed), and recv on it
- * fails fast with -EINVAL "not started" well within 2x timeout_ms. recv's
- * -ETIMEDOUT branch needs a started stream whose data stalls, which the
- * emulator cannot produce (it serves its file without pacing); Tier 1 does
- * not cover it.
+ * Observed iiod-emu behaviour (libiio emu.c emu_enable_buffer): a missing
+ * RX buffer file is rejected when the buffer is ENABLED, so start() fails
+ * with -ENOENT and no data ever flows; the stream is left stopped (blocks
+ * freed, buffer closed), and recv on it fails fast with -EINVAL "not
+ * started" well within 2x timeout_ms.
+ *
+ * This is not a recv timeout test: recv's -ETIMEDOUT branch and its
+ * recovery need a started stream whose data stalls, which the emulator
+ * cannot produce (it serves its file without pacing). The hardware test
+ * tests/hardware/test_hw_stream_smoke.py::test_recv_timeout_recovers
+ * (Task 6) covers it.
  *
  * The emulator's server side then waits up to 5 s per queued block for the
  * file; the short iio timeout keeps the client's teardown at ~0.5 s. After
  * the file appears, the next start() reopens the buffer lazily and streams.
  */
-static void test_recv_timeout(void)
+static void test_start_without_data_file_fails_cleanly(void)
 {
 	struct datax_device *dev = NULL;
 	struct datax_context *ctx = open_ctx(&dev);
@@ -452,6 +502,7 @@ int main(void)
 		test_recv_block();
 		test_recv_spans_blocks();
 		test_restart_begins_afresh();
+		test_recv_rearms_unqueued_block();
 		test_recv_arg_errors();
 		test_destroy_started_stream();
 		test_context_destroy_frees_streams();
@@ -463,7 +514,7 @@ int main(void)
 	} else if (!strcmp(mode, "adrv9009-single")) {
 		test_adrv9009_single();
 	} else if (!strcmp(mode, "nofile")) {
-		test_recv_timeout();
+		test_start_without_data_file_fails_cleanly();
 	} else if (!strcmp(mode, "destroy")) {
 		test_destroy_started_stream();
 		test_context_destroy_frees_streams();

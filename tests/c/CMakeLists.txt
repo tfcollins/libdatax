@@ -72,7 +72,7 @@ if(DATAX_LIBIIO_BUILD)
   # of the fixture with the RX counting pattern beside it (make_pattern.py).
   add_executable(test_stream_rx test_stream_rx.c)
   target_link_libraries(test_stream_rx PRIVATE datax iio_dep)
-  target_include_directories(test_stream_rx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(test_stream_rx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
   target_compile_options(test_stream_rx PRIVATE ${DATAX_WARNINGS})
   target_compile_definitions(test_stream_rx PRIVATE _POSIX_C_SOURCE=200809L)
   # mode | fixture | pattern device ("-": no buffer file) | channels | offset

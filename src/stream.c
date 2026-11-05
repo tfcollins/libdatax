@@ -22,12 +22,22 @@
  * approximate: about max(timeout_ms, the context timeout when the blocks
  * were created), on the binary path as on the legacy one.
  *
+ * A block libiio no longer holds (-EPERM: on the legacy v0 path a failed
+ * or timed-out read consumes the block's task) is re-armed by recv as the
+ * newest block, and the cursor moves to the oldest queued one, so samples
+ * stay in order (that block's data is lost) and the wait continues within
+ * the deadline, or forever for timeout_ms < 0.
+ *
  * Stop. RX stop drains every queued block while the buffer is still enabled
  * (they complete at the stream's rate), then disables. Cancelling instead
  * tears down the buffer's connection and leaves the blocks queued, so the
  * buffer could not restart without a reopen, and iiod-emu stalls ~5 s per
- * outstanding block on teardown. If the drain fails, the buffer and blocks
- * are freed and the next start() reopens them.
+ * outstanding block on teardown. The drain stops at its first failure; the
+ * buffer and blocks are then freed and the next start() reopens them. So
+ * stop(), destroy() and context destroy inherit the context timeout (as it
+ * was when the blocks were created) once per stalled operation: one drain
+ * attempt, plus libiio's own teardown of a stalled buffer. An infinite
+ * context timeout can block them indefinitely.
  */
 #include <errno.h>
 #include <limits.h>
@@ -140,42 +150,40 @@ static int hw_open(struct datax_stream *s)
 }
 
 /*
- * Dequeue block i. timeout_ms == 0 tries once; otherwise the dequeue blocks
- * (bounded by the block's own timeout) and, with retry, a libiio -ETIMEDOUT
- * is retried until the deadline (timeout_ms > 0) or forever (< 0).
- * Returns 0, -ETIMEDOUT, or libiio's error (no last-error is set here).
+ * Dequeue block i. timeout_ms == 0 tries once without blocking; otherwise
+ * the dequeue blocks (bounded by the block's own timeout) and, with retry,
+ * a libiio -ETIMEDOUT is retried until deadline (timeout_ms > 0) or forever
+ * (< 0). -EPERM means libiio no longer holds the block (on the legacy v0
+ * path a failed read consumes it); the queued flag is cleared and the
+ * caller decides. *waited is set when a libiio timeout elapsed first.
+ * Returns 0, -ETIMEDOUT, -EPERM or libiio's error (no last-error is set
+ * here). blocks_done is counted by recv, not here (drained blocks at stop
+ * are not delivered).
  */
 static int dequeue(struct datax_stream *s, unsigned int i, int timeout_ms,
-		   bool retry)
+		   long long deadline, bool retry, bool *waited)
 {
 	struct iio_block *b = s->blocks[i];
-	long long deadline = now_us() + (long long)timeout_ms * 1000LL;
-	bool timed_out = false;
 	int ret;
 
-	if (timeout_ms == 0) {
-		ret = iio_block_dequeue(b, true);
-		if (ret == -EBUSY)
-			ret = -ETIMEDOUT;
-	} else {
-		for (;;) {
-			ret = iio_block_dequeue(b, false);
-			if (ret != -ETIMEDOUT)
-				break;
-			timed_out = true;
-			if (!retry || (timeout_ms > 0 && now_us() >= deadline))
-				break;
+	*waited = false;
+	for (;;) {
+		ret = iio_block_dequeue(b, timeout_ms == 0);
+		if (timeout_ms == 0) {
+			if (ret == -EBUSY)
+				ret = -ETIMEDOUT;
+			break;
 		}
-		/* Legacy (v0 iiod) path: a timed-out read consumes the block's
-		 * task, so the retry finds the block no longer queued. */
-		if (ret == -EPERM && timed_out) {
-			s->queued[i] = false;
-			ret = -ETIMEDOUT;
-		}
+		if (ret != -ETIMEDOUT || !retry)
+			break;
+		*waited = true;
+		if (timeout_ms > 0 && now_us() >= deadline)
+			break;
 	}
 	if (!ret) {
 		s->queued[i] = false;
-		s->stats.blocks_done++;
+	} else if (ret == -EPERM) {
+		s->queued[i] = false;
 	}
 	return ret;
 }
@@ -190,25 +198,26 @@ static int enqueue(struct datax_stream *s, unsigned int i)
 }
 
 /* Dequeue every queued block, oldest first, one blocking attempt each,
- * never retried: each is bounded by the context timeout in effect when the
- * blocks were created (unbounded if that was infinite). 0, or the first
- * error. */
+ * never retried; each is bounded by the context timeout in effect when the
+ * blocks were created (unbounded if that was infinite). The first failure
+ * stops the drain (the caller frees the buffer), so a stalled stream costs
+ * one such timeout, not one per block. A block libiio no longer holds
+ * (-EPERM) needs no draining. 0, or the error. */
 static int drain(struct datax_stream *s)
 {
-	int first = 0;
-
 	for (unsigned int j = 0; j < s->nblocks; j++) {
 		/* The cursor's block is the oldest (queued unless partly read). */
 		unsigned int i = (s->cur + j) % s->nblocks;
+		bool waited;
 		int ret;
 
 		if (!s->queued[i])
 			continue;
-		ret = dequeue(s, i, -1, false);
-		if (ret && !first)
-			first = ret;
+		ret = dequeue(s, i, -1, 0, false, &waited);
+		if (ret && ret != -EPERM)
+			return ret;
 	}
-	return first;
+	return 0;
 }
 
 static void release_slot(struct datax_stream *s)
@@ -479,6 +488,7 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 	struct datax_context *ctx;
 	long long deadline = 0;
 	size_t bb, done = 0;
+	unsigned int rearms = 0;
 	bool first = true;
 	int ret;
 
@@ -513,15 +523,31 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 				return done ? (int)done : ret;
 		}
 		if (s->cur_off == 0) {
-			int tmo = timeout_ms;
+			/* Past the deadline: one last nonblocking try. */
+			int tmo = timeout_ms > 0 && now_us() >= deadline ? 0 : timeout_ms;
+			bool waited;
 
-			if (timeout_ms > 0) {
-				long long left = (deadline - now_us()) / 1000;
-
-				/* Past the deadline: one last nonblocking try. */
-				tmo = left > 0 ? (int)left : 0;
+			ret = dequeue(s, s->cur, tmo, deadline, true, &waited);
+			if (ret == -EPERM) {
+				/* libiio no longer holds the cursor's block (legacy
+				 * path: a failed or timed-out read consumed it; its
+				 * data is lost). Re-arm it as the newest block and
+				 * move to the oldest queued one, keeping ring order,
+				 * then keep waiting. Re-arms with no wait in between
+				 * are bounded so a broken buffer cannot spin. */
+				rearms = waited ? 0 : rearms + 1;
+				if (rearms > 2 * s->nblocks)
+					return done ? (int)done :
+						datax_error_ret(ctx, EIO, SUB,
+								"recv: %s blocks keep coming back unqueued",
+								iio_name(s));
+				ret = enqueue(s, s->cur);
+				if (ret)
+					return done ? (int)done :
+						fail_iio(s, ret, "recv: re-enqueueing a block");
+				s->cur = (s->cur + 1) % s->nblocks;
+				continue;
 			}
-			ret = dequeue(s, s->cur, tmo, true);
 			if (ret) {
 				if (done)
 					break;
@@ -531,6 +557,7 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 							       iio_name(s), timeout_ms);
 				return fail_iio(s, ret, "recv: dequeueing a block");
 			}
+			s->stats.blocks_done++;
 		}
 		if (first && info) {
 			info->timestamp_ticks = 0;

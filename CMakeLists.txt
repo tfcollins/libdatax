@@ -45,7 +45,8 @@ add_library(datax SHARED
   src/caps.c
   src/time.c
   src/platform/tick.c
-  src/tick_descriptor.c)
+  src/tick_descriptor.c
+  src/stream.c)
 target_include_directories(datax
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>

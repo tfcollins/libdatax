@@ -97,6 +97,13 @@ int datax_fold_devices(struct datax_context *ctx)
 		dev->tx_channels = ops->tx_channels_per_phy * dev->nphy;
 		dev->caps.limits[DATAX_LIMIT_MAX_CHANNELS] = dev->rx_channels;
 		dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] = ops->hop_table_depth;
+		/* Streaming DMA devices; absent on platforms without them. */
+		if (ops->rx_stream_dev)
+			dev->stream_dev[DATAX_RX] =
+				iio_context_find_device(ctx->iio, ops->rx_stream_dev);
+		if (ops->tx_stream_dev)
+			dev->stream_dev[DATAX_TX] =
+				iio_context_find_device(ctx->iio, ops->tx_stream_dev);
 		datax_caps_build(dev);
 		ctx->devices[ctx->ndevices++] = dev;
 	}

@@ -186,6 +186,25 @@ static int adrv9009_set_bandwidth(struct datax_device *dev, unsigned int ch,
 			       "bandwidth is fixed by the profile");
 }
 
+/* adrv9009 radio channel n is the scan pair voltage{n}_i, voltage{n}_q
+ * (4 radio channels across both phys, 8 scan channels per direction). */
+static int adrv9009_stream_channel_ids(unsigned int radio_ch,
+				       enum datax_direction dir,
+				       const char **id_i, const char **id_q)
+{
+	static const char *const ids_i[] = { "voltage0_i", "voltage1_i",
+					     "voltage2_i", "voltage3_i" };
+	static const char *const ids_q[] = { "voltage0_q", "voltage1_q",
+					     "voltage2_q", "voltage3_q" };
+
+	(void)dir;
+	if (radio_ch >= 4)
+		return -EINVAL;
+	*id_i = ids_i[radio_ch];
+	*id_q = ids_q[radio_ch];
+	return 0;
+}
+
 const struct datax_family_ops datax_adrv9009_ops = {
 	.set_frequency = adrv9009_set_frequency,
 	.get_frequency = adrv9009_get_frequency,
@@ -198,4 +217,7 @@ const struct datax_family_ops datax_adrv9009_ops = {
 	.rx_channels_per_phy = CH_PER_PHY,
 	.tx_channels_per_phy = CH_PER_PHY,
 	.hop_table_depth = 0, /* driver has no table attribute; P3 defines it */
+	.rx_stream_dev = "axi-adrv9009-rx-hpc",
+	.tx_stream_dev = "axi-adrv9009-tx-hpc",
+	.stream_channel_ids = adrv9009_stream_channel_ids,
 };

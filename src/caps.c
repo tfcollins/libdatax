@@ -30,6 +30,7 @@ int datax_caps_build(struct datax_device *dev)
 	 * returns -ENOTSUP for them (caps_access.c). */
 	dev->caps.limits[DATAX_LIMIT_REPORT_SPACING_US] = 0;
 	dev->caps.limits[DATAX_LIMIT_HOP_STAGE_US] = 0;
+	dev->caps.measured = 0;
 
 	if (datax_tick_read_limits(dev, NULL, NULL, &bitmap) == 0) {
 		probe |= CAP_BIT(DATAX_CAP_TIMED_COMMANDS);

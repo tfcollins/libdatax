@@ -28,7 +28,8 @@ static int check_timed(const struct datax_device *dev, datax_time when)
 {
 	if (when != DATAX_TIME_NOW)
 		return datax_error_ret(dev->ctx, ENOTSUP, "device",
-				       "timed commands arrive with the scheduler (P3)");
+				       "timed radio calls arrive with FHM tunes (P3a); "
+				       "use datax_sched_* for timed GPIO and markers");
 	return 0;
 }
 

@@ -20,6 +20,10 @@ struct datax_caps {
 	unsigned int flags;        /* bit per enum datax_cap this SDK can do here */
 	unsigned int probe_flags;  /* bit per enum datax_cap the probe detected */
 	unsigned long long limits[DATAX_LIMIT_COUNT];
+	/* bit per enum datax_limit that is measured at run time and has been
+	 * (REPORT_SPACING_US while a scheduler exists); unmeasured ones read
+	 * -ENOTSUP. */
+	unsigned int measured;
 };
 
 struct datax_context {
@@ -53,6 +57,14 @@ struct datax_device {
 	 * device; NULL ops when there is none. Tests rebind a fake. */
 	const struct datax_tick_ops *tick_ops;
 	void *tick_h;
+	/* The device's one scheduler (sched.c), or NULL; set and cleared under
+	 * ctx->lock. While it exists the Tick seam cannot be rebound. */
+	struct datax_sched *sched;
+	/* Next scheduler sequence id. Per device, so ids never repeat across
+	 * scheduler lifetimes (a destroyed scheduler can leave descriptors in
+	 * Tick); seeded at the first scheduler, never 0 (an empty completion
+	 * slot reads seq 0). */
+	unsigned int next_seq;
 };
 
 /* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */

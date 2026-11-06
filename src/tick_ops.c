@@ -55,8 +55,16 @@ const struct datax_tick_ops datax_tick_iio_ops = { iio_tick_read, iio_tick_write
 
 int datax_tick_bind(struct datax_device *dev, const struct datax_tick_ops *ops, void *h)
 {
+	bool busy;
+
 	if (!dev || (ops && (!ops->read || !ops->write)))
 		return -EINVAL;
+	/* The poller reads tick_ops/tick_h unlocked: never rebind under it. */
+	pthread_mutex_lock(&dev->ctx->lock);
+	busy = dev->sched != NULL;
+	pthread_mutex_unlock(&dev->ctx->lock);
+	if (busy)
+		return -EBUSY;
 	dev->tick_ops = ops;
 	dev->tick_h = ops ? h : NULL;
 	return datax_caps_build(dev);
@@ -67,6 +75,9 @@ int datax_internal_tick_bind_fake(struct datax_device *dev,
 {
 	int ret = datax_tick_bind(dev, ops, h);
 
+	if (ret == -EBUSY)
+		return datax_error_ret(dev->ctx, EBUSY, "tick",
+				       "tick_bind_fake: the device has a scheduler; destroy it first");
 	if (ret && dev)
 		return datax_error_ret(dev->ctx, -ret, "tick",
 				       "tick_bind_fake: ops need read and write");

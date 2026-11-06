@@ -175,6 +175,66 @@ class Device(_ChannelProps):
         arr = (c_ull * len(freqs_hz))(*[int(f) for f in freqs_hz])
         self._call(get_lib().datax_device_stage_hop_table(self._ptr, arr, len(freqs_hz)))
 
+    def rx_stream(self, channels=(0,), block_samples=65536, block_count=4):
+        """A new, unstarted RxStream (``with`` starts it). Needs numpy."""
+        from .stream import RxStream
+        return RxStream(self, channels, block_samples, block_count)
+
+    def tx_stream(self, channels=(0,), block_samples=65536, block_count=4,
+                  cyclic=False):
+        """A new, unstarted TxStream (``with`` starts it). Needs numpy."""
+        from .stream import TxStream
+        return TxStream(self, channels, block_samples, block_count, cyclic)
+
+    def rx(self, n, channels=(0,)):
+        """One-shot capture: complex64 ``(len(channels), n)``."""
+        n = int(n)
+        if n <= 0:
+            raise ValueError("n must be positive")
+        with self.rx_stream(channels, block_samples=min(n, 65536)) as st:
+            data, _ = st.recv(n)
+        return data
+
+    def tx(self, data, cyclic=True, channels=None):
+        """Transmit ``data`` (complex ``(channels, n)`` or 1-D).
+
+        Cyclic (default): repeats until ``tx_stop()`` or the context closes;
+        the stream stays on the device. Otherwise sends once and returns after
+        the samples reached the DMA."""
+        from .stream import _np
+        np = _np()
+        self._check()
+        a = np.asarray(data)
+        if a.ndim not in (1, 2):
+            raise ValueError(f"data must be 1-D or 2-D, got shape {a.shape}")
+        if channels is None:
+            channels = (0,) if a.ndim == 1 else tuple(range(a.shape[0]))
+        n = a.shape[-1]
+        if n == 0:
+            raise ValueError("data is empty")
+        self.tx_stop()
+        st = self.tx_stream(channels, block_samples=min(n, 65536) if not cyclic else n,
+                            block_count=4, cyclic=cyclic)
+        try:
+            st.start()
+            st.send(a)
+            if cyclic:
+                self._tx_stream = st
+                return
+            st.stop()
+        finally:
+            if self.__dict__.get("_tx_stream") is not st:
+                try:
+                    st.close()
+                except Error:
+                    pass
+
+    def tx_stop(self):
+        """Stop the cyclic stream started by ``tx()``, if any."""
+        st = self.__dict__.pop("_tx_stream", None)
+        if st is not None:
+            st.close()
+
     def run_mcs(self):
         self._check()
         self._call(get_lib().datax_device_run_mcs(self._ptr))

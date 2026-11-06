@@ -24,10 +24,17 @@ class LateError(Error):
     """Reserved: a deadline could not be met (ETIME). Not raised in P1."""
 
 
+class BusyError(Error):
+    """The resource is in use (EBUSY): a second stream in one direction, or a
+    second send on a cyclic TX stream."""
+
+
 def make_error(err, message=None):
     err = abs(int(err))
     if err in (_errno.ENOTSUP, _errno.EOPNOTSUPP):
         return CapabilityError(err, message)
+    if err == _errno.EBUSY:
+        return BusyError(err, message)
     if err == _errno.ETIME:
         return LateError(err, message)
     return Error(err, message)

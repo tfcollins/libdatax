@@ -13,6 +13,20 @@ c_void_p = C.c_void_p
 # datax_event_cb: void (*)(const struct datax_event *, void *)
 EVENT_CB = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p)
 
+
+class StreamConfig(C.Structure):
+    """struct datax_stream_config."""
+    _fields_ = [("direction", C.c_int), ("channel_mask", C.c_uint),
+                ("block_samples", C.c_size_t), ("block_count", C.c_uint),
+                ("cyclic", C.c_bool)]
+
+
+class BlockInfoC(C.Structure):
+    """struct datax_block_info."""
+    _fields_ = [("timestamp_ticks", C.c_ulonglong), ("discontinuous", C.c_bool),
+                ("valid_samples", C.c_size_t)]
+
+
 _lib = None
 
 
@@ -67,5 +81,12 @@ def get_lib():
     _sig(lib, "datax_internal_probe_flags", c_uint, c_void_p)
     _sig(lib, "datax_internal_device_stream_info", C.c_int, c_void_p, C.c_int,
          C.c_char_p, C.c_size_t, P(C.c_int))
+    _sig(lib, "datax_stream_create", C.c_int, c_void_p, P(StreamConfig), P(c_void_p))
+    _sig(lib, "datax_stream_destroy", None, c_void_p)
+    _sig(lib, "datax_stream_start", C.c_int, c_void_p)
+    _sig(lib, "datax_stream_stop", C.c_int, c_void_p)
+    _sig(lib, "datax_stream_recv", C.c_int, c_void_p, c_void_p, C.c_size_t,
+         P(BlockInfoC), C.c_int)
+    _sig(lib, "datax_stream_send", C.c_int, c_void_p, c_void_p, C.c_size_t, C.c_int)
     _lib = lib
     return lib

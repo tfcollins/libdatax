@@ -21,12 +21,20 @@ class CapabilityError(Error):
 
 
 class LateError(Error):
-    """Reserved: a deadline could not be met (ETIME). Not raised in P1."""
+    """A deadline could not be met (``DATAX_ERR_LATE``, ETIME): ``Scheduler.commit``
+    for a command already inside the guard margin, or ``Scheduler.wait_all``
+    when a command completed late. ``completions`` (``wait_all``) lists what
+    was collected."""
 
 
 class BusyError(Error):
     """The resource is in use (EBUSY): a second stream in one direction, or a
     second send on a cyclic TX stream."""
+
+
+class DeadlockError(Error):
+    """A blocking call was made where it can never finish (EDEADLK), e.g.
+    ``Scheduler.wait`` from an event callback (the poller thread)."""
 
 
 def make_error(err, message=None):
@@ -37,4 +45,6 @@ def make_error(err, message=None):
         return BusyError(err, message)
     if err == _errno.ETIME:
         return LateError(err, message)
+    if err == _errno.EDEADLK:
+        return DeadlockError(err, message)
     return Error(err, message)

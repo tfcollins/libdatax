@@ -27,6 +27,18 @@ class BlockInfoC(C.Structure):
                 ("valid_samples", C.c_size_t)]
 
 
+class EventC(C.Structure):
+    """struct datax_event."""
+    _fields_ = [("type", C.c_int), ("ticks", C.c_ulonglong),
+                ("seq", C.c_long), ("detail", C.c_char_p)]
+
+
+class CompletionC(C.Structure):
+    """struct datax_completion."""
+    _fields_ = [("seq", C.c_long), ("status", C.c_int),
+                ("requested_ticks", C.c_ulonglong), ("executed_ticks", C.c_ulonglong)]
+
+
 _lib = None
 
 
@@ -92,5 +104,14 @@ def get_lib():
     _sig(lib, "datax_stream_recv", C.c_int, c_void_p, c_void_p, C.c_size_t,
          P(BlockInfoC), C.c_int)
     _sig(lib, "datax_stream_send", C.c_int, c_void_p, c_void_p, C.c_size_t, C.c_int)
+    _sig(lib, "datax_sched_create", C.c_int, c_void_p, P(c_void_p))
+    _sig(lib, "datax_sched_destroy", None, c_void_p)
+    _sig(lib, "datax_sched_queue_gpio", C.c_long, c_void_p, c_ull, c_uint, c_uint)
+    _sig(lib, "datax_sched_queue_marker", C.c_long, c_void_p, c_ull, c_uint, c_uint)
+    _sig(lib, "datax_sched_queue_tune", C.c_long, c_void_p, c_ull, c_uint, c_ull)
+    _sig(lib, "datax_sched_report", C.c_int, c_void_p, C.c_long)
+    _sig(lib, "datax_sched_commit", C.c_int, c_void_p)
+    _sig(lib, "datax_sched_flush", C.c_int, c_void_p)
+    _sig(lib, "datax_sched_wait", C.c_int, c_void_p, C.c_long, C.c_int, P(CompletionC))
     _lib = lib
     return lib

@@ -42,3 +42,21 @@ def test_stream_example_runs(script, tmp_path):
                            capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip()
+
+
+@pytest.mark.parametrize("script,expect", [("timed_staircase.py", "8 steps on time"),
+                                           ("hop_schedule.py", "4 of 4 hops confirmed")])
+def test_timed_example_runs(script, expect, make_rig, monkeypatch, capsys):
+    """The timed examples in-process against the fake Tick (and Talise FHM)
+    on the ZU11EG fixture; a background clock stands in for device time."""
+    import runpy
+    import datax
+    rig = make_rig()
+    rig.make_scheduler()                  # measured spacing, as the C tests do
+    rig.start_clock(hz_ratio=0.25)   # slow clock: slack for a loaded CI box
+    monkeypatch.setattr(datax, "Context", lambda uri=None: rig.ctx)
+    monkeypatch.setattr(sys, "argv", [script])
+    monkeypatch.delenv("DATAX_TEST_URI", raising=False)
+    runpy.run_path(str(ROOT / "examples" / "python" / script), run_name="__main__")
+    out = capsys.readouterr().out
+    assert expect in out, out

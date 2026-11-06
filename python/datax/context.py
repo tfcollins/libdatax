@@ -2,11 +2,15 @@
 """Context: owns the C handle and the devices derived from it."""
 import ctypes as C
 import errno
+import logging
 import weakref
 
-from ._lib import EVENT_CB, get_lib
+from ._lib import EVENT_CB, EventC, get_lib
 from .device import Device
-from .errors import Error, make_error
+from .errors import DeadlockError, Error, make_error
+from .sched import EventType, _in_callback, in_event_callback
+
+_log = logging.getLogger("datax")
 
 
 class Context:
@@ -20,6 +24,7 @@ class Context:
         self._closed = True
         self._ptr = None
         self._event_cb = None
+        self._event_old = []   # replaced trampolines, alive until close
         lib = get_lib()
         h = C.c_void_p()
         if uri is None:
@@ -32,6 +37,8 @@ class Context:
         self._closed = False
         self._devices = []
         self._streams = weakref.WeakSet()  # live RxStream/TxStream
+        self._scheds = weakref.WeakSet()   # live Scheduler
+        self._leaked_scheds = []           # finalized on the poller thread; close() destroys
         for i in range(lib.datax_context_get_device_count(self._ptr)):
             d = C.c_void_p()
             rc = lib.datax_context_get_device(self._ptr, i, C.byref(d))
@@ -47,6 +54,13 @@ class Context:
             m = get_lib().datax_context_get_last_error(self._ptr)
             message = m.decode(errors="replace") if m else None
         return make_error(rc if rc > 0 else -rc, message)
+
+    def _last_error(self):
+        """libdatax's last-error text for this context ('' when none)."""
+        if self._closed:
+            return ""
+        m = get_lib().datax_context_get_last_error(self._ptr)
+        return m.decode(errors="replace") if m else ""
 
     def _check(self):
         if self._closed:
@@ -73,46 +87,80 @@ class Context:
         return (a.value, b.value)
 
     def on_event(self, fn):
-        """Register ``fn(type, ticks, seq, detail)``. P1 never fires it.
+        """Register ``fn(type, ticks, seq, detail)`` (``type`` is an
+        ``EventType``); ``None`` unregisters.
 
-        The callback object is kept alive for the lifetime of the context.
+        ``fn`` runs on the scheduler's poller thread, never after
+        ``close()``, and must not block: calling ``Scheduler.wait`` from it
+        raises ``DeadlockError``. An exception it raises is logged on the
+        ``datax`` logger and swallowed (it never reaches C). The context
+        keeps the callback alive until it is replaced or closed.
         """
         self._check()
+        lib = get_lib()
         if fn is None:
-            rc = get_lib().datax_context_set_event_callback(self._ptr, EVENT_CB(), None)  # NULL fn pointer
+            rc = lib.datax_context_set_event_callback(self._ptr, EVENT_CB(), None)  # NULL fn pointer
             if rc:
                 raise self._error(rc)
-            self._event_cb = None
+            self._retire_event_cb()
             return
 
-        class _Evt(C.Structure):
-            _fields_ = [("type", C.c_int), ("ticks", C.c_ulonglong),
-                        ("seq", C.c_long), ("detail", C.c_char_p)]
-
         def tramp(evt, _user):
-            e = C.cast(evt, C.POINTER(_Evt)).contents
-            fn(e.type, e.ticks, e.seq, e.detail.decode() if e.detail else "")
+            _in_callback.active = True
+            try:
+                e = C.cast(evt, C.POINTER(EventC)).contents
+                try:
+                    typ = EventType(e.type)
+                except ValueError:
+                    typ = e.type
+                fn(typ, e.ticks, e.seq, e.detail.decode(errors="replace") if e.detail else "")
+            except BaseException:
+                _log.exception("datax event callback raised")
+            finally:
+                _in_callback.active = False
 
         cb = EVENT_CB(tramp)
-        rc = get_lib().datax_context_set_event_callback(self._ptr, cb, None)
+        rc = lib.datax_context_set_event_callback(self._ptr, cb, None)
         if rc:
             raise self._error(rc)
+        self._retire_event_cb()
         self._event_cb = cb  # keep alive
+
+    def _retire_event_cb(self):
+        # The poller may still be inside the old trampoline when the C side
+        # switches callbacks: keep it until close.
+        if self._event_cb is not None:
+            self._event_old.append(self._event_cb)
+        self._event_cb = None
 
     def close(self):
         if self._closed:
             return
-        # C stream handles die with the C context: destroy every live stream
-        # first, so none is ever touched (or finalized) afterwards.
+        if in_event_callback():
+            raise DeadlockError(errno.EDEADLK, "Context.close from an event callback "
+                                "(the poller thread) would join itself")
+        # Schedulers first: destroying one joins its poller, so no event
+        # callback is running or can start afterwards. Then the streams: C
+        # handles die with the C context, so none is touched afterwards.
+        for sc in list(self._scheds) + self._leaked_scheds:
+            sc._close_for_context()
+        self._scheds.clear()
+        self._leaked_scheds = []
         for st in list(self._streams):
             st._close_for_context()
         self._streams.clear()
         for d in self._devices:
             d._invalidate()
+        # Unregister the callback before the context goes; the trampolines
+        # (kept in `keep`) outlive the C context.
+        get_lib().datax_context_set_event_callback(self._ptr, EVENT_CB(), None)
+        keep = [self._event_cb, *self._event_old]
         self._closed = True
         get_lib().datax_context_destroy(self._ptr)
         self._ptr = None
         self._event_cb = None
+        self._event_old = []
+        del keep
 
     def __enter__(self):
         return self
@@ -122,6 +170,7 @@ class Context:
 
     def __del__(self):
         try:
-            self.close()
+            if not in_event_callback():   # leak rather than join the poller from itself
+                self.close()
         except Exception:
             pass

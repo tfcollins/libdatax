@@ -43,8 +43,8 @@ int main(void)
 	CHECK(datax_device_set_time_next_pps(&dev, 0) == -ENOTSUP);
 	CHECK(strstr(datax_context_get_last_error(&ctx), "no Tick scheduler in this context"));
 	CHECK(datax_device_run_mcs(&dev) == -ENOTSUP);
-	CHECK(strstr(datax_context_get_last_error(&ctx), "run_mcs: arrives in P3"));
-	CHECK(strcmp(ctx.last_subsystem, "stub") == 0);
+	CHECK(strstr(datax_context_get_last_error(&ctx), "no JESD204 multi-chip sync"));
+	CHECK(strcmp(ctx.last_subsystem, "mcs") == 0);
 
 	pthread_mutex_destroy(&ctx.lock);
 	return 0;

@@ -57,6 +57,20 @@ int datax_internal_fhm_bind_fake(struct datax_device *dev,
  * 0, or -EINVAL for a NULL scheduler. */
 int datax_internal_sched_pause(struct datax_sched *s, bool pause);
 
+/* MCS diagnostics (doctor). Writes the live JESD204 FSM state of the phys
+ * to state and the PHASE_COHERENT reason to reason. 1 when PHASE_COHERENT
+ * holds, 0 when not, -ENOTSUP on a device without MCS. */
+int datax_internal_mcs_info(const struct datax_device *dev, char *state, size_t slen,
+			    char *reason, size_t rlen);
+
+/* Test-only: set the RF PLL phase sync input of the PHASE_COHERENT rule
+ * (always false in production on adrv9009; see src/mcs.c). */
+void datax_internal_mcs_force_phase_sync(struct datax_device *dev, bool on);
+
+/* Whether the Tick reports a fabric PPS: 1, 0, or -errno (-ENODEV without a
+ * Tick). */
+int datax_internal_pps_present(const struct datax_device *dev);
+
 #ifdef __cplusplus
 }
 #endif

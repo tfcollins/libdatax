@@ -210,7 +210,7 @@ if(DATAX_LIBIIO_BUILD)
     target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
     target_compile_options(${t} PRIVATE ${DATAX_WARNINGS})
   endforeach()
-  foreach(fx ad936x ad936x+tick adrv9009-zu11eg adrv9009-single adrv9009+tick)
+  foreach(fx ad936x ad936x+tick adrv9009-zu11eg adrv9009-single adrv9009+tick adrv9009+tick-fsm)
     add_test(NAME test_caps_${fx}
       COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
               ${PROJECT_SOURCE_DIR}/tests/emu/${fx}.xml $<TARGET_FILE:test_caps>)
@@ -334,6 +334,21 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_sched_hooks PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # MCS verification and PHASE_COHERENT (Task 5): the fsm fixture, attributes
+  # edited through libiio to put a phy in each failing state. Compiled from
+  # the library sources: it calls the unexported flag refresh.
+  add_executable(test_mcs test_mcs.c ${DATAX_SOURCES})
+  target_link_libraries(test_mcs PRIVATE iio_dep Threads::Threads)
+  target_include_directories(test_mcs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
+  target_compile_options(test_mcs PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_mcs PRIVATE _POSIX_C_SOURCE=200809L)
+  add_test(NAME test_mcs
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009+tick-fsm.xml $<TARGET_FILE:test_mcs>)
+  set_tests_properties(test_mcs PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 60)
   # Destroying the scheduler or context while the poller is mid-I/O must join
   # it before anything is freed: valgrind when it is on PATH.
   if(VALGRIND)

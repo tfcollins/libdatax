@@ -13,7 +13,7 @@ int main(void)
 	/* Implemented stream calls reject a NULL handle with -EINVAL. */
 	CHECK(datax_stream_create(NULL, NULL, &s) == -EINVAL);
 	CHECK(datax_sched_create(NULL, &sched) == -EINVAL);
-	CHECK(datax_device_run_mcs(NULL) == -ENOTSUP);
+	CHECK(datax_device_run_mcs(NULL) == -EINVAL);
 	CHECK(datax_device_stage_hop_table(NULL, &f, 1) == -EINVAL);
 	CHECK(datax_stream_start(NULL) == -EINVAL);
 	CHECK(datax_stream_start_at(NULL, 5) == -ENOTSUP);

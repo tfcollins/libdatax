@@ -17,9 +17,11 @@ def test_ad936x_caps_empty_in_p1(emu_uri):
 
 
 @pytest.mark.parametrize("emu_uri", ["adrv9009+tick"], indirect=True)
-def test_adrv9009_detected_not_public(emu_uri):
+def test_adrv9009_fhm_needs_phy_attributes(emu_uri):
     with datax.Context(emu_uri) as ctx:
         dev = ctx.devices[0]
+        # P3a: Tick is usable (public), but this fixture has no FHM attributes
+        assert "timed_commands" in dev.caps
         assert "fhm_hop" not in dev.caps
         assert "fhm_hop" in dev.caps.detected
         assert dev.time.tick_hz == 100_000_000
@@ -31,3 +33,13 @@ def test_zu11eg_mcs_detected(emu_uri):
     with datax.Context(emu_uri) as ctx:
         assert "mcs" in ctx.devices[0].caps.detected
         assert "mcs" not in ctx.devices[0].caps
+
+
+@pytest.mark.parametrize("emu_uri", ["adrv9009+tick-fsm"], indirect=True)
+def test_p3a_gates_full_board(emu_uri):
+    with datax.Context(emu_uri) as ctx:
+        dev = ctx.devices[0]
+        assert set(dev.caps) == {"timed_commands", "fhm_hop", "mcs"}
+        assert "phase_coherent" not in dev.caps
+        dev.run_mcs()
+        assert "phase_coherent" not in dev.caps   # no RF PLL phase sync

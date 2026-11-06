@@ -34,7 +34,6 @@ find_package(Threads REQUIRED)
 set(DATAX_SOURCES
   src/error.c
   src/version.c
-  src/stubs.c
   src/caps_access.c
   src/context.c
   src/platform/table.c
@@ -52,7 +51,8 @@ set(DATAX_SOURCES
   src/stream_status.c
   src/sched.c
   src/poller.c
-  src/fhm.c)
+  src/fhm.c
+  src/mcs.c)
 # Tests that reach unexported internals compile DATAX_SOURCES themselves.
 list(TRANSFORM DATAX_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
 add_library(datax SHARED ${DATAX_SOURCES})

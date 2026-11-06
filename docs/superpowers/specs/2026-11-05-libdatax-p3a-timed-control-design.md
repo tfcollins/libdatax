@@ -75,10 +75,11 @@ Two of the timed capabilities need fabric that no tron image has today:
 4. **The scheduler is a host-side batcher plus one poller thread per scheduler**, exactly as
    api-c-core's "Abstracting the Tick submission bottleneck" section describes.
    - `queue_*` builders append 48-byte descriptors client-side, kept sorted by timestamp.
-   - `commit()` writes them back-to-back to `command_descriptor` (CSV of twelve 32-bit words, the
-     P1 packer) within the queue-depth headroom read from `queue_level`/`queue_depth`. It returns
-     `-EAGAIN` with a count if the batch exceeds the headroom: the caller commits the rest later,
-     and nothing is silently held.
+   - `commit()` accepts any batch. The poller streams descriptors to `command_descriptor` (CSV of
+     twelve 32-bit words, the P1 packer) in timestamp order, keeping `queue_level` at most
+     `queue_depth - 1`. A descriptor the host could not write before its time minus the guard margin
+     completes `LATE` ("host could not keep the queue fed") and is never written. This refines the
+     earlier `-EAGAIN` idea and follows hopcap's lookahead feeder. The API page has it.
    - The poller drains the one-entry completion window (`completion_*` attributes, then
      `completion_ack`) into a ring sized to the queue depth.
    - `wait(seq)` and `get_completions()` read the ring.
@@ -334,7 +335,7 @@ Checked against the Tick RTL at the pinned revision (`axi_timed_command_schedule
      `DATAX_COMPLETION_LATE` (detail "poller lagged; execution may have been held"), and
      `DATAX_EVT_LATE_COMMAND` fires.
    - **Default reporting is sparse.** `queue_gpio` and `queue_marker` do not report unless the
-     caller asks (a `report` flag on the builder). `queue_tune` reports its rising edge only, which is
+     caller asks (`datax_sched_report(sched, seq)` on a queued command). `queue_tune` reports its rising edge only, which is
      hopcap's proven pattern. `wait(seq)` on an unreported sequence returns `-EINVAL`.
    - The real fix belongs upstream in Tick: record the actual dispatch tick, and report
      `LATE_EXECUTED` when the stall delayed it (tfcollins/tick#38). When it lands, the spacing

@@ -1,0 +1,93 @@
+{
+  "iio_context": {
+    "attributes": {
+      "hdl_system_id": "[(null)] on [adrv9009zu11eg] git branch [main] git [085a6ed747a5f2fc4b0bae87a96218859c088d2e] clean [2026-06-09 11:41:55] UTC",
+      "hw_carrier": "Analog Devices ADRV9009-ZU11EG Rev.B",
+      "ip,ip-addr": "<ip>",
+      "local,kernel": "6.1.70-284114-g2e8908932dfd",
+      "unique_id": "10400014ac040013100027006dbb9c09f2",
+      "uri": "ip:host"
+    },
+    "description": "Linux host 6.1.70-284114-g2e8908932dfd #1061 SMP Tue Mar 18 16:40:12 EET 2025 aarch64 <ip>",
+    "version": "0.26-5e1e9cb"
+  },
+  "libdatax_commit": "d49c56ca1d5ec8fd241f0bac48624804ddab8a4c",
+  "libiio_pin": "6534f14215f4738cec224bf50f13f475fe5264a6",
+  "tests": {
+    "test_digital_loopback[ch0]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 1014,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch1]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 107,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch2]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 384,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch3]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 793,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_family_and_channels": {
+      "channels": 4,
+      "device": "adrv9009",
+      "family": "adrv9009"
+    },
+    "test_recv_timeout_recovers": {
+      "first_recv": "data arrived within 1 ms"
+    },
+    "test_rx_block_nonconstant_per_channel": {
+      "std_by_channel": {
+        "0": 30095.708984375,
+        "1": 32.98453903198242,
+        "2": 89.27849578857422,
+        "3": 23.61471176147461
+      }
+    },
+    "test_rx_throughput_recorded": {
+      "direct_reg_access": true,
+      "mb_per_s": 53.138801816636985,
+      "rx_device": "axi-adrv9009-rx-hpc",
+      "samples": 132907008,
+      "seconds": 10.004516734014032,
+      "stats": {
+        "blocks_done": 2028,
+        "enabled": false,
+        "overflow_detect": true,
+        "overflows": 97,
+        "status_polls": 99,
+        "underflows": 0
+      }
+    },
+    "test_tx_oneshot_drains": {
+      "drain_s": 0.0030023260042071342
+    }
+  },
+  "uri": "ip:host"
+}

@@ -38,7 +38,10 @@
  * stop(), destroy() and context destroy inherit the context timeout (as it
  * was when the blocks were created) once per stalled operation: one drain
  * attempt, plus libiio's own teardown of a stalled buffer. An infinite
- * context timeout can block them indefinitely.
+ * context timeout can block them indefinitely. Only stop() reports a drain
+ * failure (-ETIMEDOUT); destroy() runs the same drain but discards the
+ * result, so call stop() first when the drain outcome matters. start()
+ * clears a pending discontinuity flag left from before the previous stop().
  *
  * Ring. Blocks are used in ring order: cur is the next block to read (RX)
  * or fill (TX), and also the oldest queued one, so a drain from cur is in
@@ -453,6 +456,9 @@ int datax_stream_start(struct datax_stream *s)
 	if (s->started)
 		return datax_error_ret(s->dev->ctx, EALREADY, SUB,
 				       "stream_start: already started");
+	/* An overflow seen before a stop() belongs to the old run: the first
+	 * block after a restart must not carry it. */
+	s->disc_pending = false;
 	if (s->cfg.cyclic) {
 		/* Cyclic TX enables at its single send (TX task). */
 		s->started = true;
@@ -579,6 +585,7 @@ int datax_stream_stop(struct datax_stream *s)
 	return ret;
 }
 
+/* Drain results are reported only by stop(), not here. */
 void datax_stream_destroy(struct datax_stream *s)
 {
 	if (!s)

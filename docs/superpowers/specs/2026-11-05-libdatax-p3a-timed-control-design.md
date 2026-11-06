@@ -160,9 +160,22 @@ Two of the timed capabilities need fabric that no tron image has today:
      - PPS appearing while free-running or soft-aligned: no automatic jump in time. The event says a
        hard alignment is now possible.
    - Relative scheduling never depends on PPS ("now + 500 ms"), so it is correct in every source.
-   - Possible later hardware fallback, not P3a: images with Corundum could feed Tick's `pps_in` from
-     Corundum's internal PTP PPS, as vrt49's time base already does. That gives a hard-timed
-     internal PPS.
+   - **Hardware fallback on hopcap's image (owner, 2026-11-05: "wire Corundum's PPS into Tick as
+     the fallback")**: hopcap adds `tick_pps_select` in fabric, driving Tick's `pps_in`.
+     - It selects the external PPS (PMOD0 D4, `gpio_i[16]`, the pin vrt49's time base already uses
+       as its alternate source) while that pin carries a plausible 1 Hz pulse. Otherwise it selects
+       Corundum's internal PTP PPS (`ptp_pps_str`), and it switches only between pulses.
+     - On that image `pps_present` = 1 with nothing connected, so `set_time_next_pps` hard-aligns on
+       a fabric PPS edge.
+     - `DATAX_TIME_PPS_ALIGNED` therefore means "aligned on a fabric PPS edge: external when
+       connected, otherwise Corundum's free-running PTP second", not GNSS time.
+     - The selector's status (external alive, external selected) goes to spare PS GPIO inputs,
+       which the board can read. libdatax over `ip:` cannot see it. `doctor` says so, and exposing it
+       over IIO is a follow-up.
+     - `SOFT_ALIGNED` remains the fallback on images without the selector, where Tick sees no PPS
+       at all.
+     - Side effect: Tick time and vrt49's VRT timestamps share Corundum's second boundary on this
+       image.
    - The `pps_present` / `time_aligned` / epoch behaviour on a live PPS stays unproven on tron until
      a PPS source is wired. Tier 1 covers it with the fake Tick.
 10. **Capability gates.**
@@ -208,9 +221,10 @@ Two of the timed capabilities need fabric that no tron image has today:
      plan, the priming edge on `fhmInitFrequency`;
    - **late handling:** a deliberately late descriptor completes `LATE` and does not execute;
    - **MCS:** `run_mcs()` completes and `PHASE_COHERENT` follows the rules in decision 8;
-   - **PPS fallback:** with no PPS (tron today), `set_time_next_pps` returns 0, the source reads
-     `SOFT_ALIGNED`, the event fires, `get_time` reads the epoch plus elapsed time within one round
-     trip, and a schedule relative to the aligned time executes on time;
+   - **PPS:** on the image with `tick_pps_select` and no external PPS, `pps_present` reads 1 and
+     `set_time_next_pps` hard-aligns (source `PPS_ALIGNED`, Tick `time_aligned` = 1, `get_time`
+     equal to the epoch plus elapsed whole seconds of Corundum PPS). The soft fallback is tested
+     with the fake Tick and on the previous image (`pps_present` = 0);
    - P2's streaming suite still green on this image.
 5. Evidence per run (REQ-TEST-023/024):
    - completion logs, Tick edge-capture logs, measured tick rate, image hashes;

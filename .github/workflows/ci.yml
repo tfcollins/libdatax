@@ -78,6 +78,10 @@ jobs:
         env:
           DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
         run: python -m pytest -q -rs tests/python
+      - name: Hardware suite collects without a board
+        env:
+          DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
+        run: python -m pytest tests/hardware --collect-only -q
 
   support:
     runs-on: ubuntu-24.04

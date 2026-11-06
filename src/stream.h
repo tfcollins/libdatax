@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include <datax/datax.h>
 #include <datax/datax_internal.h>
@@ -42,6 +43,23 @@ struct datax_stream {
 	unsigned int *lend_fifo;
 	unsigned int lend_head, nlent;
 	bool cyclic_sent;                   /* cyclic TX: its block is enqueued */
+	/* Task 4 (stream_status.c): rate-limited status polling. */
+	bool polled_once, detect_off;
+	long long last_poll_us;
+	bool disc_pending;                  /* RX: report discontinuous next */
 };
+
+/* stream_status.c. Poll the core status register: select it, read it, clear
+ * the sticky bit by writing it back. 0, or a negative errno (no last error is
+ * set: callers treat a failure as "no detection"). Only the stream's own
+ * direction's flag is reported. */
+int datax_stream_status_poll(struct datax_stream *s, bool *overflow, bool *underflow);
+/* The flags a status word carries for a direction. */
+void datax_stream_status_parse(enum datax_direction dir, uint32_t word,
+			       bool *overflow, bool *underflow);
+/* At most one poll per 100 ms (monotonic); accounts overflows (and sets
+ * disc_pending) and underflows. A failed poll switches detection off for
+ * the stream's life. discard: probe only, ignore stale flags. */
+void datax_stream_status_check(struct datax_stream *s, bool discard);
 
 #endif

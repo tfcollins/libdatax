@@ -45,6 +45,8 @@ struct datax_device {
 	 * stream is the active stream or NULL. */
 	struct iio_device *stream_dev[2];
 	struct datax_stream *stream[2];
+	/* Status-register detection seen by streams: 0 unknown, 1 yes, 2 no. */
+	unsigned char status_detect[2];
 };
 
 /* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */

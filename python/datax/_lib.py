@@ -65,5 +65,7 @@ def get_lib():
     _sig(lib, "datax_device_set_time_next_pps", C.c_int, c_void_p, c_ull)
     _sig(lib, "datax_device_run_mcs", C.c_int, c_void_p)
     _sig(lib, "datax_internal_probe_flags", c_uint, c_void_p)
+    _sig(lib, "datax_internal_device_stream_info", C.c_int, c_void_p, C.c_int,
+         C.c_char_p, C.c_size_t, P(C.c_int))
     _lib = lib
     return lib

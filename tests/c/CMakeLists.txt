@@ -137,6 +137,41 @@ if(DATAX_LIBIIO_BUILD)
       TIMEOUT 60)
   endforeach()
 
+  # DMA overflow/underflow status. The noattr case serves a copy of the
+  # fixture, generated at configure time, without direct_reg_access on the
+  # streaming devices. The test links stream_status.c directly (as
+  # test_stream_map links the platform sources) to call the library-internal
+  # poll and parser.
+  set(DATAX_NOREG_XML ${CMAKE_CURRENT_BINARY_DIR}/ad936x-noreg.xml)
+  execute_process(COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/emu/strip_reg_access.py
+    ${PROJECT_SOURCE_DIR}/tests/emu/ad936x.xml ${DATAX_NOREG_XML}
+    cf-ad9361-lpc cf-ad9361-dds-core-lpc RESULT_VARIABLE DATAX_NOREG_RC)
+  if(NOT DATAX_NOREG_RC EQUAL 0)
+    message(FATAL_ERROR "cannot generate ${DATAX_NOREG_XML}")
+  endif()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/tests/emu/ad936x.xml
+    ${PROJECT_SOURCE_DIR}/tests/emu/strip_reg_access.py)
+  add_executable(test_stream_status test_stream_status.c
+    ${PROJECT_SOURCE_DIR}/src/stream_status.c)
+  target_link_libraries(test_stream_status PRIVATE datax iio_dep Threads::Threads)
+  target_include_directories(test_stream_status PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(test_stream_status PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_stream_status PRIVATE _POSIX_C_SOURCE=200809L)
+  foreach(mode attr noattr)
+    if(mode STREQUAL "attr")
+      set(sx ${PROJECT_SOURCE_DIR}/tests/emu/ad936x.xml)
+    else()
+      set(sx ${DATAX_NOREG_XML})
+    endif()
+    add_test(NAME test_stream_status_${mode}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu_pattern.sh
+              ${sx} cf-ad9361-lpc 1 0 $<TARGET_FILE:test_stream_status>)
+    set_tests_properties(test_stream_status_${mode} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD};DATAX_TEST_MODE=${mode}"
+      TIMEOUT 60)
+  endforeach()
+
   # ad936x immediate verbs against the emulator.
   add_executable(test_device_ad936x test_device_ad936x.c)
   target_link_libraries(test_device_ad936x PRIVATE datax iio_dep m)

@@ -36,7 +36,7 @@ struct call {
 	enum datax_completion_status status;
 	char detail[DATAX_SCHED_DETAIL_LEN];
 	pthread_t thread;
-	int r_wait, r_commit, r_flush, r_pause, r_time;
+	int r_wait, r_commit, r_flush, r_pause, r_time, r_stage;
 };
 
 struct rec {
@@ -59,6 +59,11 @@ static void probe_calls(struct rec *r, struct call *c)
 	c->r_flush = datax_sched_flush(r->s);
 	c->r_pause = datax_internal_sched_pause(r->s, true);
 	c->r_time = datax_device_get_time(r->dev, &ticks, &hz);
+	{
+		unsigned long long f = 2450000000ULL;
+
+		c->r_stage = datax_device_stage_hop_table(r->dev, &f, 1);
+	}
 }
 
 static void on_complete(struct datax_sched *s, long seq, struct datax_sched_result *res,
@@ -224,6 +229,7 @@ static void test_hook_on_flush_refuses_blocking(void)
 	      c->r_flush == -EDEADLK);
 	CHECK(c->r_pause == 0);                         /* only sets the flag */
 	CHECK(c->r_time == 0);
+	CHECK(c->r_stage == -EDEADLK);                  /* stage_hop_table takes io */
 	CHECK(strstr(datax_context_get_last_error(x.ctx), "deadlock") != NULL ||
 	      strstr(datax_context_get_last_error(x.ctx), "seq") != NULL);
 	CHECK(datax_sched_wait(x.s, a, 0, &out) == 0 && out.status == DATAX_COMPLETION_FLUSHED);

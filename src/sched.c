@@ -138,6 +138,16 @@ void datax_sched_finish(struct datax_sched *s, struct sched_cmd *c,
 							    res->executed_ticks :
 							    res->requested_ticks),
 					seq, "seq %ld: %s", seq, res->detail);
+	/* A consumed result is never published, so any other non-OK outcome
+	 * (DROPPED, FLUSHED) would vanish: report it the same way (controller
+	 * ruling; there is no DROPPED event type). */
+	else if (c->consume && res->status != DATAX_COMPLETION_OK)
+		datax_sched_emit_locked(s, DATAX_EVT_LATE_COMMAND,
+					datax_devtime_to_hw(s->dev, res->requested_ticks), seq,
+					"seq %ld: %s: %s", seq,
+					res->status == DATAX_COMPLETION_DROPPED ? "DROPPED" :
+					res->status == DATAX_COMPLETION_FLUSHED ? "FLUSHED" : "?",
+					res->detail);
 	c->res = *res;
 	publish(s, c);
 }

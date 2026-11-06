@@ -25,8 +25,17 @@
  * The pipeline. Tunes are queued in time order. Each is a rise/fall pulse on
  * bit 0 (rise reported when no other reported command is within the report
  * spacing, so with dense hops every Nth rise is reported); a priming edge
- * (unreported) precedes the first tune after enabling or after the pipeline
- * drained. For edges E0, E1, ... in time order, the frequency of the tune at
+ * (unreported) precedes the first tune after enabling or after the
+ * pipeline drained.
+ *
+ * Pulse width (controller ruling): min(10 ms, half the distance to the next
+ * edge on bit 0). Only 10 ms is proven on hardware (tick
+ * examples/adrv9009_fhm_hop_demo.py, hopcap HopPlan.pulse_ticks); an edge's
+ * fall is placed 10 ms after its rise and pulled in when the next edge is
+ * queued in the same uncommitted batch. Once committed it cannot move, so
+ * the next edge must then be at least two pulses later. Narrower pulses
+ * (down to FHM_PULSE_MIN_US) are unproven: the Task 8 hardware run must
+ * verify them by PLL readback on every edge. For edges E0, E1, ... in time order, the frequency of the tune at
  * Ej must be staged after E(j-2) fired and before E(j-1) fires. The
  * scheduler's hooks do it: a reported edge's completion hook, or the poll
  * hook once an unreported edge's time plus a margin has passed, stages the
@@ -38,6 +47,7 @@
  * ctx->lock. queue_tune takes fhm->lock then s->lock, never io.
  */
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,15 +74,14 @@
 /* Host-side set (decision 10): the engine needs only the next frequency. */
 #define FHM_TABLE_DEPTH 64u
 #define FHM_STAGE_SAMPLES 5u
-/* Trigger pulse width. Hardware-proven only at 10 ms (tick
- * examples/adrv9009_fhm_hop_demo.py, hopcap HopPlan.pulse_ticks), which
- * dense hops cannot use; 100 us is unproven until the Task 8 run. */
-#define FHM_PULSE_US 100ULL
+/* Trigger pulse: the proven 10 ms, shrunk to half the distance to the next
+ * edge (see the file comment), never below FHM_PULSE_MIN_US. Consecutive
+ * edges are therefore at least 2 x the pulse actually used apart. */
+#define FHM_PULSE_MAX_US 10000ULL
+#define FHM_PULSE_MIN_US 50ULL
 /* After an edge's time, before the next staging write may land (Tick
  * dispatch and the engine's latch). */
 #define FHM_MARGIN_US 100ULL
-/* Consecutive edges: rise, fall, then at least a pulse low. */
-#define FHM_MIN_GAP_US (2 * FHM_PULSE_US)
 #define FHM_MIN_LEAD_US 1000ULL
 #define TRIGGER_MASK 0x1u          /* GPIO bit 0 -> TAL_GPIO_0 */
 
@@ -87,7 +96,10 @@ struct fhm_edge {
 	bool staged;               /* hz written before the previous edge */
 	bool late;                 /* hz could not be staged in time */
 	bool fire_pending;         /* reconcile: fired, not yet processed */
+	bool behind;               /* the previous edge did not fire */
 	int stage_err;             /* the staging write failed */
+	long fall_seq;             /* the fall ending this pulse */
+	unsigned long long pulse;  /* rise to fall, API ticks */
 };
 
 struct datax_fhm {
@@ -96,6 +108,7 @@ struct datax_fhm {
 	size_t ntable;
 	unsigned long long stage_us;   /* DATAX_LIMIT_HOP_STAGE_US */
 	bool fresh;                    /* FHM (re)enabled: the next tune primes */
+	bool enabled;                  /* this context enabled FHM: disable at teardown */
 	struct fhm_edge *e;            /* edges in time order */
 	size_t n, cap;
 };
@@ -220,6 +233,10 @@ void datax_fhm_free(struct datax_device *dev)
 {
 	if (!dev || !dev->fhm)
 		return;
+	/* Leave the chip as found: FHM off, after the scheduler was destroyed
+	 * (its queue flushed). Best effort. */
+	if (dev->fhm->enabled)
+		(void)phy_write_u64(dev, ATTR_ENABLE, 0);
 	pthread_mutex_destroy(&dev->fhm->lock);
 	free(dev->fhm->e);
 	free(dev->fhm);
@@ -296,6 +313,14 @@ static void set_late(struct datax_sched *s, struct fhm_edge *e)
 				 "seq %ld: stage late", e->seq);
 }
 
+/* An unreported tune that cannot land on its frequency. */
+static void emit_unreported(struct datax_sched *s, const struct fhm_edge *e, const char *what)
+{
+	if (!e->reported)
+		datax_sched_emit(s, DATAX_EVT_LATE_COMMAND, edge_hw(s, e), e->seq,
+				 "seq %ld: %s", e->seq, what);
+}
+
 static void on_fired(struct datax_sched *s, struct fhm_edge *e)
 {
 	struct datax_device *dev = s->dev;
@@ -310,9 +335,19 @@ static void on_fired(struct datax_sched *s, struct fhm_edge *e)
 	dev->single_chip_tuned = true;
 	dev->caps.flags &= ~(1u << DATAX_CAP_PHASE_COHERENT);
 	pthread_mutex_unlock(&dev->ctx->lock);
+	if (e->behind)
+		emit_unreported(s, e, "previous edge did not fire; lands one behind");
 	/* Its frequency had to be staged before the previous edge, now past. */
-	if (!e->staged && !e->late && !e->stage_err)
+	else if (!e->staged && !e->late && !e->stage_err)
 		set_late(s, e);
+}
+
+/* Edge i did not fire for a host-known reason: the engine did not move, so
+ * the next tune commits the frequency armed for this one (one behind). */
+static void mark_next_behind(struct datax_fhm *m, size_t i)
+{
+	if (i + 1 < m->n && m->e[i + 1].hz && m->e[i + 1].st == E_LIVE)
+		m->e[i + 1].behind = true;
 }
 
 /*
@@ -390,10 +425,14 @@ static bool settled(const struct fhm_edge *e)
 	return !e->hz || e->staged || e->late || e->stage_err || e->st == E_NOEDGE;
 }
 
-/* Drop edges nobody needs any more; keep the last two for ordering. */
-static void trim(struct datax_fhm *m)
+/* Drop edges nobody needs any more (their pulse is over too); keep the
+ * last two for ordering. */
+static void trim(struct datax_fhm *m, struct datax_sched *s)
 {
-	while (m->n > 2 && m->e[0].st != E_LIVE && settled(&m->e[1]) && settled(&m->e[2]))
+	unsigned long long now = last_hw(s);
+
+	while (m->n > 2 && m->e[0].st != E_LIVE && settled(&m->e[1]) && settled(&m->e[2]) &&
+	       edge_hw(s, &m->e[0]) + m->e[0].pulse < now)
 		remove_edge(m, &m->e[0]);
 }
 
@@ -407,35 +446,61 @@ static void fhm_poll(struct datax_sched *s, unsigned long long hw_now, void *use
 	pthread_mutex_lock(&m->lock);
 	reconcile(m, s);
 	advance(m, s);
-	trim(m);
+	trim(m, s);
 	pthread_mutex_unlock(&m->lock);
 }
 
-/* Reported tune: stage late, stage failure or the PLL readback. */
+/* Set r's status and put what, ahead of any detail it already carries
+ * (such as "poller lagged; ..."). */
+static void __attribute__((format(printf, 3, 4)))
+set_result(struct datax_sched_result *r, enum datax_completion_status st, const char *fmt, ...)
+{
+	char what[DATAX_SCHED_DETAIL_LEN], old[DATAX_SCHED_DETAIL_LEN];
+	size_t n;
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(what, sizeof(what), fmt, ap);
+	va_end(ap);
+	snprintf(old, sizeof(old), "%s", r->detail);
+	r->status = st;
+	n = strlen(what);
+	memcpy(r->detail, what, n + 1);
+	if (old[0] && n + 2 < sizeof(r->detail)) {
+		size_t k = strlen(old), room = sizeof(r->detail) - n - 3;
+
+		memcpy(r->detail + n, "; ", 2);
+		if (k > room)
+			k = room;
+		memcpy(r->detail + n + 2, old, k);
+		r->detail[n + 2 + k] = '\0';
+	}
+}
+
+/* Reported tune: one behind, stage late, stage failure or the PLL readback. */
 static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 		    struct datax_sched_result *r)
 {
 	unsigned long long got = 0;
 	int ret;
 
+	if (e->behind) {
+		set_result(r, DATAX_COMPLETION_DROPPED, "previous edge did not fire; lands one behind");
+		return;
+	}
 	if (e->late) {
-		r->status = DATAX_COMPLETION_LATE;
-		snprintf(r->detail, sizeof(r->detail), "stage late");
+		set_result(r, DATAX_COMPLETION_LATE, "stage late");
 		return;
 	}
 	if (e->stage_err) {
-		r->status = DATAX_COMPLETION_DROPPED;
-		snprintf(r->detail, sizeof(r->detail), "stage write failed (%d)", e->stage_err);
+		set_result(r, DATAX_COMPLETION_DROPPED, "stage write failed (%d)", e->stage_err);
 		return;
 	}
 	ret = phy_read_u64(s->dev, ATTR_HOP, &got);
-	if (ret) {
-		r->status = DATAX_COMPLETION_DROPPED;
-		snprintf(r->detail, sizeof(r->detail), "PLL readback failed (%d)", ret);
-	} else if (got != e->hz) {
-		r->status = DATAX_COMPLETION_DROPPED;
-		snprintf(r->detail, sizeof(r->detail), "PLL %llu Hz, expected %llu Hz", got, e->hz);
-	}
+	if (ret)
+		set_result(r, DATAX_COMPLETION_DROPPED, "PLL readback failed (%d)", ret);
+	else if (got != e->hz)
+		set_result(r, DATAX_COMPLETION_DROPPED, "PLL %llu Hz, expected %llu Hz", got, e->hz);
 }
 
 static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_result *r,
@@ -459,10 +524,18 @@ static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_resu
 	record = r->tick_status != UINT32_MAX;
 	if (e->st == E_LIVE) {
 		if (record && (r->tick_status == DATAX_TICK_STATUS_EXECUTED ||
-			       r->tick_status == DATAX_TICK_STATUS_LATE_EXECUTED))
+			       r->tick_status == DATAX_TICK_STATUS_LATE_EXECUTED)) {
 			on_fired(s, e);
-		else
+		} else {
 			e->st = E_NOEDGE;     /* dropped, flushed, never written */
+			/* Host-known no-fire (host-late, write failure, late-PPS
+			 * drop, Tick drop record): the next tune lands one behind.
+			 * Not on flush/destroy (it goes too), nor a lost report
+			 * (the edge most likely fired). */
+			if (r->status != DATAX_COMPLETION_FLUSHED &&
+			    strncmp(r->detail, "no completion", 13))
+				mark_next_behind(m, (size_t)(e - m->e));
+		}
 	}
 	if (record && e->st == E_FIRED) {
 		/* Read the PLL back before staging: a staging write can take long
@@ -485,16 +558,25 @@ static int cmp_ull(const void *a, const void *b)
 }
 
 /* The staging round trip: FHM_STAGE_SAMPLES writes, each between two
- * device-time reads (so each delta is one write plus one read). io held if
- * a scheduler exists. */
+ * device-time reads, less the median cost of a back-to-back time read (so
+ * each sample is one write). io held if a scheduler exists. */
 static int measure_stage(struct datax_device *dev, unsigned long long hz,
 			 unsigned long long *us)
 {
-	unsigned long long t[FHM_STAGE_SAMPLES + 1], d[FHM_STAGE_SAMPLES], tick_hz;
+	unsigned long long t[FHM_STAGE_SAMPLES + 1], d[FHM_STAGE_SAMPLES], tick_hz, rc;
 	int ret = datax_tick_read_limits(dev, &tick_hz, NULL, NULL);
 
 	if (ret)
 		return ret;
+	for (unsigned int i = 0; i <= 3; i++) {
+		ret = datax_tick_read_u64(dev, "current_time_ticks", &t[i]);
+		if (ret)
+			return ret;
+	}
+	for (unsigned int i = 0; i < 3; i++)
+		d[i] = t[i + 1] - t[i];
+	qsort(d, 3, sizeof(d[0]), cmp_ull);
+	rc = d[1];
 	for (unsigned int i = 0; i <= FHM_STAGE_SAMPLES; i++) {
 		ret = datax_tick_read_u64(dev, "current_time_ticks", &t[i]);
 		if (!ret && i < FHM_STAGE_SAMPLES)
@@ -503,7 +585,7 @@ static int measure_stage(struct datax_device *dev, unsigned long long hz,
 			return ret;
 	}
 	for (unsigned int i = 0; i < FHM_STAGE_SAMPLES; i++)
-		d[i] = t[i + 1] - t[i];
+		d[i] = t[i + 1] - t[i] > rc ? t[i + 1] - t[i] - rc : 0;
 	qsort(d, FHM_STAGE_SAMPLES, sizeof(d[0]), cmp_ull);
 	*us = (d[FHM_STAGE_SAMPLES / 2] * 1000000ULL + tick_hz - 1) / tick_hz;
 	if (!*us)
@@ -581,6 +663,20 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 		ret = datax_error_ret(dev->ctx, -ret, "fhm",
 				      "stage_hop_table: writing %s failed (%d)", ATTR_ENABLE, ret);
 		goto out;
+	}
+	m->enabled = true;
+	/* The driver can swallow a TALISE_setFhmMode failure (adrv9009.c
+	 * FHM_ENABLE: its return is not checked): read it back. */
+	{
+		unsigned long long on = 0;
+
+		ret = phy_read_u64(dev, ATTR_ENABLE, &on);
+		if (ret || on != 1) {
+			ret = datax_error_ret(dev->ctx, EIO, "fhm",
+					      "stage_hop_table: FHM did not enable (%s reads %llu, "
+					      "err %d)", ATTR_ENABLE, on, ret);
+			goto out;
+		}
 	}
 	ret = measure_stage(dev, uniq[0], &us);
 	if (ret) {
@@ -673,6 +769,45 @@ static void unqueue(struct datax_sched *s, const long *seqs, size_t n)
 	pthread_mutex_unlock(&s->lock);
 }
 
+/* The fall ending live's pulse can still move (its batch is uncommitted). */
+static bool fall_movable(struct datax_sched *s, const struct fhm_edge *live)
+{
+	const struct sched_cmd *c;
+	bool movable;
+
+	pthread_mutex_lock(&s->lock);
+	c = datax_sched_find(s, live->fall_seq);
+	movable = c && c->state == CMD_BUILD;
+	pthread_mutex_unlock(&s->lock);
+	return movable;
+}
+
+/* Least distance after live for the next edge: two pulses, the pulse
+ * shrunk to the minimum while its fall can still move. */
+static unsigned long long min_after(struct datax_sched *s, const struct fhm_edge *live)
+{
+	return 2 * (fall_movable(s, live) ? us_ticks(FHM_PULSE_MIN_US, s->tick_hz) : live->pulse);
+}
+
+/* Pull live's fall in to half the distance to the next edge at `next`
+ * (never longer than it is). */
+static void fit_pulse(struct datax_sched *s, struct fhm_edge *live, datax_time next)
+{
+	unsigned long long p = (next - live->api) / 2;
+	struct sched_cmd *c;
+
+	if (p >= live->pulse)
+		return;
+	pthread_mutex_lock(&s->lock);
+	c = datax_sched_find(s, live->fall_seq);
+	if (c && c->state == CMD_BUILD) {
+		c->api_ts = live->api + p;
+		c->hw_ts = datax_devtime_to_hw(s->dev, c->api_ts);
+		live->pulse = p;
+	}
+	pthread_mutex_unlock(&s->lock);
+}
+
 /* consume: the tune's result is not kept (timed set_frequency: the caller
  * has no seq to wait on). Its hook still verifies it. */
 static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
@@ -680,8 +815,9 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 {
 	struct datax_device *dev = s->dev;
 	struct datax_fhm *m;
-	const struct fhm_edge *last = NULL, *live = NULL;
-	unsigned long long hzt = s->tick_hz, gap, pulse, window, lead, now, when_hw;
+	struct fhm_edge *last = NULL, *live = NULL;
+	unsigned long long hzt = s->tick_hz, pmax, ppulse, window, lead, now, when_hw;
+	datax_time first;
 	bool prime, report = true;
 	long seqs[4] = { 0, 0, 0, 0 };
 	long ret;
@@ -691,14 +827,14 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 		return ret;
 	m = fhm_get(dev, false);
 	pthread_mutex_lock(&m->lock);
-	gap = us_ticks(FHM_MIN_GAP_US, hzt);
-	pulse = us_ticks(FHM_PULSE_US, hzt);
+	pmax = us_ticks(FHM_PULSE_MAX_US, hzt);
 	/* Time to stage one frequency after an edge: a poll period, the
 	 * staging round trip (twice, as it varies under load) and the margin. */
 	window = us_ticks(2 * m->stage_us + s->poll_us + FHM_MARGIN_US, hzt);
-	lead = window + pulse;
+	lead = window + 2 * us_ticks(FHM_PULSE_MIN_US, hzt);
 	if (lead < us_ticks(FHM_MIN_LEAD_US, hzt))
 		lead = us_ticks(FHM_MIN_LEAD_US, hzt);
+	ppulse = lead / 2 < pmax ? lead / 2 : pmax;
 	pthread_mutex_lock(&s->lock);
 	now = s->last_hw + ns_ticks(datax_mono_ns() - s->last_hw_mono, hzt);
 	pthread_mutex_unlock(&s->lock);
@@ -707,23 +843,40 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 	for (size_t i = m->n; i-- > 0 && !live;)
 		if (m->e[i].st != E_NOEDGE)
 			live = &m->e[i];
-	if (live && when < live->api + gap) {
-		ret = datax_error_ret(s->ctx, EINVAL, "fhm",
-				      "queue_tune: tunes must be queued in time order, at least "
-				      "%llu us apart (the previous edge is at %llu)",
-				      FHM_MIN_GAP_US, live->api);
-		goto out;
-	}
 	/* A priming edge when the engine was just enabled, or when the last
 	 * edge has fired (or is about to) so nothing is left to commit this
 	 * tune's frequency: the next edge would commit whatever was armed. */
 	prime = m->fresh || !last || last->st == E_NOEDGE ||
 		edge_hw(s, last) <= now + window;
-	if (prime && (when < lead || (live && when - lead < live->api + gap))) {
+	if (prime && when < lead) {
 		ret = datax_error_ret(s->ctx, EINVAL, "fhm",
 				      "queue_tune: the tune at %llu needs a priming edge %llu us "
-				      "before it, too close to the previous edge", when,
-				      lead * 1000000ULL / hzt);
+				      "before it", when, lead * 1000000ULL / hzt);
+		goto out;
+	}
+	first = prime ? when - lead : when;
+	/* In time order, rise-fall-rise well formed: at least two pulses
+	 * after the previous edge (the pulse it keeps). */
+	if (live && (first <= live->api || first - live->api < min_after(s, live))) {
+		if (prime && when > live->api)
+			ret = datax_error_ret(s->ctx, EINVAL, "fhm",
+					      "queue_tune: the tune at %llu needs a priming edge %llu "
+					      "us before it, too close to the previous edge (at %llu)",
+					      when, lead * 1000000ULL / hzt, live->api);
+		else
+			ret = datax_error_ret(s->ctx, EINVAL, "fhm",
+					      "queue_tune: tunes must be queued in time order, at "
+					      "least %llu us after the previous edge (at %llu)",
+					      min_after(s, live) * 1000000ULL / hzt, live->api);
+		goto out;
+	}
+	/* A priming edge inside the guard margin would fail the commit under
+	 * its own seq: refuse here, naming the tune. */
+	if (prime && datax_devtime_to_hw(dev, first) < now + s->guard_ticks) {
+		ret = datax_error_ret(s->ctx, ETIME, "fhm",
+				      "queue_tune: the tune at %llu needs a priming edge %llu us "
+				      "before it, inside the guard margin of now (%llu)", when,
+				      lead * 1000000ULL / hzt, datax_devtime_from_hw(dev, now));
 		goto out;
 	}
 	/* Ruling 1: report the rise only when no reported command is closer
@@ -749,18 +902,20 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 			ret = datax_error_ret(s->ctx, ENOMEM, "fhm", "out of memory");
 			goto out;
 		}
+		if (live)
+			live = e + (live - m->e);
 		m->e = e;
 		m->cap = cap;
 	}
 	if (prime) {
-		seqs[0] = enqueue_edge(s, when - lead, true, false, false, m);
+		seqs[0] = enqueue_edge(s, first, true, false, false, m);
 		if (seqs[0] > 0)
-			seqs[1] = enqueue_edge(s, when - lead + pulse, false, false, false, m);
+			seqs[1] = enqueue_edge(s, first + ppulse, false, false, false, m);
 	}
 	if (!prime || seqs[1] > 0) {
 		seqs[2] = enqueue_edge(s, when, true, report, consume, m);
 		if (seqs[2] > 0)
-			seqs[3] = enqueue_edge(s, when + pulse, false, false, false, m);
+			seqs[3] = enqueue_edge(s, when + pmax, false, false, false, m);
 	}
 	if (seqs[3] <= 0) {
 		for (int i = 0; i < 4; i++)
@@ -769,10 +924,14 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 		unqueue(s, seqs, 4);
 		goto out;
 	}
+	if (live)
+		fit_pulse(s, live, first);
 	if (prime)
-		m->e[m->n++] = (struct fhm_edge){ .seq = seqs[0], .api = when - lead };
+		m->e[m->n++] = (struct fhm_edge){ .seq = seqs[0], .api = first,
+						  .fall_seq = seqs[1], .pulse = ppulse };
 	m->e[m->n++] = (struct fhm_edge){ .seq = seqs[2], .api = when, .hz = hz,
-					  .reported = report };
+					  .reported = report, .fall_seq = seqs[3],
+					  .pulse = pmax };
 	m->fresh = false;
 	(void)datax_sched_set_poll_hook(s, fhm_poll, m);
 	ret = seqs[2];
@@ -832,8 +991,7 @@ int datax_fhm_timed_set_frequency(struct datax_device *dev, unsigned int ch,
 	}
 	/* The caller gets no seq, so the result is not kept (it would pile up
 	 * on a scheduler nobody holds). The hook still stages and verifies it;
-	 * a LATE result raises DATAX_EVT_LATE_COMMAND, a DROPPED one (PLL
-	 * mismatch) has no surface. */
+	 * any non-OK result raises DATAX_EVT_LATE_COMMAND (datax_sched_finish). */
 	seq = queue_tune(s, when, ch, hz, true);
 	ret = seq < 0 ? (int)seq : datax_sched_commit(s);
 	datax_sched_put(s);

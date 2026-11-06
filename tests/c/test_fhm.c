@@ -26,6 +26,7 @@
 
 #include "check.h"
 #include "fake_tick.h"
+#include "internal.h"      /* dev->single_chip_tuned (Task 5 reads it) */
 
 #define HZ        100000000ULL
 #define MS        (HZ / 1000)
@@ -55,12 +56,16 @@ struct fshim {
 	size_t n;
 	unsigned long long stall_hz;    /* one-shot: stall the write staging this */
 	unsigned long long stall_ticks;
+	bool enable_reads_zero;         /* the driver swallowed the enable */
+	unsigned int enable_writes[2];  /* writes of 0 and 1 */
 };
 
 static int fshim_read(void *h, const char *attr, char *buf, size_t len)
 {
 	struct fshim *sh = h;
 
+	if (sh->enable_reads_zero && !strcmp(attr, "frequency_hopping_mode_enable"))
+		return snprintf(buf, len, "0\n");
 	return fake_fhm_read(sh->m, attr, buf, len);
 }
 
@@ -70,6 +75,11 @@ static int fshim_write(void *h, const char *attr, const char *val)
 	unsigned long long v = strtoull(val, NULL, 10), stall = 0;
 	int ret;
 
+	if (!strcmp(attr, "frequency_hopping_mode_enable")) {
+		pthread_mutex_lock(&sh->mu);
+		sh->enable_writes[v ? 1 : 0]++;
+		pthread_mutex_unlock(&sh->mu);
+	}
 	if (strcmp(attr, "frequency_hopping_mode"))
 		return fake_fhm_write(sh->m, attr, val);
 	pthread_mutex_lock(&sh->mu);
@@ -94,6 +104,33 @@ static int fshim_write(void *h, const char *attr, const char *val)
 }
 
 static const struct datax_tick_ops fshim_ops = { fshim_read, fshim_write };
+
+/* Tick shim: forwards to the fake; can fail the Nth descriptor write. */
+struct tshim {
+	struct fake_tick *f;
+	pthread_mutex_t mu;
+	unsigned int ndesc, fail_at;     /* 1-based; 0 never */
+};
+
+static int tshim_read(void *h, const char *attr, char *buf, size_t len)
+{
+	return fake_tick_read(((struct tshim *)h)->f, attr, buf, len);
+}
+
+static int tshim_write(void *h, const char *attr, const char *val)
+{
+	struct tshim *sh = h;
+	bool fail = false;
+
+	if (!strcmp(attr, "command_descriptor")) {
+		pthread_mutex_lock(&sh->mu);
+		fail = ++sh->ndesc == sh->fail_at;
+		pthread_mutex_unlock(&sh->mu);
+	}
+	return fail ? -EIO : fake_tick_write(sh->f, attr, val);
+}
+
+static const struct datax_tick_ops tshim_ops = { tshim_read, tshim_write };
 
 static size_t stages(struct fshim *sh)
 {
@@ -171,6 +208,7 @@ struct fx {
 	struct fake_tick *f;
 	struct fake_fhm *m;
 	struct fshim sh;
+	struct tshim tsh;
 	struct datax_sched *s;
 	struct evrec ev;
 	unsigned long ndesc;   /* descriptors committed so far (rise + fall per edge) */
@@ -199,6 +237,7 @@ static void fx_open(struct fx *x, bool create)
 	memset(x, 0, sizeof(*x));
 	CHECK(uri != NULL);
 	CHECK(pthread_mutex_init(&x->sh.mu, NULL) == 0);
+	CHECK(pthread_mutex_init(&x->tsh.mu, NULL) == 0);
 	CHECK(pthread_mutex_init(&x->ev.m, NULL) == 0);
 	x->f = fake_tick_new(&cfg);
 	x->m = fake_fhm_new(0);
@@ -206,9 +245,10 @@ static void fx_open(struct fx *x, bool create)
 	fake_fhm_attach(x->m, x->f);
 	x->sh.m = x->m;
 	x->sh.f = x->f;
+	x->tsh.f = x->f;
 	CHECK(datax_context_create_from_uri(uri, &x->ctx) == 0);
 	CHECK(datax_context_get_device(x->ctx, 0, &x->dev) == 0);
-	CHECK(datax_internal_tick_bind_fake(x->dev, &fake_tick_ops, x->f) == 0);
+	CHECK(datax_internal_tick_bind_fake(x->dev, &tshim_ops, &x->tsh) == 0);
 	CHECK(datax_internal_fhm_bind_fake(x->dev, &fshim_ops, &x->sh) == 0);
 	CHECK(datax_context_set_event_callback(x->ctx, on_event, &x->ev) == 0);
 	fake_tick_advance(x->f, 1000 * MS);
@@ -226,6 +266,7 @@ static void fx_close(struct fx *x)
 	fake_fhm_free(x->m);
 	fake_tick_free(x->f);
 	pthread_mutex_destroy(&x->sh.mu);
+	pthread_mutex_destroy(&x->tsh.mu);
 	pthread_mutex_destroy(&x->ev.m);
 }
 
@@ -245,17 +286,22 @@ static size_t stage(struct fx *x, const unsigned long long *freqs, size_t n)
 }
 
 /* Wait until the poller has written every committed descriptor that fits
- * (one queue entry spare), so the test never moves time past a command the
- * feeder has not had a chance to write (it would complete host-late). */
+ * (one queue entry spare) and drained the completion slot, so the test never
+ * moves time past a command the feeder has not had a chance to write (it
+ * would complete host-late) or past a reported command Tick holds behind an
+ * unacked record (tick#38; the real clock does not wait for the poller). */
 static void fed(struct fx *x)
 {
 	unsigned long want;
 
 	for (int w = 0; w < 3000; w++) {
 		size_t done = fake_tick_exec_log(x->f, 0, NULL, 0);
+		char b[32] = "1";
 
 		want = done + 15 < x->ndesc ? (unsigned long)done + 15 : x->ndesc;
-		if (fake_tick_access_count(x->f, "command_descriptor", true) >= want)
+		(void)fake_tick_read(x->f, "completion_sequence_id", b, sizeof(b));
+		if (fake_tick_access_count(x->f, "command_descriptor", true) >= want &&
+		    !strtoull(b, NULL, 0))
 			return;
 		msleep(1);
 	}
@@ -349,14 +395,17 @@ static void test_stage_table_band_and_depth(void)
 	CHECK(stages(&x.sh) == 0);
 
 	/* 64 entries: accepted, FHM enabled on chip A, the stage round trip
-	 * measured (median of 5 staging writes). */
+	 * measured (median of 5 staging writes), less the device-time read
+	 * (here 30 us per Tick access). */
 	fake_fhm_set_access_cost(x.m, STAGE_COST);
+	fake_tick_set_access_cost(x.f, 30 * US);
 	CHECK(datax_device_stage_hop_table(x.dev, freqs, 64) == 0);
+	fake_tick_set_access_cost(x.f, 0);
 	fake_fhm_set_access_cost(x.m, 0);
 	CHECK(fake_fhm_enabled(x.m));
 	CHECK(stages(&x.sh) == 5);
 	CHECK(datax_caps_get_limit(caps, DATAX_LIMIT_HOP_STAGE_US, &v) == 0);
-	CHECK(v == STAGE_US);
+	CHECK(v == STAGE_US);                 /* 80 us per sample less 30 us */
 	/* The table is a set: duplicates fold. */
 	{
 		unsigned long long d[3] = { F_A, F_A, F_B };
@@ -382,6 +431,42 @@ static void test_stage_table_band_and_depth(void)
 	CHECK(datax_device_stage_hop_table(x.dev, freqs, 2) == -ENOTSUP);
 	fx_close(&x);
 	printf("test_stage_table_band_and_depth: ok\n");
+}
+
+/* The driver can swallow a TALISE_setFhmMode failure: stage_hop_table reads
+ * the enable back and fails -EIO. Either way, the context that enabled FHM
+ * disables it at teardown (after its scheduler is flushed); one that never
+ * enabled it writes nothing. */
+static void test_enable_checked_and_disabled_at_teardown(void)
+{
+	struct fx x;
+	unsigned long long f = F_A;
+
+	fx_open(&x, true);
+	x.sh.enable_reads_zero = true;
+	CHECK(datax_device_stage_hop_table(x.dev, &f, 1) == -EIO);
+	CHECK(strstr(lasterr(&x), "did not enable") != NULL);
+	x.sh.enable_reads_zero = false;
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 0, F_A) == -EINVAL);
+	(void)stage(&x, &f, 1);
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	CHECK(fake_fhm_enabled(x.m));
+	CHECK(x.sh.enable_writes[0] == 0);
+	datax_context_destroy(x.ctx);          /* destroys the scheduler first */
+	x.ctx = NULL;
+	x.s = NULL;
+	CHECK(!fake_fhm_enabled(x.m));
+	CHECK(x.sh.enable_writes[0] == 1);
+	CHECK(fake_tick_exec_log(x.f, 0, NULL, 0) == 0);   /* flushed, never ran */
+	fx_close(&x);
+
+	fx_open(&x, false);                    /* never staged: no write */
+	datax_context_destroy(x.ctx);
+	x.ctx = NULL;
+	CHECK(x.sh.enable_writes[0] == 0 && x.sh.enable_writes[1] == 0);
+	fx_close(&x);
+	printf("test_enable_checked_and_disabled_at_teardown: ok\n");
 }
 
 static void test_tune_requires_staged(void)
@@ -457,11 +542,13 @@ static void test_fhm_one_behind_pipeline(void)
 	to_edge(&x, 1, 200 * MS);                 /* priming edge: fhmInitFrequency */
 	CHECK(now(&x) < t0);
 	CHECK(fake_fhm_pll_hz(x.m) == F_INIT);
+	CHECK(!x.dev->single_chip_tuned);         /* a priming edge is not a tune */
 	WAIT_FOR(stages(&x.sh) == base + 2);      /* h2 after the priming edge */
 	CHECK(stage_hz(&x.sh, base + 1) == F_B);
 
 	to_edge(&x, 2, 50 * MS);
 	CHECK(fake_fhm_pll_hz(x.m) == F_A);
+	WAIT_FOR(x.dev->single_chip_tuned);       /* decision 7: PHASE_COHERENT off */
 	WAIT_FOR(stages(&x.sh) == base + 3);
 	CHECK(stage_hz(&x.sh, base + 2) == F_C);
 
@@ -477,14 +564,20 @@ static void test_fhm_one_behind_pipeline(void)
 		CHECK(c.requested_ticks == t0 + (unsigned long long)i * 20 * MS);
 		CHECK(c.executed_ticks == c.requested_ticks);
 	}
+	fake_tick_advance(x.f, 11 * MS);           /* past the last 10 ms pulse */
 	msleep(5);
 	CHECK(stages(&x.sh) == base + 3);          /* nothing staged past the plan */
 	CHECK(fake_fhm_edges(x.m) == 4);
-	/* ground truth: 4 rises and 4 falls, the priming rise first, before t0 */
+	/* ground truth: 4 rises and 4 falls, the priming rise first, before t0;
+	 * hops 20 ms apart keep the proven 10 ms pulse (the last one too), the
+	 * priming pulse is half its lead */
 	n = fake_tick_exec_log(x.f, 0, rec, 16);
 	CHECK(n == 8);
 	CHECK(rec[0].requested_ticks < t0 && rec[0].requested_ticks > t0 - 10 * MS);
 	CHECK(!rec[0].reported);
+	CHECK(rec[1].requested_ticks - rec[0].requested_ticks == (t0 - rec[0].requested_ticks) / 2);
+	for (int i = 1; i < 4; i++)
+		CHECK(rec[2 * i + 1].requested_ticks - rec[2 * i].requested_ticks == 10 * MS);
 	CHECK(count_events(&x.ev, DATAX_EVT_LATE_COMMAND) == 0);
 	fx_close(&x);
 	printf("test_fhm_one_behind_pipeline: ok\n");
@@ -614,6 +707,19 @@ static void test_dense_hops_report_every_nth(void)
 	}
 	CHECK(fake_fhm_edges(x.m) == N + 1);
 	CHECK(count_events(&x.ev, DATAX_EVT_LATE_COMMAND) == 0);
+	/* the pulse shrinks to half the 2 ms hop; the last keeps 10 ms */
+	{
+		struct fake_tick_exec rec[2 * (N + 1)];
+		size_t k;
+
+		fake_tick_advance(x.f, 11 * MS);
+		msleep(3);
+		k = fake_tick_exec_log(x.f, 0, rec, 2 * (N + 1));
+		CHECK(k == 2 * (N + 1));
+		for (int i = 1; i < N; i++)
+			CHECK(rec[2 * i + 1].requested_ticks - rec[2 * i].requested_ticks == 1 * MS);
+		CHECK(rec[2 * N + 1].requested_ticks - rec[2 * N].requested_ticks == 10 * MS);
+	}
 	fx_close(&x);
 	printf("test_dense_hops_report_every_nth: ok\n");
 }
@@ -630,8 +736,18 @@ static void test_rejected_batch_reprimes(void)
 
 	fx_open(&x, true);
 	(void)stage(&x, plan, 2);
-	CHECK(datax_sched_queue_tune(x.s, now(&x) + 5 * MS, 0, F_A) > 0);
-	CHECK(datax_sched_commit(x.s) == DATAX_ERR_LATE);   /* inside the guard */
+	/* A priming edge that would land inside the guard margin is refused by
+	 * queue_tune itself, naming the tune (not by commit under its seq). */
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 5 * MS, 0, F_A) == DATAX_ERR_LATE);
+	CHECK(strstr(lasterr(&x), "needs a priming edge") != NULL);
+	CHECK(strstr(lasterr(&x), "guard") != NULL);
+	/* A batch rejected at commit (a reported GPIO 1 ms from the tune breaks
+	 * the report spacing) takes the tune and its priming edge with it. */
+	t = now(&x) + 50 * MS;
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_A) > 0);
+	s1 = datax_sched_queue_gpio(x.s, t + 1 * MS, 0x2, 0x2);
+	CHECK(s1 > 0 && datax_sched_report(x.s, s1) == 0);
+	CHECK(datax_sched_commit(x.s) == -EINVAL);
 	t = now(&x) + 100 * MS;
 	s1 = datax_sched_queue_tune(x.s, t, 0, F_B);
 	CHECK(s1 > 0);
@@ -654,9 +770,8 @@ static void test_timed_set_frequency_uses_device_sched(void)
 	static const unsigned long long plan[2] = { F_A, F_B };
 	struct fx x;
 	struct datax_sched *s2 = NULL;
-	struct datax_completion out[4];
 	unsigned long long t;
-	size_t n = 0;
+	char want[96];
 
 	fx_open(&x, false);
 	(void)stage(&x, plan, 2);
@@ -674,8 +789,13 @@ static void test_timed_set_frequency_uses_device_sched(void)
 	x.ndesc = 4;
 	CHECK(datax_sched_create(x.dev, &s2) == -EBUSY);   /* the device's own */
 	to_edge(&x, 1, 200 * MS);
+	/* Its result is not kept, so a DROPPED verdict (here a PLL readback
+	 * mismatch) is raised as an event instead of vanishing. */
+	fake_fhm_corrupt_next_readback(x.m, 2471000000ULL);
 	to_edge(&x, 2, 50 * MS);
 	CHECK(fake_fhm_pll_hz(x.m) == F_B);
+	snprintf(want, sizeof(want), "DROPPED: PLL 2471000000 Hz, expected %llu Hz", F_B);
+	WAIT_FOR(has_event(&x.ev, DATAX_EVT_LATE_COMMAND, -2, want));
 	CHECK(now(&x) >= t);
 	/* A second timed tune reuses it (and re-primes: the pipeline drained). */
 	t = now(&x) + 100 * MS;
@@ -686,8 +806,7 @@ static void test_timed_set_frequency_uses_device_sched(void)
 	CHECK(fake_fhm_pll_hz(x.m) == F_A);
 	/* Nobody holds this scheduler, so its tunes keep no completions (the
 	 * hooks still verify them; test_sched_hooks consumed_result_not_kept). */
-	(void)out;
-	(void)n;
+	CHECK(count_events(&x.ev, DATAX_EVT_LATE_COMMAND) == 1);
 	fx_close(&x);                            /* context destroy frees it */
 	printf("test_timed_set_frequency_uses_device_sched: ok\n");
 }
@@ -713,12 +832,137 @@ static void test_reserved_bit_still_refused_for_gpio(void)
 	while (now(&x) < t)
 		fake_tick_advance(x.f, 10 * US);
 	CHECK(fake_tick_gpio(x.f) & 0x1);        /* the tune drives bit 0 high ... */
-	fake_tick_advance(x.f, 1 * MS);
-	CHECK(!(fake_tick_gpio(x.f) & 0x1));     /* ... and back low */
+	fake_tick_advance(x.f, 6 * MS);
+	CHECK((fake_tick_gpio(x.f) & 0xf) == 0x5);   /* bits 3:1 written, bit 0 held */
 	fake_tick_advance(x.f, 5 * MS);
-	CHECK((fake_tick_gpio(x.f) & 0xe) == 0x4);
+	CHECK(!(fake_tick_gpio(x.f) & 0x1));     /* ... and low after the 10 ms pulse */
 	fx_close(&x);
 	printf("test_reserved_bit_still_refused_for_gpio: ok\n");
+}
+
+/* Pulse = min(10 ms, half the distance to the next edge): a committed
+ * edge keeps its pulse, so the next must be two pulses later; inside an
+ * uncommitted batch the pulse shrinks (down to 50 us, so 100 us apart). */
+static void test_pulse_gap_rule(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	CHECK(datax_sched_queue_tune(x.s, t + 15 * MS, 0, F_B) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "at least 20000 us") != NULL);
+	CHECK(datax_sched_queue_tune(x.s, t + 20 * MS, 0, F_B) > 0);   /* still building */
+	CHECK(datax_sched_queue_tune(x.s, t + 20 * MS + 50 * US, 0, F_A) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "at least 100 us") != NULL);
+	CHECK(datax_sched_queue_tune(x.s, t + 20 * MS + 100 * US, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 8;                     /* no second prime: t was still ahead */
+	to_edge(&x, 4, 200 * MS);
+	fake_tick_advance(x.f, 11 * MS);
+	msleep(3);
+	{
+		struct fake_tick_exec rec[8];
+
+		CHECK(fake_tick_exec_log(x.f, 0, rec, 8) == 8);
+		/* prime, t (10 ms: committed alone), t+20 ms (50 us), t+20.1 ms */
+		CHECK(rec[3].requested_ticks - rec[2].requested_ticks == 10 * MS);
+		CHECK(rec[4].requested_ticks == t + 20 * MS);
+		CHECK(rec[5].requested_ticks == t + 20 * MS + 50 * US);
+		CHECK(rec[6].requested_ticks == t + 20 * MS + 100 * US);
+		CHECK(rec[7].requested_ticks - rec[6].requested_ticks == 10 * MS);
+	}
+	CHECK(fake_fhm_pll_hz(x.m) == F_A);
+	fx_close(&x);
+	printf("test_pulse_gap_rule: ok\n");
+}
+
+/* The previous tune has fired, so a new one needs a priming edge; if that
+ * edge would sit within two pulses of the previous one, queue_tune refuses. */
+static void test_prime_too_close_refused(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	to_edge(&x, 2, 200 * MS);
+	fake_tick_advance(x.f, 12 * MS);
+	msleep(3);
+	CHECK(datax_sched_queue_tune(x.s, t + 20 * MS + 500 * US, 0, F_B) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "needs a priming edge") != NULL);
+	CHECK(strstr(lasterr(&x), "too close to the previous edge") != NULL);
+	CHECK(datax_sched_queue_tune(x.s, t + 40 * MS, 0, F_B) > 0);
+	fx_close(&x);
+	printf("test_prime_too_close_refused: ok\n");
+}
+
+/* An edge that did not fire for a host-known reason (here its descriptor
+ * write failed) leaves the engine where it was, so the next tune lands one
+ * behind: reported, it completes DROPPED; unreported, an event says so. */
+static void test_previous_edge_not_fired_lands_behind(void)
+{
+	static const unsigned long long plan[3] = { F_A, F_B, F_C };
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t;
+	long s1, s2, s3;
+
+	/* (1) the priming edge's write fails: tune A is DROPPED, B is fine */
+	fx_open(&x, true);
+	(void)stage(&x, plan, 3);
+	t = now(&x) + 100 * MS;
+	s1 = datax_sched_queue_tune(x.s, t, 0, F_A);
+	s2 = datax_sched_queue_tune(x.s, t + 20 * MS, 0, F_B);
+	CHECK(s1 > 0 && s2 > 0);
+	x.tsh.fail_at = 1;
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 5;
+	to_edge(&x, 1, 200 * MS);
+	CHECK(fake_fhm_pll_hz(x.m) == F_INIT);      /* A's edge committed init */
+	c = wait_done(&x, s1);
+	CHECK(c.status == DATAX_COMPLETION_DROPPED);
+	CHECK(strstr(lasterr(&x), "previous edge did not fire; lands one behind") != NULL);
+	to_edge(&x, 2, 50 * MS);
+	c = wait_done(&x, s2);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);
+	fx_close(&x);
+
+	/* (2) dense: the reported tune A's rise fails; unreported B lands one
+	 * behind (on the frequency armed for A) with an event; C is fine */
+	fx_open(&x, true);
+	(void)stage(&x, plan, 3);
+	t = now(&x) + 100 * MS;
+	s1 = datax_sched_queue_tune(x.s, t, 0, F_A);
+	s2 = datax_sched_queue_tune(x.s, t + 2 * MS, 0, F_B);
+	s3 = datax_sched_queue_tune(x.s, t + 4 * MS, 0, F_C);
+	CHECK(s1 > 0 && s2 > 0 && s3 > 0);
+	x.tsh.fail_at = 3;                          /* prime rise, prime fall, A rise */
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 7;
+	to_edge(&x, 1, 200 * MS);
+	c = wait_done(&x, s1);
+	CHECK(c.status == DATAX_COMPLETION_DROPPED);
+	to_edge(&x, 2, 50 * MS);
+	CHECK(fake_fhm_pll_hz(x.m) == F_A);         /* B's edge: one behind */
+	WAIT_FOR(has_event(&x.ev, DATAX_EVT_LATE_COMMAND, s2,
+			   "previous edge did not fire; lands one behind"));
+	to_edge(&x, 3, 50 * MS);
+	c = wait_done(&x, s3);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_C);
+	fx_close(&x);
+	printf("test_previous_edge_not_fired_lands_behind: ok\n");
 }
 
 int main(int argc, char **argv)
@@ -735,6 +979,11 @@ int main(int argc, char **argv)
 		{ "timed_set_frequency_uses_device_sched",
 		  test_timed_set_frequency_uses_device_sched },
 		{ "reserved_bit_still_refused_for_gpio", test_reserved_bit_still_refused_for_gpio },
+		{ "enable_checked_and_disabled_at_teardown",
+		  test_enable_checked_and_disabled_at_teardown },
+		{ "pulse_gap_rule", test_pulse_gap_rule },
+		{ "prime_too_close_refused", test_prime_too_close_refused },
+		{ "previous_edge_not_fired_lands_behind", test_previous_edge_not_fired_lands_behind },
 	};
 
 	for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {

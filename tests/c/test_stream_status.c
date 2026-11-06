@@ -197,6 +197,29 @@ static void test_discontinuous_flag(void)
 	datax_context_destroy(ctx);
 }
 
+/* A poll that saw the overflow but failed to clear it still counts it. The
+ * emulator cannot fail a write or raise a flag, so the poll's outcome is fed
+ * to the fold step directly. */
+static void test_seen_overflow_survives_failed_clear(void)
+{
+	struct datax_device *dev = NULL;
+	struct datax_context *ctx = open_ctx(&dev);
+	struct datax_stream *s = NULL;
+	struct datax_stream_config c = cfg(DATAX_RX);
+
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	datax_stream_status_apply(s, -EIO, true, false, false);
+	CHECK(s->stats.overflows == 1 && s->disc_pending);
+	CHECK(s->detect_off && !s->stats.overflow_detect);
+	datax_stream_destroy(s);
+
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	datax_stream_status_apply(s, -EIO, true, false, true); /* probe: discard */
+	CHECK(s->stats.overflows == 0 && !s->disc_pending && s->detect_off);
+	datax_stream_destroy(s);
+	datax_context_destroy(ctx);
+}
+
 static void test_stream_info(void)
 {
 	struct datax_device *dev = NULL;
@@ -262,6 +285,7 @@ int main(void)
 		test_poll_sequence();
 		test_poll_rate_limited();
 		test_discontinuous_flag();
+		test_seen_overflow_survives_failed_clear();
 		test_stream_info();
 	} else if (!strcmp(mode, "noattr")) {
 		test_no_debug_attr_disables_detect();

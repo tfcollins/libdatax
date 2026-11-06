@@ -102,7 +102,8 @@ int datax_stream_status_poll(struct datax_stream *s, bool *overflow, bool *under
 	n = iio_attr_read_raw(attr, buf, sizeof(buf));
 	if (n < 0)
 		return (int)n;
-	buf[sizeof(buf) - 1] = '\0';
+	/* n bytes were read (a NUL may or may not be among them). */
+	buf[(size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1] = '\0';
 	word = strtoull(buf, &end, 0);
 	if (end == buf)
 		return -EIO;
@@ -118,10 +119,36 @@ int datax_stream_status_poll(struct datax_stream *s, bool *overflow, bool *under
 	return 0;
 }
 
-void datax_stream_status_check(struct datax_stream *s, bool discard)
+void datax_stream_status_apply(struct datax_stream *s, int ret, bool ovf, bool unf,
+			       bool discard)
 {
 	enum datax_direction dir = s->cfg.direction;
-	bool ovf, unf;
+
+	if (!discard) {
+		/* A flag the poll saw counts even when the poll then failed
+		 * (the clear write): never lose a seen overflow. */
+		if (ovf) {
+			s->stats.overflows++;
+			s->disc_pending = true;
+		}
+		if (unf)
+			s->stats.underflows++;
+	}
+	if (ret) {
+		/* No usable status register: detection stays off for the
+		 * stream's life. Not an error of the stream itself. */
+		s->detect_off = true;
+		s->stats.overflow_detect = false;
+		s->dev->status_detect[dir] = DETECT_NO;
+		return;
+	}
+	s->stats.overflow_detect = true;
+	s->dev->status_detect[dir] = DETECT_YES;
+}
+
+void datax_stream_status_check(struct datax_stream *s, bool discard)
+{
+	bool ovf = false, unf = false;
 	long long now;
 	int ret;
 
@@ -134,24 +161,7 @@ void datax_stream_status_check(struct datax_stream *s, bool discard)
 	s->last_poll_us = now;
 	s->stats.status_polls++;
 	ret = datax_stream_status_poll(s, &ovf, &unf);
-	if (ret) {
-		/* No usable status register: detection stays off for the
-		 * stream's life. Not an error of the stream itself. */
-		s->detect_off = true;
-		s->stats.overflow_detect = false;
-		s->dev->status_detect[dir] = DETECT_NO;
-		return;
-	}
-	s->stats.overflow_detect = true;
-	s->dev->status_detect[dir] = DETECT_YES;
-	if (discard)
-		return;
-	if (ovf) {
-		s->stats.overflows++;
-		s->disc_pending = true;
-	}
-	if (unf)
-		s->stats.underflows++;
+	datax_stream_status_apply(s, ret, ovf, unf, discard);
 }
 
 int datax_internal_device_stream_info(const struct datax_device *dev,

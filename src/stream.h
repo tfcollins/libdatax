@@ -57,6 +57,10 @@ int datax_stream_status_poll(struct datax_stream *s, bool *overflow, bool *under
 /* The flags a status word carries for a direction. */
 void datax_stream_status_parse(enum datax_direction dir, uint32_t word,
 			       bool *overflow, bool *underflow);
+/* Fold a poll's result into the stream: flags seen count even if ret < 0;
+ * ret < 0 then turns detection off. Split from _check for testing. */
+void datax_stream_status_apply(struct datax_stream *s, int ret, bool ovf, bool unf,
+			       bool discard);
 /* At most one poll per 100 ms (monotonic); accounts overflows (and sets
  * disc_pending) and underflows. A failed poll switches detection off for
  * the stream's life. discard: probe only, ignore stale flags. */

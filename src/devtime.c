@@ -148,17 +148,17 @@ static int align_soft(struct datax_device *dev, struct datax_sched *s,
  * against the old counter) are dropped, and Tick's queue is emptied of
  * them. s may be NULL; otherwise io is held.
  */
-void datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched *s)
+bool datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched *s)
 {
 	unsigned long long v = 0, hw = 0;
 	unsigned int dropped = 0;
 
 	if (!atomic_load(&dev->time_armed))
-		return;
+		return false;
 	if (datax_tick_read_u64(dev, "time_aligned", &v) || !v)
-		return;
+		return false;
 	if (!atomic_exchange(&dev->time_armed, false))
-		return;                          /* another thread adopted it */
+		return false;                    /* another thread adopted it */
 	if (s) {
 		bool written = false;
 
@@ -206,6 +206,7 @@ void datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched 
 	emit_pps(dev, s, hw,
 		 "late PPS edge: device time jumped to epoch; %u queued commands dropped",
 		 dropped);
+	return true;
 }
 
 int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long epoch_ticks)
@@ -227,7 +228,7 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 	if (locked)
 		datax_sched_io_lock(s, &h);
 	/* an edge that landed since the last look moved the counter already */
-	datax_devtime_check_late_edge(dev, s);
+	(void)datax_devtime_check_late_edge(dev, s);
 	if (s && sched_has_queued(s)) {
 		ret = datax_error_ret(dev->ctx, EBUSY, "time",
 				      "scheduler has queued commands; flush first");
@@ -296,7 +297,7 @@ void datax_devtime_poll(struct datax_sched *s)
 	unsigned long long v = 0;
 	int now_state;
 
-	datax_devtime_check_late_edge(dev, s);
+	(void)datax_devtime_check_late_edge(dev, s);
 	if (datax_tick_read_u64(dev, "pps_present", &v))
 		return;
 	now_state = v ? 2 : 1;

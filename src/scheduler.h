@@ -58,12 +58,16 @@ struct datax_sched_result {
 	unsigned long long requested_ticks;  /* API ticks (as queued) */
 	unsigned long long executed_ticks;   /* API ticks; 0 when it never ran */
 	uint32_t tick_status;                /* Tick status code; UINT32_MAX: host-side */
+	bool discarded;                      /* a rejected commit discarded it (never
+					      * written; nothing is published) */
 	char detail[DATAX_SCHED_DETAIL_LEN]; /* "" for OK */
 };
 
 /*
  * Per-command completion hook. Called once per terminal outcome (a drained
- * record, host-late, a failed write, flush) before the result is published,
+ * record, host-late, a failed write, flush, a late-PPS-edge drop, or the
+ * batch being discarded by a rejected commit, with r->discarded set and
+ * nothing published) before the result is published,
  * with the I/O lock held and the state lock not held, on the thread doing
  * the Tick I/O (the poller, or flush's caller). It may change r->status and
  * r->detail, do Tick reads/writes through the seam (io is already held),
@@ -75,8 +79,10 @@ struct datax_sched_result {
  * anything it datax_sched_enqueue()s waits in the builder for the caller's
  * next commit. Destroy also finishes every outstanding command FLUSHED
  * through this hook, on the destroying thread.
- * For an unreported command it fires only on host-late, write failure or
- * flush (r is then informational; nothing is published).
+ * For an unreported command it fires only on host-late, write failure,
+ * flush or discard (r is then informational; nothing is published).
+ * Lock order with the FHM pipeline (fhm.c): io, then fhm->lock, then
+ * s->lock, then ctx->lock.
  */
 typedef void (*datax_sched_complete_fn)(struct datax_sched *s, long seq,
 					struct datax_sched_result *r, void *user);
@@ -92,6 +98,10 @@ struct datax_sched_cmd_spec {
 	uint16_t command_id, target_id;
 	uint32_t args[4];
 	bool report;                  /* REPORT_COMPLETION; spacing rule applies */
+	/* Reported, but the result is not kept: after the hook it leaves the
+	 * table instead of becoming DONE (nobody can wait on it: timed
+	 * set_frequency's tune on the device's own scheduler). */
+	bool consume;
 	datax_sched_complete_fn on_complete;  /* may be NULL */
 	void *user;
 };
@@ -100,6 +110,19 @@ struct datax_sched_cmd_spec {
  * drives the reserved line through this). Returns the seq or -errno, with
  * last-error. */
 long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spec *spec);
+
+/*
+ * Drive the masked GPIO lines to value now, through a descriptor that
+ * cannot be dropped: timestamp 0 is always late on submit, and an
+ * unreported LATE_EXECUTE_NOW command late on submit is applied at the push
+ * (Tick RTL axi_timed_command_scheduler.v lines 778-846; fake_tick.c
+ * push): it is neither queued nor reported, so neither a full queue, a
+ * flush nor the completion slot can lose it. It raises late_count by one,
+ * which s (if any) re-baselines, so no late event fires. Hold s->io when s
+ * is not NULL. 0 or the Tick write error.
+ */
+int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
+			uint32_t value);
 
 /* Install the per-iteration hook (NULL fn removes it). 0 or -EINVAL. */
 int datax_sched_set_poll_hook(struct datax_sched *s, datax_sched_poll_fn fn, void *user);
@@ -148,6 +171,7 @@ struct sched_cmd {
 	uint16_t command_id, target_id;
 	uint32_t args[4];
 	bool report;
+	bool consume;                      /* see datax_sched_cmd_spec */
 	bool lagged;                       /* a drain came after hw_ts: may be held */
 	datax_sched_complete_fn on_complete;
 	void *user;
@@ -240,7 +264,9 @@ void datax_devtime_poll(struct datax_sched *s);
 /* devtime.c: if a timed-out hard alignment is still armed and its edge has
  * landed, adopt it (clear the soft offset, drop written commands, event).
  * s may be NULL (no scheduler); otherwise io must be held. */
-void datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched *s);
+/* Returns true when it adopted an edge (the queue was flushed and PENDING
+ * commands re-based): a caller holding cached queue state must re-read it. */
+bool datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched *s);
 
 /* poller.c */
 /* At create, before the poller starts: time DATAX_SCHED_DRAIN_SAMPLES

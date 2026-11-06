@@ -51,7 +51,8 @@ set(DATAX_SOURCES
   src/stream.c
   src/stream_status.c
   src/sched.c
-  src/poller.c)
+  src/poller.c
+  src/fhm.c)
 # Tests that reach unexported internals compile DATAX_SOURCES themselves.
 list(TRANSFORM DATAX_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
 add_library(datax SHARED ${DATAX_SOURCES})

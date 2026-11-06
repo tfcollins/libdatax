@@ -38,7 +38,7 @@ int datax_device_get_time(const struct datax_device *dev,
 	if (atomic_load(&dev->time_armed))
 		for (unsigned int i = 0; i < dev->ctx->ndevices; i++)
 			if (dev->ctx->devices[i] == dev)      /* the non-const handle */
-				datax_devtime_check_late_edge(dev->ctx->devices[i], s);
+				(void)datax_devtime_check_late_edge(dev->ctx->devices[i], s);
 	ret = datax_tick_read_u64(dev, "current_time_ticks", &t);
 	if (!ret)
 		ret = datax_tick_read_limits(dev, &hz, NULL, NULL);

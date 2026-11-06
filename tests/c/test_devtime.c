@@ -548,6 +548,107 @@ static void test_late_edge_adopted_by_get_time(void)
 	printf("test_late_edge_adopted_by_get_time: ok\n");
 }
 
+/* Tick ops that log each descriptor's timestamp and deliver a PPS edge
+ * just before forwarding descriptor number fire_at (1-based; 0 never). */
+static struct {
+	pthread_mutex_t m;
+	unsigned int fire_at, n;
+	unsigned long long ts[8];
+} g_desc = { PTHREAD_MUTEX_INITIALIZER, 0, 0, { 0 } };
+
+static unsigned long long csv_u32(const char *csv, int idx)
+{
+	const char *p = csv;
+
+	for (int i = 0; i < idx; i++) {
+		p = strchr(p, ',');
+		CHECK(p != NULL);
+		p++;
+	}
+	return strtoull(p, NULL, 0);
+}
+
+static int desc_read(void *h, const char *attr, char *buf, size_t len)
+{
+	return fake_tick_read(h, attr, buf, len);
+}
+
+static int desc_write(void *h, const char *attr, const char *val)
+{
+	bool fire = false;
+
+	if (!strcmp(attr, "command_descriptor")) {
+		pthread_mutex_lock(&g_desc.m);
+		if (g_desc.n < 8)
+			g_desc.ts[g_desc.n] = csv_u32(val, 2) | csv_u32(val, 3) << 32;
+		fire = ++g_desc.n == g_desc.fire_at;
+		pthread_mutex_unlock(&g_desc.m);
+	}
+	if (fire)
+		fake_tick_pps_edge(h);     /* lands after the check, before the write */
+	return fake_tick_write(h, attr, val);
+}
+
+static const struct datax_tick_ops desc_ops = { desc_read, desc_write };
+
+static unsigned int desc_count(void)
+{
+	unsigned int n;
+
+	pthread_mutex_lock(&g_desc.m);
+	n = g_desc.n;
+	pthread_mutex_unlock(&g_desc.m);
+	return n;
+}
+
+/* Carried from review: the poller checks for a late armed PPS edge before
+ * every descriptor write, so once the counter has jumped no further
+ * descriptor is written under the old offset. The edge lands inside the
+ * first write (the documented residual window): that command is dropped,
+ * and the second is written at its API time on the new clock. */
+static void test_late_edge_checked_before_each_write(void)
+{
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long e1 = 500 * MS, d1 = e1 + 800 * MS, d2 = e1 + 900 * MS;
+	long s1, s2;
+
+	g_ops = &desc_ops;
+	fx_open(&x, true);
+	g_ops = &fake_tick_ops;
+	fake_tick_pps_edge(x.f);
+	CHECK(datax_device_set_time_next_pps(x.dev, e1) == 0);   /* soft, still armed */
+	CHECK(source(&x) == DATAX_TIME_SOFT_ALIGNED);
+	pthread_mutex_lock(&g_desc.m);
+	g_desc.n = 0;
+	g_desc.fire_at = 1;
+	pthread_mutex_unlock(&g_desc.m);
+	s1 = datax_sched_queue_gpio(x.s, d1, 0xe, 0x2);
+	s2 = datax_sched_queue_gpio(x.s, d2, 0xe, 0x4);
+	CHECK(s1 > 0 && s2 > 0);
+	CHECK(datax_sched_report(x.s, s1) == 0 && datax_sched_report(x.s, s2) == 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(desc_count() >= 2);
+	msleep(5);
+	CHECK(desc_count() == 2);
+	CHECK(g_desc.ts[0] != d1);              /* written under the soft offset */
+	CHECK(g_desc.ts[1] == d2);              /* the edge was adopted first */
+	memset(&c, 0, sizeof(c));
+	CHECK(datax_sched_wait(x.s, s1, 3000, &c) == 0);
+	CHECK(c.status == DATAX_COMPLETION_DROPPED);
+	CHECK(source(&x) == DATAX_TIME_PPS_ALIGNED);
+	for (int k = 0; k < 20 && fake_tick_now(x.f) <= d2; k++) {
+		fake_tick_advance(x.f, 50 * MS);
+		msleep(3);
+	}
+	memset(&c, 0, sizeof(c));
+	CHECK(datax_sched_wait(x.s, s2, 3000, &c) == 0);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	CHECK(c.executed_ticks == d2);
+	fx_close(&x);
+	printf("test_late_edge_checked_before_each_write: ok\n");
+}
+
 /* A past API time must not wrap into the far future once the soft offset
  * (here positive) is subtracted. */
 static void test_past_api_time_rejected(void)
@@ -613,6 +714,8 @@ int main(int argc, char **argv)
 		{ "late_edge_adopted_by_get_time", test_late_edge_adopted_by_get_time },
 		{ "past_api_time_rejected", test_past_api_time_rejected },
 		{ "arm_write_failure_labelled", test_arm_write_failure_labelled },
+		{ "late_edge_checked_before_each_write",
+		  test_late_edge_checked_before_each_write },
 	};
 
 	for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {

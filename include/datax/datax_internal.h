@@ -43,6 +43,14 @@ struct datax_tick_ops;
 int datax_internal_tick_bind_fake(struct datax_device *dev,
 				  const struct datax_tick_ops *ops, void *h);
 
+/* FHM phy seam (same layout as the Tick ops): replace the adrv9009-phy TRX
+ * LO channel attributes (frequency_hopping_mode_enable,
+ * frequency_hopping_mode) of chip A with ops/h, for tests driving a fake
+ * Talise FHM; NULL ops detaches. 0, -EINVAL (ops missing a function), or
+ * -EBUSY while the device has a scheduler. */
+int datax_internal_fhm_bind_fake(struct datax_device *dev,
+				 const struct datax_tick_ops *ops, void *h);
+
 /* Pause (true) or resume (false) the scheduler's poller: while paused it
  * neither feeds the Tick queue nor drains completions (commit still accepts
  * batches). Pausing returns once the current poller iteration has finished.

@@ -16,6 +16,7 @@
 #include <datax/datax_internal.h>
 
 #include "error.h"
+#include "fhm.h"
 #include "scheduler.h"
 #include "tick_descriptor.h"
 #include "tick_ops.h"
@@ -107,7 +108,7 @@ void datax_sched_remove(struct datax_sched *s, struct sched_cmd *c)
 
 static void publish(struct datax_sched *s, struct sched_cmd *c)
 {
-	if (!c->report) {
+	if (!c->report || c->consume) {
 		datax_sched_remove(s, c);
 		return;
 	}
@@ -137,6 +138,19 @@ void datax_sched_finish(struct datax_sched *s, struct sched_cmd *c,
 							    res->executed_ticks :
 							    res->requested_ticks),
 					seq, "seq %ld: %s", seq, res->detail);
+	/* A consumed result is never published, so any other non-OK outcome
+	 * (DROPPED, FLUSHED) would vanish: report it the same way (controller
+	 * ruling; there is no DROPPED event type). Except FLUSHED by destroy:
+	 * nobody asked, and its delivery would race the teardown (the event
+	 * queue may or may not be delivered before the poller is joined). */
+	else if (c->consume && res->status != DATAX_COMPLETION_OK &&
+		 !(res->status == DATAX_COMPLETION_FLUSHED && s->stop))
+		datax_sched_emit_locked(s, DATAX_EVT_LATE_COMMAND,
+					datax_devtime_to_hw(s->dev, res->requested_ticks), seq,
+					"seq %ld: %s: %s", seq,
+					res->status == DATAX_COMPLETION_DROPPED ? "DROPPED" :
+					res->status == DATAX_COMPLETION_FLUSHED ? "FLUSHED" : "?",
+					res->detail);
 	c->res = *res;
 	publish(s, c);
 }
@@ -176,6 +190,24 @@ void datax_sched_map_status(uint32_t tick_status, struct datax_sched_result *r)
 	}
 }
 
+/* The driver's CSV: twelve 32-bit words, little-endian from the packer. */
+static void pack_csv(const struct datax_tick_descriptor *d, char *buf, size_t len)
+{
+	unsigned char b[DATAX_TICK_DESC_SIZE];
+	size_t n = 0;
+
+	datax_internal_tick_descriptor_pack(d, b);
+	for (unsigned int i = 0; i < DATAX_TICK_DESC_SIZE / 4 && n < len; i++) {
+		uint32_t w = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 |
+			     (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
+		int k = snprintf(buf + n, len - n, "%s%u", i ? "," : "", w);
+
+		if (k < 0)
+			break;
+		n += (size_t)k;
+	}
+}
+
 void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len)
 {
 	struct datax_tick_descriptor d = {
@@ -194,20 +226,8 @@ void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len)
 		.sequence_id = (uint32_t)c->seq,
 		.args = { c->args[0], c->args[1], c->args[2], c->args[3] },
 	};
-	unsigned char b[DATAX_TICK_DESC_SIZE];
-	size_t n = 0;
 
-	datax_internal_tick_descriptor_pack(&d, b);
-	/* The driver's CSV: twelve 32-bit words, little-endian from the packer. */
-	for (unsigned int i = 0; i < DATAX_TICK_DESC_SIZE / 4 && n < len; i++) {
-		uint32_t w = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 |
-			     (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
-		int k = snprintf(buf + n, len - n, "%s%u", i ? "," : "", w);
-
-		if (k < 0)
-			break;
-		n += (size_t)k;
-	}
+	pack_csv(&d, buf, len);
 }
 
 /* ---- create / destroy ---------------------------------------------------------- */
@@ -352,6 +372,42 @@ static void seed_seq(struct datax_device *dev)
 					(unsigned long long)b.tv_nsec ^
 					(unsigned long long)a.tv_sec * 2654435761ULL) %
 				       (SEQ_MAX / 2)) + 1u;
+}
+
+int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
+			uint32_t value)
+{
+	struct datax_tick_descriptor d = {
+		.version = DATAX_TICK_DESC_VERSION,
+		.size_bytes = DATAX_TICK_DESC_SIZE,
+		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
+		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
+		.timestamp_ticks = 0,                 /* always in the past */
+		.flags = DATAX_TICK_FLAG_LATE_EXECUTE_NOW,
+		.args = { mask, value & mask, 0, 0 },
+	};
+	char buf[160];
+	int ret;
+
+	/* A fresh seq, so no record could ever match a command. */
+	pthread_mutex_lock(&dev->ctx->lock);
+	seed_seq(dev);
+	pthread_mutex_unlock(&dev->ctx->lock);
+	if (s)
+		pthread_mutex_lock(&s->lock);
+	d.sequence_id = dev->next_seq;
+	dev->next_seq = dev->next_seq >= SEQ_MAX ? 1u : dev->next_seq + 1u;
+	if (s)
+		pthread_mutex_unlock(&s->lock);
+	pack_csv(&d, buf, sizeof(buf));
+	ret = datax_tick_write_str(dev, "command_descriptor", buf);
+	/* It raised late_count by one: not a late command of the caller's. */
+	if (!ret && s) {
+		pthread_mutex_lock(&s->lock);
+		s->late_seen++;
+		pthread_mutex_unlock(&s->lock);
+	}
+	return ret;
 }
 
 int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
@@ -530,6 +586,7 @@ long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spe
 	c->target_id = spec->target_id;
 	memcpy(c->args, spec->args, sizeof(c->args));
 	c->report = spec->report;
+	c->consume = spec->consume;
 	c->on_complete = spec->on_complete;
 	c->user = spec->user;
 	pthread_mutex_unlock(&s->lock);
@@ -579,11 +636,9 @@ long datax_sched_queue_marker(struct datax_sched *s, datax_time when,
 long datax_sched_queue_tune(struct datax_sched *s, datax_time when,
 			    unsigned int ch, unsigned long long hz)
 {
-	(void)when; (void)ch; (void)hz;
-	if (s)
-		return datax_error_ret(s->ctx, ENOTSUP, "sched",
-				       "queue_tune: arrives with FHM tunes (P3a)");
-	return -ENOTSUP;
+	if (!s)
+		return -EINVAL;
+	return datax_fhm_queue_tune(s, when, ch, hz);   /* fhm.c */
 }
 
 long datax_sched_queue_stream_gate(struct datax_sched *s, datax_time when,
@@ -622,13 +677,53 @@ int datax_sched_report(struct datax_sched *s, long seq)
 
 /* ---- commit ------------------------------------------------------------------- */
 
+/*
+ * A rejected commit discards every uncommitted command. Each one's hook
+ * runs with r->discarded set (a terminal outcome; nothing is published), so
+ * state kept beside the scheduler (the FHM tune pipeline) forgets it too.
+ * s->lock held on entry and return, dropped around each hook; io held.
+ * Snapshotted first: a command a hook enqueues stays queued.
+ */
 static void discard_batch(struct datax_sched *s)
 {
-	for (size_t i = 0; i < s->ncmds;)
+	long *seqs = malloc((s->ncmds ? s->ncmds : 1) * sizeof(*seqs));
+	size_t n = 0;
+
+	if (!seqs) {      /* out of memory: discard without the hooks */
+		for (size_t i = 0; i < s->ncmds;)
+			if (s->cmds[i].state == CMD_BUILD)
+				s->cmds[i] = s->cmds[--s->ncmds];
+			else
+				i++;
+		return;
+	}
+	for (size_t i = 0; i < s->ncmds; i++)
 		if (s->cmds[i].state == CMD_BUILD)
-			s->cmds[i] = s->cmds[--s->ncmds];
-		else
-			i++;
+			seqs[n++] = s->cmds[i].seq;
+	for (size_t i = 0; i < n; i++) {
+		struct sched_cmd *c = datax_sched_find(s, seqs[i]);
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_FLUSHED,
+			.tick_status = UINT32_MAX,
+			.discarded = true,
+		};
+		datax_sched_complete_fn fn;
+		void *user;
+
+		if (!c || c->state != CMD_BUILD)
+			continue;
+		fn = c->on_complete;
+		user = c->user;
+		res.requested_ticks = c->api_ts;
+		snprintf(res.detail, sizeof(res.detail), "discarded: the commit was rejected");
+		datax_sched_remove(s, c);
+		if (fn) {
+			pthread_mutex_unlock(&s->lock);
+			fn(s, seqs[i], &res, user);
+			pthread_mutex_lock(&s->lock);
+		}
+	}
+	free(seqs);
 }
 
 struct rep_ts {

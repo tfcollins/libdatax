@@ -87,8 +87,15 @@ CHECK(datax_device_set_frequency(dev, 0, 2450000000ULL, DATAX_TIME_NOW) == 0);
 
 	/* test_timed_set_is_enotsup_and_no_write */
 	CHECK(datax_device_get_frequency(dev, 0, &prev) == 0);
+	/* hop staging and timed tunes are FHM (adrv9009); ad936x fastlock is P4 */
+	{
+		unsigned long long f = 2400000000ULL;
+
+		CHECK(datax_device_stage_hop_table(dev, &f, 1) == -ENOTSUP);
+		CHECK(strstr(datax_context_get_last_error(ctx), "P4") != NULL);
+	}
 	CHECK(datax_device_set_frequency(dev, 0, 2500000000ULL, 1000) == -ENOTSUP);
-	CHECK(strstr(datax_context_get_last_error(ctx), "P3") != NULL);
+	CHECK(strstr(datax_context_get_last_error(ctx), "P4") != NULL);
 	CHECK(datax_device_get_frequency(dev, 0, &hz) == 0 && hz == prev);
 	CHECK(datax_device_set_gain(dev, 0, 10.0, 1000) == -ENOTSUP);
 	CHECK(datax_device_get_gain(dev, 0, &db) == 0 && fabs(db - 30.0) <= 0.5);

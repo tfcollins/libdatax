@@ -36,7 +36,7 @@ struct call {
 	enum datax_completion_status status;
 	char detail[DATAX_SCHED_DETAIL_LEN];
 	pthread_t thread;
-	int r_wait, r_commit, r_flush, r_pause, r_time;
+	int r_wait, r_commit, r_flush, r_pause, r_time, r_stage;
 };
 
 struct rec {
@@ -59,6 +59,11 @@ static void probe_calls(struct rec *r, struct call *c)
 	c->r_flush = datax_sched_flush(r->s);
 	c->r_pause = datax_internal_sched_pause(r->s, true);
 	c->r_time = datax_device_get_time(r->dev, &ticks, &hz);
+	{
+		unsigned long long f = 2450000000ULL;
+
+		c->r_stage = datax_device_stage_hop_table(r->dev, &f, 1);
+	}
 }
 
 static void on_complete(struct datax_sched *s, long seq, struct datax_sched_result *res,
@@ -224,6 +229,7 @@ static void test_hook_on_flush_refuses_blocking(void)
 	      c->r_flush == -EDEADLK);
 	CHECK(c->r_pause == 0);                         /* only sets the flag */
 	CHECK(c->r_time == 0);
+	CHECK(c->r_stage == -EDEADLK);                  /* stage_hop_table takes io */
 	CHECK(strstr(datax_context_get_last_error(x.ctx), "deadlock") != NULL ||
 	      strstr(datax_context_get_last_error(x.ctx), "seq") != NULL);
 	CHECK(datax_sched_wait(x.s, a, 0, &out) == 0 && out.status == DATAX_COMPLETION_FLUSHED);
@@ -296,11 +302,109 @@ static void test_poll_hook_contract(void)
 	printf("test_poll_hook_contract: ok\n");
 }
 
+/* A reported command marked consume (timed set_frequency's tune: nobody
+ * holds a handle to wait on it) runs its hook with the real record, then
+ * leaves the table instead of staying DONE forever. */
+static void test_consumed_result_not_kept(void)
+{
+	struct fx x;
+	struct datax_completion out[4];
+	struct datax_sched_cmd_spec spec = {
+		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
+		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
+		.args = { 0x2, 0x2, 0, 0 }, .report = true, .consume = true,
+		.on_complete = on_complete,
+	};
+	unsigned long long t;
+	const struct call *c = NULL;
+	enum datax_completion_status st = DATAX_COMPLETION_DROPPED;
+	size_t n = 99, left;
+	long seq;
+
+	fx_open(&x);
+	spec.user = &x.r;
+	t = fake_tick_now(x.f);
+	spec.when = t + 20 * MS;
+	seq = datax_sched_enqueue(x.s, &spec);
+	CHECK(seq > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(fake_attr(x.f, "queue_level") == 1);
+	fake_tick_advance(x.f, 30 * MS);
+	for (int w = 0; w < 3000; w++) {
+		pthread_mutex_lock(&x.r.m);
+		c = find_call(&x.r, seq);
+		if (c)
+			st = c->status;
+		pthread_mutex_unlock(&x.r.m);
+		if (c)
+			break;
+		msleep(1);
+	}
+	CHECK(c != NULL);
+	CHECK(st == DATAX_COMPLETION_OK);              /* the hook saw the record */
+	msleep(5);
+	CHECK(datax_sched_get_completions(x.s, out, 4, &n) == 0 && n == 0);
+	pthread_mutex_lock(&x.s->lock);
+	left = x.s->ncmds;
+	pthread_mutex_unlock(&x.s->lock);
+	CHECK(left == 0);
+	CHECK(datax_sched_wait(x.s, seq, 0, out) == -EINVAL);
+	fx_close(&x);
+	printf("test_consumed_result_not_kept: ok\n");
+}
+
+/* Events queued (not yet delivered) whose detail contains text. */
+static size_t queued_events(struct datax_sched *s, const char *text)
+{
+	size_t n = 0;
+
+	pthread_mutex_lock(&s->lock);
+	for (unsigned int i = 0; i < s->nevq; i++)
+		n += strstr(s->evq[i].detail, text) != NULL;
+	pthread_mutex_unlock(&s->lock);
+	return n;
+}
+
+/* A consumed command flushed by the user raises "seq N: FLUSHED: ..."
+ * (its result is never published); flushed while the scheduler is being
+ * destroyed (stop set) it raises nothing: nobody asked, and the delivery
+ * would race the teardown. */
+static void test_consumed_flush_events(void)
+{
+	struct datax_sched_cmd_spec spec = {
+		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
+		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
+		.args = { 0x2, 0x2, 0, 0 }, .report = true, .consume = true,
+	};
+	struct fx x;
+
+	fx_open(&x);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);   /* events stay queued */
+	spec.when = fake_tick_now(x.f) + 50 * MS;
+	CHECK(datax_sched_enqueue(x.s, &spec) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	CHECK(datax_sched_flush(x.s) == 0);
+	CHECK(queued_events(x.s, "FLUSHED: flushed") == 1);
+	/* the same, as destroy sees it */
+	pthread_mutex_lock(&x.s->lock);
+	x.s->nevq = 0;
+	x.s->stop = true;
+	pthread_mutex_unlock(&x.s->lock);
+	spec.when = fake_tick_now(x.f) + 60 * MS;
+	CHECK(datax_sched_enqueue(x.s, &spec) > 0);
+	CHECK(datax_sched_flush(x.s) == 0);                  /* finishes the BUILD one */
+	CHECK(queued_events(x.s, "FLUSHED") == 0);
+	fx_close(&x);
+	printf("test_consumed_flush_events: ok\n");
+}
+
 int main(void)
 {
 	test_destroy_finishes_hooks();
 	test_hook_on_flush_refuses_blocking();
 	test_poll_hook_contract();
+	test_consumed_result_not_kept();
+	test_consumed_flush_events();
 	printf("test_sched_hooks: all ok\n");
 	return 0;
 }

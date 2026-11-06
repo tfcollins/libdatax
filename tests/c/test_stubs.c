@@ -20,9 +20,9 @@ int main(void)
 	CHECK(datax_stream_start_at(NULL, 5) == -ENOTSUP);
 	CHECK(datax_stream_stop(NULL) == -EINVAL);
 	CHECK(datax_stream_recv(NULL, NULL, 0, NULL, 0) == -EINVAL);
-	CHECK(datax_stream_send(NULL, NULL, 0, 0) == -ENOTSUP);
-	CHECK(datax_stream_get_block(NULL, NULL, NULL, 0) == -ENOTSUP);
-	CHECK(datax_stream_put_block(NULL, NULL) == -ENOTSUP);
+	CHECK(datax_stream_send(NULL, NULL, 0, 0) == -EINVAL);
+	CHECK(datax_stream_get_block(NULL, NULL, NULL, 0) == -EINVAL);
+	CHECK(datax_stream_put_block(NULL, NULL) == -EINVAL);
 	CHECK(datax_sched_queue_gpio(NULL, 0, 0, 0) == -ENOTSUP);
 	CHECK(datax_sched_queue_marker(NULL, 0, 0, 0) == -ENOTSUP);
 	CHECK(datax_sched_queue_tune(NULL, 0, 0, 0) == -ENOTSUP);

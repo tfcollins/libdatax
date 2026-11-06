@@ -169,8 +169,10 @@ class Scheduler:
 
     def commit(self):
         """Submit the queued batch. Raises ``LateError`` when a command is
-        already inside the guard margin; on any failure the whole uncommitted
-        batch is discarded."""
+        already inside the guard margin or ``Error`` (EINVAL) for reported
+        commands closer than the report spacing; only those two discard the
+        whole uncommitted batch. Any other failure leaves it queued, so the
+        commit can be retried."""
         h = self._live()
         rc = get_lib().datax_sched_commit(h)
         if rc:

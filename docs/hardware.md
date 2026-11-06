@@ -1,7 +1,7 @@
 # Running the hardware suite
 
-`tests/hardware` exercises immediate streaming and digital loopback on a real
-board. It is not part of Tier 1: CI only proves it collects
+`tests/hardware` exercises immediate streaming, digital loopback and (P3a)
+timed control on a real board. It is not part of Tier 1: CI only proves it collects
 (`pytest tests/hardware --collect-only -q`). The `hw-test.yml` workflow runs it
 on self-hosted runners (none registered yet); recorded results are in
 [evidence/p2](evidence/p2/README.md).
@@ -15,6 +15,7 @@ on self-hosted runners (none registered yet); recorded results are in
     export DATAX_HW_URI=<libiio URI of the booted board>
     export DATAX_HW_REQUIRE=1                       # fail, not skip, without a URI
     export DATAX_HW_EVIDENCE=$PWD/evidence.json     # default ./evidence.json
+    export DATAX_HW_IMAGE=hopcap-sfp                # stock (default) skips the P3a tests
     python -m pytest tests/hardware -v --junitxml=junit.xml
 
 The libiio build must be the pinned v1 fork (`pins.json`). The evidence JSON
@@ -48,3 +49,13 @@ in `finally`, and compares RX to the expected transform of TX:
 - ad936x: `loopback` on `ad9361-phy`; RX = TX >> 4.
 - adrv9009: `bist_framer_a_loopback` on each phy; I and Q are exchanged
   (RX I = TX Q, RX Q = TX I), gain 1, no shift.
+
+## P3a timed control
+
+Needs the ADRV9009-ZU11EG with hopcap's SFP image (Tick scheduler, FHM trigger
+on chip A, Tick PPS selector) and `DATAX_HW_IMAGE=hopcap-sfp`. On that image the
+TX tests skip (the TX DMA feeds vrt49's deframer) and the P2 RX smoke runs as
+the regression. `DATAX_HW_PPS=internal|none` says what drives Tick's PPS input
+(Corundum's internal PTP PPS by default). Timing evidence is completion records
+and PLL readback; there is no scope, and the evidence says so. See
+`tests/hardware/README.md` for the test list.

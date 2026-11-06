@@ -4,6 +4,14 @@
 DATAX_HW_URI      libiio URI of the board under test (required to run).
 DATAX_HW_REQUIRE  1: a missing URI fails every test instead of skipping.
 DATAX_HW_EVIDENCE path of the evidence JSON (default ./evidence.json).
+DATAX_HW_IMAGE    hopcap-sfp | stock (default stock): the PL image on the board.
+                  P3a timed-control tests (marker ``p3a``) skip on stock; TX
+                  tests (marker ``needs_tx``) skip on hopcap-sfp, whose TX DMA
+                  feeds vrt49's deframer.
+DATAX_HW_PPS      internal | none (default internal): what drives the Tick PPS
+                  input on hopcap-sfp (the selector's Corundum PTP PPS, or
+                  nothing: the soft-alignment fallback is then expected).
+DATAX_HW_IMAGE_HASHES  free text (e.g. BOOT.BIN sha256) copied to the evidence.
 
 The suite must always *collect* without a board (CI runs
 ``pytest tests/hardware --collect-only -q``); it never runs in Tier 1.
@@ -24,6 +32,7 @@ try:
 except ImportError:  # not pip-installed: use the source tree
     sys.path.insert(0, str(ROOT / "python"))
 
+import hwtimed as ht  # noqa: E402
 import loopback as lb  # noqa: E402
 
 PLACEHOLDER_CHANNELS = 2  # parametrization when no board can be asked
@@ -56,6 +65,19 @@ def radio_channels():
     return list(range(PLACEHOLDER_CHANNELS))
 
 
+def _image():
+    return ht.normalize_image(os.environ.get("DATAX_HW_IMAGE"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "p3a: P3a timed-control test (hopcap-sfp image)")
+    config.addinivalue_line("markers", "needs_tx: uses the TX DMA (not on hopcap-sfp)")
+    try:
+        _image()
+    except ValueError as e:
+        raise pytest.UsageError(str(e))
+
+
 def pytest_generate_tests(metafunc):
     if "ch" in metafunc.fixturenames:
         chans = radio_channels()
@@ -63,13 +85,19 @@ def pytest_generate_tests(metafunc):
 
 
 def pytest_collection_modifyitems(config, items):
-    if _uri() or _required():
-        return
-    skip = pytest.mark.skip(reason="DATAX_HW_URI not set (DATAX_HW_REQUIRE=1 to fail instead)")
+    image = _image()
+    no_uri = not (_uri() or _required())
     for item in items:
         # Only this directory's tests: a bare `pytest` also collects Tier 1.
-        if HW_DIR in Path(str(item.path)).resolve().parents:
-            item.add_marker(skip)
+        if HW_DIR not in Path(str(item.path)).resolve().parents:
+            continue
+        if no_uri:
+            item.add_marker(pytest.mark.skip(
+                reason="DATAX_HW_URI not set (DATAX_HW_REQUIRE=1 to fail instead)"))
+            continue
+        why = ht.image_skip_reason(image, [m.name for m in item.iter_markers()])
+        if why:
+            item.add_marker(pytest.mark.skip(reason=f"{why} (DATAX_HW_IMAGE={image})"))
 
 
 def _git_head():
@@ -134,6 +162,10 @@ def hw_ctx(evidence):
     import datax
     ctx = datax.Context(uri)
     evidence["uri"] = lb.redact_uri(uri)
+    evidence["image"] = _image()
+    evidence["pps_source"] = os.environ.get("DATAX_HW_PPS") or "internal"
+    if os.environ.get("DATAX_HW_IMAGE_HASHES"):
+        evidence["image_hashes"] = lb.redact_text(os.environ["DATAX_HW_IMAGE_HASHES"])
     _provenance(evidence, ctx)
     try:
         evidence["iio_context"] = lb.context_info(ctx)

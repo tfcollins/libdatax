@@ -400,3 +400,29 @@ def test_pps_alignment(dev, hw_ctx, sched, record):
             assert any(e["type"] == "PPS_LOCK_CHANGE" for e in seen), seen
     finally:
         hw_ctx.on_event(None)
+
+
+def test_tune_after_alignment(dev, hw_ctx, sched, record):
+    """Final review I2: an alignment that moves device time back must not
+    block the next tune. The FHM history is reset when the mapping changes,
+    so the tune primes and lands. Runs after test_pps_alignment (the session
+    context has just been aligned) and aligns again to epoch 0 itself, so it
+    also holds when run alone."""
+    dev.stage_hop_table(FULL_TABLE)
+    seq = sched.at(dev.time.now + ms(dev, 150)).tune(FULL_TABLE[0])
+    sched.commit()
+    assert sched.wait(seq, WAIT_MS).status == datax.CompletionStatus.OK
+    sleep_until(dev, dev.time.now + ms(dev, 20))    # its 10 ms pulse has ended
+    before = dev.time.now
+    dev.time.align_next_pps(0)                      # time moves back
+    after = dev.time.now
+    record("align", {"before": before, "after": after, "source": dev.time.source.name})
+    assert after < before, (before, after)
+    want = FULL_TABLE[2]
+    seq = sched.at(dev.time.now + ms(dev, 200)).tune(want)
+    sched.commit()
+    c = sched.wait(seq, WAIT_MS)
+    got = ht.read_pll_hz(hw_ctx)
+    record("tune_after_alignment", {"completion": ht.completion_log([c]), "pll_hz": got})
+    assert c.status == datax.CompletionStatus.OK, c
+    assert got == want, (want, got)

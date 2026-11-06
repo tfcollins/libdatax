@@ -113,5 +113,7 @@ def get_lib():
     _sig(lib, "datax_sched_commit", C.c_int, c_void_p)
     _sig(lib, "datax_sched_flush", C.c_int, c_void_p)
     _sig(lib, "datax_sched_wait", C.c_int, c_void_p, C.c_long, C.c_int, P(CompletionC))
+    _sig(lib, "datax_sched_get_completions", C.c_int, c_void_p, P(CompletionC), C.c_size_t,
+         P(C.c_size_t))
     _lib = lib
     return lib

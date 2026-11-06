@@ -389,9 +389,39 @@ def test_flush_failure_keeps_tracking(make_rig):
     rig.pause(False)
     rig.run_to(t + 5 * MS)
     assert [c.seq for c in sched.wait_all(timeout=3.0)] == [seq]
-    # a successful flush does drop the tracking
+    # a successful flush drops the tracking and returns what it ended
     seq2 = sched.at(rig.now + 80 * MS).gpio(0xe, 0x2, report=True)
     sched.commit()
-    sched.flush()
-    assert sched.wait_all(timeout=0.1) == []          # tracking dropped ...
-    assert sched.wait(seq2, 1000).status is datax.CompletionStatus.FLUSHED   # ... still waitable
+    done = sched.flush()
+    assert [(c.seq, c.status) for c in done] == [(seq2, datax.CompletionStatus.FLUSHED)]
+    assert sched.wait_all(timeout=0.1) == []          # tracking dropped
+
+
+def test_flush_consumes_c_completions(make_rig):
+    """Final review M6: flush() consumes the C FLUSHED completions (and any
+    finished-but-unwaited ones), so the C table keeps nothing Python no
+    longer tracks."""
+    import ctypes as C
+    from datax._lib import CompletionC
+
+    rig = make_rig()
+    sched = rig.make_scheduler()
+    t = rig.now + 50 * MS
+    ran = sched.at(t).gpio(0xe, 0x2, report=True)            # completes OK, never waited
+    later = [sched.at(t + (i + 1) * 20 * MS).gpio(0xe, 0x4, report=True) for i in range(3)]
+    sched.commit()
+    rig.run_to(t + 5 * MS)
+    _wait_for(lambda: rig.gpio() & 0xe == 0x2)
+    time.sleep(0.02)                                          # its record drained
+    done = sched.flush()
+    got = {c.seq: c.status for c in done}
+    assert got == {ran: datax.CompletionStatus.OK,
+                   **{s: datax.CompletionStatus.FLUSHED for s in later}}
+    buf = (CompletionC * 8)()
+    n = C.c_size_t(99)
+    assert rig.lib.datax_sched_get_completions(sched._h, buf, 8, C.byref(n)) == 0
+    assert n.value == 0                                       # nothing left in C
+    with pytest.raises(datax.Error) as ei:
+        sched.wait(later[0], 0)
+    assert ei.value.errno == errno.EINVAL
+    assert sched.flush() == []

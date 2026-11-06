@@ -102,6 +102,7 @@ struct fhm_edge {
 	bool late;                 /* hz could not be staged in time */
 	bool fire_pending;         /* reconcile: fired, not yet processed */
 	bool behind;               /* the previous edge did not fire */
+	bool needs_park;           /* its fall never ran: park bit 0 low after the rise */
 	int stage_err;             /* the staging write failed */
 	long fall_seq;             /* the fall ending this pulse */
 	unsigned long long pulse;  /* rise to fall, API ticks */
@@ -564,6 +565,56 @@ static bool settled(const struct fhm_edge *e)
 	return !e->hz || e->staged || e->late || e->stage_err || e->st == E_NOEDGE;
 }
 
+/*
+ * Deferred parks (fhm_on_fall): once edge i's rise has fired, or its time
+ * plus the margin has passed, drive bit 0 low through the undroppable
+ * immediate write. If the next edge on bit 0 was due before the park
+ * landed, it rose onto a high line and made no edge: that tune and the one
+ * after it land one behind (fail closed).
+ */
+static void park_deferred(struct datax_fhm *m, struct datax_sched *s)
+{
+	unsigned long long margin = us_ticks(FHM_MARGIN_US, s->tick_hz), after;
+
+	for (size_t i = 0; i < m->n; i++) {
+		struct fhm_edge *e = &m->e[i];
+
+		if (!e->needs_park)
+			continue;
+		if (e->st == E_NOEDGE) {
+			e->needs_park = false;          /* the line was never raised */
+			continue;
+		}
+		if (e->st != E_FIRED && last_hw(s) < edge_hw(s, e) + margin)
+			continue;                       /* the rise may still come */
+		e->needs_park = false;
+		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+		after = datax_poller_read_time(s) ? ~0ULL : last_hw(s);
+		trace("park E%u seq=%ld (deferred) landed by %llu", e->num, e->seq, after);
+		if (i + 1 < m->n && edge_hw(s, &m->e[i + 1]) <= after) {
+			struct fhm_edge *nx = &m->e[i + 1];
+
+			trace("lost edge E%u: due before the park", nx->num);
+			if (nx->hz && (nx->st == E_LIVE || !nx->reported)) {
+				nx->behind = true;
+				if (nx->st == E_FIRED)
+					emit_unreported(s, nx,
+							"previous edge did not fire; lands one behind");
+			}
+			mark_next_behind(m, i + 1);
+		}
+	}
+}
+
+/* Deferred parks waiting on a rise's time: wake the poller then. */
+static void request_park_wake(struct datax_fhm *m, struct datax_sched *s)
+{
+	for (size_t i = 0; i < m->n; i++)
+		if (m->e[i].needs_park)
+			datax_sched_wake_at(s, edge_hw(s, &m->e[i]) +
+					       us_ticks(FHM_MARGIN_US, s->tick_hz));
+}
+
 /* The poll hook alone notices an unreported edge fire (reconcile), and the
  * next staging may wait on it: wake the poller just after the earliest one
  * (its time plus the margin) rather than at its next period. */
@@ -585,8 +636,8 @@ static void trim(struct datax_fhm *m, struct datax_sched *s)
 {
 	unsigned long long now = last_hw(s);
 
-	while (m->n > 2 && m->e[0].st != E_LIVE && settled(&m->e[1]) && settled(&m->e[2]) &&
-	       edge_hw(s, &m->e[0]) + m->e[0].pulse < now)
+	while (m->n > 2 && m->e[0].st != E_LIVE && !m->e[0].needs_park && settled(&m->e[1]) &&
+	       settled(&m->e[2]) && edge_hw(s, &m->e[0]) + m->e[0].pulse < now)
 		remove_edge(m, &m->e[0]);
 }
 
@@ -599,9 +650,11 @@ static void fhm_poll(struct datax_sched *s, unsigned long long hw_now, void *use
 	(void)hw_now;   /* s->last_hw is re-read as staging writes take time */
 	pthread_mutex_lock(&m->lock);
 	reconcile(m, s);
+	park_deferred(m, s);
 	advance(m, s, "poll");
 	trim(m, s);
 	request_wake(m, s);
+	request_park_wake(m, s);
 	pthread_mutex_unlock(&m->lock);
 }
 
@@ -674,15 +727,45 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_result *r,
 			void *user)
 {
-	(void)user;
-	if (r->discarded || r->status != DATAX_COMPLETION_FLUSHED)
+	struct datax_fhm *m = user;
+	struct fhm_edge *e = NULL;
+
+	if (r->discarded)
 		return;
-	trace("park after flushed fall seq=%ld", seq);
-	/* Always (round 3 ruling): the queue is empty, so whatever pulse is on
-	 * the line is orphaned. Deciding from the rise's state misses a rise
-	 * that executed before the poller saw it (record undrained, or not yet
-	 * pruned): destroy does not drain first. */
-	(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+	if (r->queue_emptied || r->status == DATAX_COMPLETION_FLUSHED) {
+		trace("park after a fall dropped with the queue seq=%ld", seq);
+		/* Always (round 3 ruling): the queue is empty (flush, destroy,
+		 * late-PPS adoption), so whatever pulse is on the line is
+		 * orphaned. Deciding from the rise's state misses a rise that
+		 * executed before the poller saw it: destroy does not drain. */
+		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+		return;
+	}
+	/*
+	 * Final review I1: the fall ended without ever being written (write
+	 * failure, host-late). Its rise may still be queued in Tick and due
+	 * later, so parking now could run before it and leave the line high:
+	 * defer the park to the poll hook, once the rise's time plus the margin
+	 * has passed (park_deferred), with a targeted wake.
+	 */
+	pthread_mutex_lock(&m->lock);
+	for (size_t i = 0; i < m->n && !e; i++)
+		if (m->e[i].fall_seq == seq)
+			e = &m->e[i];
+	if (!e) {
+		/* Trimmed: its pulse is over, so the rise's time has passed. */
+		pthread_mutex_unlock(&m->lock);
+		trace("park now: fall seq=%ld of a trimmed edge ended unwritten", seq);
+		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+		return;
+	}
+	if (e->st != E_NOEDGE) {               /* a rise that never fired raised nothing */
+		e->needs_park = true;
+		trace("park deferred E%u seq=%ld: fall seq=%ld ended unwritten (status=%d)",
+		      e->num, e->seq, seq, (int)r->status);
+		datax_sched_wake_at(s, edge_hw(s, e) + us_ticks(FHM_MARGIN_US, s->tick_hz));
+	}
+	pthread_mutex_unlock(&m->lock);
 }
 
 static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_result *r,
@@ -1230,4 +1313,70 @@ int datax_fhm_timed_set_frequency(struct datax_device *dev, unsigned int ch,
 	ret = seq < 0 ? (int)seq : datax_sched_commit(s);
 	datax_sched_put(s);
 	return ret;
+}
+
+/* ---- device time changes (final review I2) ----------------------------------- */
+
+bool datax_fhm_live(struct datax_device *dev)
+{
+	struct datax_fhm *m = fhm_get(dev, false);
+	bool live;
+
+	if (!m)
+		return false;
+	pthread_mutex_lock(&m->lock);
+	live = outstanding(m);
+	pthread_mutex_unlock(&m->lock);
+	return live;
+}
+
+/*
+ * The API <-> hardware time mapping changed (a soft offset, a hard PPS load,
+ * or a late edge's counter jump). The remembered edges carry API times from
+ * the old mapping: their order and gap checks would refuse every new tune
+ * after time moved back. Forget them (n = 0) and make the next tune prime
+ * (fresh), under fhm->lock. set_time_next_pps refuses while any tune is live
+ * (datax_fhm_live); a late-edge adoption is involuntary, so its caller
+ * passes s: the FHM commands it did not already drop (those still in the
+ * builder or unwritten) are finished DROPPED "device time jumped on a late
+ * PPS edge" first, since their pipeline state is gone. io held when s.
+ */
+void datax_fhm_time_changed(struct datax_device *dev, struct datax_sched *s)
+{
+	struct datax_fhm *m = fhm_get(dev, false);
+	long *seqs = NULL;
+	size_t n = 0;
+
+	if (!m)
+		return;
+	pthread_mutex_lock(&m->lock);
+	if (s && m->n)
+		seqs = malloc(2 * m->n * sizeof(*seqs));
+	for (size_t i = 0; seqs && i < m->n; i++) {
+		seqs[n++] = m->e[i].seq;
+		if (m->e[i].fall_seq > 0)
+			seqs[n++] = m->e[i].fall_seq;
+	}
+	m->n = 0;
+	m->fresh = true;
+	pthread_mutex_unlock(&m->lock);
+	trace("history reset: device time mapping changed (%zu commands to drop)", n);
+	if (!seqs)
+		return;
+	pthread_mutex_lock(&s->lock);
+	for (size_t i = 0; i < n; i++) {
+		struct sched_cmd *c = datax_sched_find(s, seqs[i]);
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_DROPPED, .tick_status = UINT32_MAX,
+			.queue_emptied = true,
+		};
+
+		if (!c || c->state == CMD_DONE)
+			continue;
+		res.requested_ticks = c->api_ts;
+		snprintf(res.detail, sizeof(res.detail), "device time jumped on a late PPS edge");
+		datax_sched_finish(s, c, &res);   /* may drop s->lock for a hook */
+	}
+	pthread_mutex_unlock(&s->lock);
+	free(seqs);
 }

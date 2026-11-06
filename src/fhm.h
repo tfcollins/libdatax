@@ -32,4 +32,12 @@ long datax_fhm_queue_tune(struct datax_sched *s, datax_time when, unsigned int c
 int datax_fhm_timed_set_frequency(struct datax_device *dev, unsigned int ch,
 				  unsigned long long hz, datax_time when);
 
+/* Any FHM tune still live (in the builder or queued, not yet settled). */
+bool datax_fhm_live(struct datax_device *dev);
+
+/* The device's API <-> hardware time mapping changed: forget the settled
+ * history so the next tune primes. s non-NULL (late-PPS adoption, io held):
+ * also finish the FHM commands still in the builder or unwritten DROPPED. */
+void datax_fhm_time_changed(struct datax_device *dev, struct datax_sched *s);
+
 #endif

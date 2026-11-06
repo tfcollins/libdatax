@@ -21,6 +21,7 @@
 #include <datax/datax_internal.h>
 
 #include "error.h"
+#include "fhm.h"
 #include "scheduler.h"
 #include "tick_ops.h"
 
@@ -137,6 +138,7 @@ static int align_soft(struct datax_device *dev, struct datax_sched *s,
 	atomic_store(&dev->time_source, DATAX_TIME_SOFT_ALIGNED);
 	if (s)
 		rebase_building(s);
+	datax_fhm_time_changed(dev, NULL);    /* no tune is live (checked) */
 	emit_pps(dev, s, hw, "%s: aligned to the host clock (\xc2\xb1%llu \xc2\xb5s)", why,
 		 rtt_us);
 	return 0;
@@ -180,8 +182,11 @@ bool datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched 
 		for (size_t i = 0; i < s->ncmds; i++) {
 			long seq = s->cmds[i].state == CMD_WRITTEN ? s->cmds[i].seq : 0;
 			struct sched_cmd *c;
+			/* the queue was emptied above (flush_queue): queue_emptied
+			 * lets a fall's hook park the trigger line at once */
 			struct datax_sched_result res = {
 				.status = DATAX_COMPLETION_DROPPED, .tick_status = UINT32_MAX,
+				.queue_emptied = true,
 			};
 
 			if (!seq)
@@ -199,9 +204,13 @@ bool datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched 
 		s->kick = true;
 		pthread_cond_signal(&s->wake);
 		pthread_mutex_unlock(&s->lock);
+		/* Involuntary: after its drops, forget the FHM history and drop
+		 * the tunes it re-based (their pipeline state is gone). */
+		datax_fhm_time_changed(dev, s);
 	} else {
 		atomic_store(&dev->time_off, 0);
 		atomic_store(&dev->time_source, DATAX_TIME_PPS_ALIGNED);
+		datax_fhm_time_changed(dev, NULL);
 	}
 	(void)datax_tick_read_u64(dev, "current_time_ticks", &hw);
 	emit_pps(dev, s, hw,
@@ -233,6 +242,14 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 	if (s && sched_has_queued(s)) {
 		ret = datax_error_ret(dev->ctx, EBUSY, "time",
 				      "scheduler has queued commands; flush first");
+		goto out;
+	}
+	/* Final review I2: a tune in the builder (or queued, not settled) was
+	 * planned on the old mapping, and the FHM history is reset below. */
+	if (datax_fhm_live(dev)) {
+		ret = datax_error_ret(dev->ctx, EBUSY, "time",
+				      "a timed tune is queued or not yet committed; commit and "
+				      "wait for it, or flush, before aligning time");
 		goto out;
 	}
 	/* A missing or unreadable pps_present is the same as no PPS. */
@@ -267,6 +284,7 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 			atomic_store(&dev->time_source, DATAX_TIME_PPS_ALIGNED);
 			if (s)
 				rebase_building(s);
+			datax_fhm_time_changed(dev, NULL);   /* no tune is live (checked) */
 			(void)datax_tick_read_u64(dev, "current_time_ticks", &hw);
 			emit_pps(dev, s, hw, "aligned on a fabric PPS edge");
 			ret = 0;

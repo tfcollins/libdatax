@@ -752,6 +752,16 @@ int datax_sched_commit(struct datax_sched *s)
 	if (datax_sched_holds_io(s))
 		return io_busy(s, "commit");
 	datax_sched_io_lock(s, &h);
+	pthread_mutex_lock(&s->lock);
+	/* Being destroyed: the poller has stopped, so nothing committed now
+	 * would ever be fed or finished. */
+	if (s->stop) {
+		pthread_mutex_unlock(&s->lock);
+		datax_sched_io_unlock(s, &h);
+		return datax_error_ret(s->ctx, ECANCELED, "sched",
+				       "commit: the scheduler is being destroyed");
+	}
+	pthread_mutex_unlock(&s->lock);
 	ret = datax_tick_read_u64(s->dev, "current_time_ticks", &now);
 	pthread_mutex_lock(&s->lock);
 	for (size_t i = 0; i < s->ncmds; i++)
@@ -848,6 +858,7 @@ static int flush_outstanding(struct datax_sched *s, const char *detail)
 		if (!c || c->state == CMD_DONE)
 			continue;
 		res.requested_ticks = c->api_ts;
+		res.queue_emptied = true;      /* flush and destroy empty Tick first */
 		snprintf(res.detail, sizeof(res.detail), "%s", detail);
 		datax_sched_finish(s, c, &res);
 	}

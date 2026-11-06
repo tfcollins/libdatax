@@ -55,6 +55,9 @@ struct shim {
 	uint64_t ack_delay;
 	/* stall_and_fill also pauses this scheduler (from the poller thread) */
 	struct datax_sched *pause_s;
+	/* one-shot: the current_time_ticks read right after the next
+	 * completion_ack fails (the record is acked, its drain time lost) */
+	bool fail_time_after_ack, ack_seen;
 };
 
 static uint32_t csv_word(const char *csv, int idx)
@@ -72,8 +75,15 @@ static uint32_t csv_word(const char *csv, int idx)
 static int shim_read(void *h, const char *attr, char *buf, size_t len)
 {
 	struct shim *sh = h;
+	bool fail = false;
 
-	return fake_tick_read(sh->f, attr, buf, len);
+	if (!strcmp(attr, "current_time_ticks")) {
+		pthread_mutex_lock(&sh->m);
+		fail = sh->ack_seen;
+		sh->ack_seen = false;
+		pthread_mutex_unlock(&sh->m);
+	}
+	return fail ? -EIO : fake_tick_read(sh->f, attr, buf, len);
 }
 
 static int shim_write(void *h, const char *attr, const char *val)
@@ -87,6 +97,10 @@ static int shim_write(void *h, const char *attr, const char *val)
 		pthread_mutex_lock(&sh->m);
 		d = sh->ack_delay;
 		sh->ack_delay = 0;
+		if (sh->fail_time_after_ack) {
+			sh->fail_time_after_ack = false;
+			sh->ack_seen = true;
+		}
 		pthread_mutex_unlock(&sh->m);
 		if (d)
 			fake_tick_advance(sh->f, d);
@@ -988,6 +1002,35 @@ static void test_reserved_gpio_bit(bool adrv9009)
 	printf("test_reserved_gpio_bit(%s): ok\n", adrv9009 ? "adrv9009" : "ad936x");
 }
 
+/* Final review M1: the time read after an ack fails. The record has left
+ * the slot, so it is processed anyway with an estimated time, as lagged:
+ * LATE "poller lagged", never DROPPED "no completion". */
+static void test_acked_record_kept_on_time_read_failure(void)
+{
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t;
+	long seq;
+
+	fx_open(&x, 0, true);
+	t = fake_tick_now(x.f) + 50 * MS;
+	seq = gpio(&x, t, true);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(shim_count(&x.sh) == 1);
+	pthread_mutex_lock(&x.sh.m);
+	x.sh.fail_time_after_ack = true;
+	pthread_mutex_unlock(&x.sh.m);
+	run_until(&x, t + MS, 1 * MS);
+	memset(&c, 0, sizeof(c));
+	CHECK(datax_sched_wait(x.s, seq, 3000, &c) == 0);
+	CHECK(c.status == DATAX_COMPLETION_LATE);
+	CHECK(strstr(lasterr(&x), "poller lagged") != NULL);
+	CHECK(c.executed_ticks == t);                /* Tick's own record, kept */
+	CHECK(!x.sh.fail_time_after_ack && !x.sh.ack_seen);   /* the failure was hit */
+	fx_close(&x);
+	printf("test_acked_record_kept_on_time_read_failure: ok\n");
+}
+
 static void test_flush_completes_flushed(void)
 {
 	struct fx x;
@@ -1225,6 +1268,8 @@ int main(int argc, char **argv)
 			{ "destroy_cancels_waiters", test_destroy_cancels_waiters },
 			{ "get_time_races_destroy", test_get_time_races_destroy },
 			{ "context_destroy_cancels_waiters", test_context_destroy_cancels_waiters },
+			{ "acked_record_kept_on_time_read_failure",
+			  test_acked_record_kept_on_time_read_failure },
 		};
 
 		for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
@@ -1254,6 +1299,7 @@ int main(int argc, char **argv)
 	test_events_late_and_overflow();
 	test_reserved_gpio_bit(true);
 	test_flush_completes_flushed();
+	test_acked_record_kept_on_time_read_failure();
 	test_destroy_while_polling();
 	test_destroy_cancels_waiters();
 	test_context_destroy_cancels_waiters();

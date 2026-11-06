@@ -15,7 +15,6 @@ int main(void)
 	CHECK(datax_sched_create(NULL, &sched) == -EINVAL);
 	CHECK(datax_device_run_mcs(NULL) == -ENOTSUP);
 	CHECK(datax_device_stage_hop_table(NULL, &f, 1) == -ENOTSUP);
-	CHECK(datax_device_set_time_next_pps(NULL, 0) == -ENOTSUP);
 	CHECK(datax_stream_start(NULL) == -EINVAL);
 	CHECK(datax_stream_start_at(NULL, 5) == -ENOTSUP);
 	CHECK(datax_stream_stop(NULL) == -EINVAL);

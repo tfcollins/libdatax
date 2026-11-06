@@ -3,6 +3,7 @@
 #define DATAX_INTERNAL_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include <datax/datax.h>
 
@@ -65,6 +66,13 @@ struct datax_device {
 	 * Tick); seeded at the first scheduler, never 0 (an empty completion
 	 * slot reads seq 0). */
 	unsigned int next_seq;
+	/* Device time (devtime.c). API time = hardware ticks + time_off (mod
+	 * 2^64); nonzero only after a soft alignment. time_source is an enum
+	 * datax_time_source. time_armed: a hard alignment timed out with the
+	 * Tick still armed, so a late PPS edge will load the epoch. */
+	_Atomic unsigned long long time_off;
+	_Atomic int time_source;
+	_Atomic bool time_armed;
 };
 
 /* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */

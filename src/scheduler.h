@@ -200,6 +200,7 @@ struct datax_sched {
 	unsigned long long last_hw;        /* latest device time read */
 	unsigned long long last_hw_mono;   /* host monotonic ns of that read */
 	unsigned long long late_seen, overflow_seen;
+	int pps_seen_state;                /* devtime.c watch: 0 unknown, 1 absent, 2 present */
 	unsigned long host_late;           /* commands the feeder could not write in time */
 
 	datax_sched_poll_fn poll_fn;
@@ -231,6 +232,15 @@ void datax_sched_emit_locked(struct datax_sched *s, enum datax_event_type type,
 void datax_sched_map_status(uint32_t tick_status, struct datax_sched_result *r);
 /* Pack c as Tick's CSV of twelve 32-bit words. */
 void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len);
+
+/* devtime.c: the PPS watch, run by the poller every IDLE_COUNTER_EVERY
+ * iterations (and on every active one) with io held and s->lock not held. */
+void datax_devtime_poll(struct datax_sched *s);
+
+/* devtime.c: if a timed-out hard alignment is still armed and its edge has
+ * landed, adopt it (clear the soft offset, drop written commands, event).
+ * s may be NULL (no scheduler); otherwise io must be held. */
+void datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched *s);
 
 /* poller.c */
 /* At create, before the poller starts: time DATAX_SCHED_DRAIN_SAMPLES

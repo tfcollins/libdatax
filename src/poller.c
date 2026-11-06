@@ -489,6 +489,8 @@ static void iterate(struct datax_sched *s)
 		user = s->poll_user;
 		now = s->last_hw;
 		pthread_mutex_unlock(&s->lock);
+		if (counters)
+			datax_devtime_poll(s);   /* PPS watch (devtime.c) */
 		if (fn)
 			fn(s, now, user);
 	}

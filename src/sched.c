@@ -673,7 +673,11 @@ int datax_sched_commit(struct datax_sched *s)
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *c = &s->cmds[i];
 
-		if (c->state == CMD_BUILD && c->hw_ts < now + s->guard_ticks) {
+		/* In API time: a past API time must not wrap into the far future
+		 * when the soft offset is subtracted. */
+		if (c->state == CMD_BUILD &&
+		    (c->api_ts < datax_devtime_from_hw(s->dev, now) + s->guard_ticks ||
+		     c->hw_ts < now + s->guard_ticks)) {
 			datax_error_set(s->ctx, "sched",
 					"commit: seq %ld at %llu is inside the guard margin "
 					"(%llu ms) of now (%llu); batch discarded", c->seq,
@@ -826,6 +830,23 @@ static void wait_leave(struct datax_sched *s)
 	pthread_mutex_unlock(&s->lock);
 }
 
+/* Leave wait() with an error. The last error is written before wait_leave,
+ * while s->lock is held: afterwards destroy may free s and the caller may
+ * destroy the context. */
+static int __attribute__((format(printf, 4, 5)))
+wait_fail(struct datax_sched *s, struct datax_context *ctx, int err, const char *fmt, ...)
+{
+	char msg[256];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(msg, sizeof(msg), fmt, ap);
+	va_end(ap);
+	datax_error_set(ctx, "sched", "%s", msg);
+	wait_leave(s);
+	return -err;
+}
+
 int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 		     struct datax_completion *out)
 {
@@ -875,15 +896,13 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 		/* destroy first: it also finishes outstanding commands FLUSHED,
 		 * but a waiter it interrupts reports the cancellation */
 		if (s->stop) {
-			wait_leave(s);
-			return datax_error_ret(ctx, ECANCELED, "sched",
-					       "wait: the scheduler is being destroyed");
+			return wait_fail(s, ctx, ECANCELED,
+				    "wait: the scheduler is being destroyed");
 		}
 		c = datax_sched_find(s, seq);
 		if (!c) {           /* consumed by get_completions meanwhile */
-			wait_leave(s);
-			return datax_error_ret(ctx, EINVAL, "sched",
-					       "wait: seq %ld was consumed", seq);
+			return wait_fail(s, ctx, EINVAL,
+				    "wait: seq %ld was consumed", seq);
 		}
 		if (c->state == CMD_DONE)
 			break;
@@ -891,12 +910,11 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 		 * anything else at the deadline is not yet known (ruling). */
 		if (timeout_ms >= 0 && passed(&dl)) {
 			st = c->state;
-			wait_leave(s);
-			return datax_error_ret(ctx, ETIMEDOUT, "sched",
-					       "wait: seq %ld has not completed in %d ms (%s)", seq,
-					       timeout_ms, st == CMD_BUILD ? "not committed" :
-					       st == CMD_PENDING ? "not yet written" :
-					       "not yet due or not yet drained");
+			return wait_fail(s, ctx, ETIMEDOUT,
+				    "wait: seq %ld has not completed in %d ms (%s)", seq,
+				    timeout_ms, st == CMD_BUILD ? "not committed" :
+				    st == CMD_PENDING ? "not yet written" :
+				    "not yet due or not yet drained");
 		}
 		if (timeout_ms >= 0)
 			pthread_cond_timedwait(&s->done, &s->lock, &dl);
@@ -906,10 +924,13 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 	fill(out, c);
 	snprintf(detail, sizeof(detail), "%s", c->res.detail);
 	datax_sched_remove(s, c);
-	wait_leave(s);
-	/* Ruling 4: a non-OK completion's detail travels in the last error. */
+	/* Ruling 4: a non-OK completion's detail travels in the last error.
+	 * Written before wait_leave, still under s->lock (order s->lock then
+	 * ctx->lock): once the last waiter leaves, destroy may free s and the
+	 * caller may destroy the context. */
 	if (out->status != DATAX_COMPLETION_OK)
 		datax_error_set(ctx, "sched", "seq %ld: %s", seq, detail);
+	wait_leave(s);
 	return 0;
 }
 

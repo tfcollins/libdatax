@@ -1,9 +1,34 @@
 # SPDX-License-Identifier: MIT
 """python -m datax.doctor [uri]: print library, device and capability info."""
+import ctypes as C
 import os
 import sys
 
 from . import Context, Error
+from ._lib import get_lib
+
+
+def _streams_line(dev):
+    """rx=<name>|none tx=<name>|none overflow-detect=yes|no|unknown."""
+    lib = get_lib()
+    names, states = [], []
+    for direction in (0, 1):  # DATAX_RX, DATAX_TX
+        buf = C.create_string_buffer(64)
+        detect = C.c_int()
+        rc = lib.datax_internal_device_stream_info(
+            dev._ptr, direction, buf, len(buf), C.byref(detect))
+        if rc:
+            names.append("none")
+        else:
+            names.append(buf.value.decode())
+            states.append(detect.value)
+    if not states or 0 in states:
+        det = "no"
+    elif 1 in states:
+        det = "yes"
+    else:
+        det = "unknown"
+    return f"streams: rx={names[0]} tx={names[1]} overflow-detect={det}"
 
 
 def run(uri, out):
@@ -20,6 +45,7 @@ def run(uri, out):
             print(f"    capabilities: {', '.join(caps) if caps else 'none'}", file=out)
             det = sorted(d.caps.detected)
             print(f"    detected hardware: {', '.join(det) if det else 'none'}", file=out)
+            print("    " + _streams_line(d), file=out)
             print("    limits: " + ", ".join(f"{k}={v}" for k, v in lim.items()), file=out)
 
 

@@ -50,6 +50,7 @@ LIBDATAX_0.1 {
     datax_internal_tick_descriptor_pack;
     datax_internal_tick_enum;
     datax_internal_stream_stats;
+    datax_internal_device_stream_info;
   local:
     *;
 };

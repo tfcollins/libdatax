@@ -29,3 +29,20 @@ def test_doctor_failure_exit_1():
     r = _run(["ip:127.0.0.1:1"])
     assert r.returncode == 1
     assert r.stderr.strip()
+
+
+@pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)
+def test_doctor_streams_line(emu_uri):
+    r = _run([emu_uri])
+    assert r.returncode == 0, r.stderr
+    # direct_reg_access is present on both DMA devices but no stream has
+    # been opened to probe it.
+    assert ("streams: rx=cf-ad9361-lpc tx=cf-ad9361-dds-core-lpc "
+            "overflow-detect=unknown") in r.stdout
+
+
+@pytest.mark.parametrize("emu_uri", ["adrv9009-single"], indirect=True)
+def test_doctor_streams_line_none(emu_uri):
+    r = _run([emu_uri])
+    assert r.returncode == 0, r.stderr
+    assert "streams: rx=none tx=none overflow-detect=no" in r.stdout

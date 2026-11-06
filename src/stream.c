@@ -76,6 +76,13 @@
  * queued one (-EBUSY only when every block is lent), and the re-armed
  * block can come back one place out of order; that only follows a failed
  * legacy read, whose data is lost.
+ *
+ * Status. After each RX dequeue and TX enqueue the stream polls the core
+ * status register (stream_status.c), at most every 100 ms. An RX overflow
+ * counts in stats.overflows and marks the next block discontinuous (recv
+ * info, get_block info); a TX underflow counts in stats.underflows. A
+ * failed poll (no direct_reg_access attribute, or a read error) switches
+ * detection off for the stream's life.
  */
 #include <errno.h>
 #include <limits.h>
@@ -449,6 +456,7 @@ int datax_stream_start(struct datax_stream *s)
 	if (s->cfg.cyclic) {
 		/* Cyclic TX enables at its single send (TX task). */
 		s->started = true;
+		datax_stream_status_check(s, true);
 		return 0;
 	}
 	if (!s->bs) {
@@ -472,6 +480,7 @@ int datax_stream_start(struct datax_stream *s)
 	s->started = true;
 	s->cur = 0;
 	s->cur_off = 0;
+	datax_stream_status_check(s, true); /* probe; clears stale flags */
 	return 0;
 err:
 	ret = fail_iio(s, ret, what);
@@ -639,6 +648,7 @@ static int rx_take(struct datax_stream *s, int timeout_ms, long long deadline,
 			return quiet ? ret : fail_iio(s, ret, what);
 		}
 		s->stats.blocks_done++;
+		datax_stream_status_check(s, false);
 		return 0;
 	}
 }
@@ -733,10 +743,13 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 			if (ret)
 				return done ? (int)done : ret;
 		}
-		if (first && info) {
-			info->timestamp_ticks = 0;
-			info->discontinuous = false;
-			info->valid_samples = s->cfg.block_samples;
+		if (first) {
+			if (info) {
+				info->timestamp_ticks = 0;
+				info->discontinuous = s->disc_pending;
+				info->valid_samples = s->cfg.block_samples;
+			}
+			s->disc_pending = false;
 		}
 		first = false;
 		src = iio_block_start(s->blocks[s->cur]);
@@ -854,6 +867,7 @@ int datax_stream_send(struct datax_stream *s, const void *src, size_t samples,
 				return done ? (int)done :
 					fail_iio(s, ret, "send: enqueueing a block");
 			s->stats.blocks_done++;
+			datax_stream_status_check(s, false);
 			s->cur = (s->cur + 1) % s->nblocks;
 			s->cur_off = 0;
 		}
@@ -878,6 +892,7 @@ int datax_stream_send(struct datax_stream *s, const void *src, size_t samples,
 				return (int)done;
 			}
 			s->stats.blocks_done++;
+			datax_stream_status_check(s, false);
 			s->cur = (s->cur + 1) % s->nblocks;
 			s->cur_off = 0;
 		}
@@ -932,9 +947,10 @@ int datax_stream_get_block(struct datax_stream *s, void **data,
 	*data = iio_block_start(s->blocks[i]);
 	if (info) {
 		info->timestamp_ticks = 0;
-		info->discontinuous = false;
+		info->discontinuous = s->disc_pending;
 		info->valid_samples = s->blk_samples;
 	}
+	s->disc_pending = false;
 	return 0;
 }
 
@@ -966,8 +982,10 @@ int datax_stream_put_block(struct datax_stream *s, void *data)
 	if (ret)
 		/* Neither lent nor queued: RX re-arms it, TX finds it free. */
 		return fail_iio(s, ret, "put_block: enqueueing a block");
-	if (s->cfg.direction == DATAX_TX)
+	if (s->cfg.direction == DATAX_TX) {
 		s->stats.blocks_done++;
+		datax_stream_status_check(s, false);
+	}
 	return 0;
 }
 

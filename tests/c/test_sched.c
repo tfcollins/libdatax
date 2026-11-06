@@ -26,6 +26,7 @@
 
 #include "check.h"
 #include "fake_tick.h"
+#include "scheduler.h"        /* nwaiters: the waiter tests' synchronisation */
 #include "tick_descriptor.h"
 
 #define HZ        100000000ULL           /* fake (tron) tick rate */
@@ -618,7 +619,15 @@ static void test_feeder_starved_marks_late(void)
 		WAIT_FOR(shim_count(&x.sh) == 3);
 		msleep(10);
 		CHECK(shim_count(&x.sh) == 3);
+		/* The fake clock jumps 25 ms in no host time. Mid-iteration (after
+		 * the poller's time read, before its queue_level read) that pairs
+		 * an emptied queue with a stale time, and the feeder writes an
+		 * overdue command as if 20 ms ahead: something real hardware,
+		 * whose clock moves with the host's, cannot do. Jump between
+		 * iterations: pause waits for the one in flight to end. */
+		CHECK(datax_internal_sched_pause(x.s, true) == 0);
 		fake_tick_advance(x.f, 25 * MS);
+		CHECK(datax_internal_sched_pause(x.s, false) == 0);
 		CHECK(datax_sched_wait(x.s, s[7], 3000, &c) == 0);
 		CHECK(c.status == DATAX_COMPLETION_LATE);
 		CHECK(strstr(lasterr(&x), "host could not keep the queue fed") != NULL);
@@ -1094,6 +1103,24 @@ static void *waiter_main(void *arg)
 
 #define NWAITERS 16
 
+/* Every waiter thread is inside datax_sched_wait (counted, under s->lock,
+ * before it sleeps). The API requires a wait to have begun before destroy:
+ * a thread that has not reached wait() yet would touch the freed scheduler.
+ * A fixed sleep does not guarantee that under load. */
+static void waiters_blocked(struct datax_sched *s, unsigned int n)
+{
+	unsigned int in = 0;
+
+	for (int w = 0; w < 5000 && in < n; w++) {
+		pthread_mutex_lock(&s->lock);
+		in = s->nwaiters;
+		pthread_mutex_unlock(&s->lock);
+		if (in < n)
+			msleep(1);
+	}
+	CHECK(in == n);
+}
+
 static void test_destroy_cancels_waiters(void)
 {
 	for (int i = 0; i < 50; i++) {
@@ -1116,7 +1143,7 @@ static void test_destroy_cancels_waiters(void)
 			w[k].ret = 1;
 			CHECK(pthread_create(&th[k], NULL, waiter_main, &w[k]) == 0);
 		}
-		msleep(20);                       /* all blocked in wait() */
+		waiters_blocked(x.s, NWAITERS);   /* all blocked in wait() */
 		datax_sched_destroy(x.s);
 		x.s = NULL;
 		for (int k = 0; k < NWAITERS; k++) {
@@ -1150,7 +1177,7 @@ static void test_context_destroy_cancels_waiters(void)
 			w[k].ret = 1;
 			CHECK(pthread_create(&th[k], NULL, waiter_main, &w[k]) == 0);
 		}
-		msleep(10);
+		waiters_blocked(x.s, NWAITERS);
 		x.s = NULL;                      /* the context destroys it */
 		datax_context_destroy(x.ctx);
 		x.ctx = NULL;

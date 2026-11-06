@@ -129,10 +129,42 @@ Two of the timed capabilities need fabric that no tron image has today:
      setting. Without it, deterministic JESD latency alone does not make the two LOs coherent, and
      the page warns of this.
    - `MCS` (board ability) reads true when both phys and the FSM control attribute exist.
-9. **PPS epoch.** `set_time_next_pps(epoch)` writes `time_epoch_ticks`, then `arm_time_next_pps`.
-   - It returns `-ENODEV` "no PPS" when `pps_present` reads 0, which may be the case on tron. The
-     spike checks.
-   - `get_time` is unchanged.
+9. **PPS is optional; the internal clock is the default and the fallback** (owner, 2026-11-05:
+   "1PPS might be disconnected in hardware but the system should still have a fallback to
+   internal clocks").
+   - Device time is always Tick's free-running counter on the fabric's internal 100 MHz clock. It
+     runs, and every timed call works, with no PPS at all.
+   - On hopcap's tron image Tick's `pps_in` is tied off (Synchrona option off), so `pps_present` reads
+     0. The spike confirmed this, and it is the normal case today.
+   - **New accessor** (API page first): `int datax_device_get_time_source(const struct datax_device
+     *dev, enum datax_time_source *src)`, with these values:
+     - `DATAX_TIME_FREE_RUN`: internal clock, never aligned;
+     - `DATAX_TIME_PPS_ALIGNED`: epoch loaded on a real PPS edge;
+     - `DATAX_TIME_SOFT_ALIGNED`: aligned to the host clock in software, accurate only to about one
+       network round trip;
+     - `DATAX_TIME_PPS_HOLDOVER`: was PPS-aligned, PPS since lost, running on the internal clock.
+   - **`set_time_next_pps(epoch)` never fails just because PPS is missing.**
+     - With `pps_present` = 1, it arms `arm_time_next_pps` after writing `time_epoch_ticks`. It then
+       waits up to 2 s for `time_aligned`, and the source becomes `PPS_ALIGNED`.
+     - With no PPS, or no edge within 2 s, it falls back to software alignment. libdatax records a
+       per-device offset so that device time reads `epoch` at the moment of the call. It applies the
+       offset everywhere device time crosses the API: `get_time`, every `queue_*` timestamp, and
+       completion times. Tick's own counter is left untouched.
+     - The fallback returns 0, sets the source to `SOFT_ALIGNED`, and raises
+       `DATAX_EVT_PPS_LOCK_CHANGE` with detail "no PPS: aligned to the host clock (±<rtt> µs)".
+       Callers that need a hard edge check the source.
+   - The poller watches `pps_present` and `time_aligned`. Every transition raises
+     `DATAX_EVT_PPS_LOCK_CHANGE`.
+     - PPS lost after alignment: the source becomes `PPS_HOLDOVER` and time continues on the
+       internal clock.
+     - PPS appearing while free-running or soft-aligned: no automatic jump in time. The event says a
+       hard alignment is now possible.
+   - Relative scheduling never depends on PPS ("now + 500 ms"), so it is correct in every source.
+   - Possible later hardware fallback, not P3a: images with Corundum could feed Tick's `pps_in` from
+     Corundum's internal PTP PPS, as vrt49's time base already does. That gives a hard-timed
+     internal PPS.
+   - The `pps_present` / `time_aligned` / epoch behaviour on a live PPS stays unproven on tron until
+     a PPS source is wired. Tier 1 covers it with the fake Tick.
 10. **Capability gates.**
     - P3a ungates `TIMED_COMMANDS` (the Tick probe plus a working scheduler), `FHM_HOP` (adrv9009
       family plus Tick plus the FHM GPIO capability bit), `MCS`, and `PHASE_COHERENT` (as live
@@ -176,7 +208,9 @@ Two of the timed capabilities need fabric that no tron image has today:
      plan, the priming edge on `fhmInitFrequency`;
    - **late handling:** a deliberately late descriptor completes `LATE` and does not execute;
    - **MCS:** `run_mcs()` completes and `PHASE_COHERENT` follows the rules in decision 8;
-   - **PPS:** behaviour as found;
+   - **PPS fallback:** with no PPS (tron today), `set_time_next_pps` returns 0, the source reads
+     `SOFT_ALIGNED`, the event fires, `get_time` reads the epoch plus elapsed time within one round
+     trip, and a schedule relative to the aligned time executes on time;
    - P2's streaming suite still green on this image.
 5. Evidence per run (REQ-TEST-023/024):
    - completion logs, Tick edge-capture logs, measured tick rate, image hashes;
@@ -211,7 +245,7 @@ Two of the timed capabilities need fabric that no tron image has today:
   - the commit headroom rule (`-EAGAIN`);
   - the default late policy;
   - the chip A only rule;
-  - the PPS `-ENODEV`;
+  - `datax_time_source` and `datax_device_get_time_source`, and the PPS fallback rules;
   - the `PHASE_COHERENT` rules.
 - One poller thread per scheduler. It stops on `sched_destroy` and on context destroy, before the
   IIO context is freed (P2's lifetime rule).

@@ -96,14 +96,19 @@ static bool sched_has_queued(struct datax_sched *s)
 	return busy;
 }
 
-/* After the offset changes, commands still being built keep the API time
- * the caller gave: recompute their hardware time. */
+/* After the offset changes, commands not yet written keep the API time the
+ * caller gave: recompute their hardware time. s->lock held. */
+static void rebase_unwritten(struct datax_sched *s)
+{
+	for (size_t i = 0; i < s->ncmds; i++)
+		if (s->cmds[i].state == CMD_BUILD || s->cmds[i].state == CMD_PENDING)
+			s->cmds[i].hw_ts = datax_devtime_to_hw(s->dev, s->cmds[i].api_ts);
+}
+
 static void rebase_building(struct datax_sched *s)
 {
 	pthread_mutex_lock(&s->lock);
-	for (size_t i = 0; i < s->ncmds; i++)
-		if (s->cmds[i].state == CMD_BUILD)
-			s->cmds[i].hw_ts = datax_devtime_to_hw(s->dev, s->cmds[i].api_ts);
+	rebase_unwritten(s);
 	pthread_mutex_unlock(&s->lock);
 }
 
@@ -136,15 +141,81 @@ static int align_soft(struct datax_device *dev, struct datax_sched *s,
 	return 0;
 }
 
+/*
+ * A timed-out hard alignment leaves Tick armed, and a late edge then makes
+ * the counter jump to the epoch. Adopt it: the soft offset goes, commands
+ * not yet written are re-based, commands already written (they were timed
+ * against the old counter) are dropped, and Tick's queue is emptied of
+ * them. s may be NULL; otherwise io is held.
+ */
+void datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched *s)
+{
+	unsigned long long v = 0, hw = 0;
+	unsigned int dropped = 0;
+
+	if (!atomic_load(&dev->time_armed))
+		return;
+	if (datax_tick_read_u64(dev, "time_aligned", &v) || !v)
+		return;
+	if (!atomic_exchange(&dev->time_armed, false))
+		return;                          /* another thread adopted it */
+	if (s) {
+		bool written = false;
+
+		pthread_mutex_lock(&s->lock);
+		for (size_t i = 0; i < s->ncmds; i++)
+			written = written || s->cmds[i].state == CMD_WRITTEN;
+		pthread_mutex_unlock(&s->lock);
+		if (written) {          /* keep what ran, empty the queue, keep what ran since */
+			(void)datax_poller_read_time(s);
+			(void)datax_poller_drain(s);
+			(void)datax_tick_write_str(dev, "flush_queue", "1");
+			(void)datax_poller_drain(s);
+		}
+		pthread_mutex_lock(&s->lock);
+		atomic_store(&dev->time_off, 0);
+		atomic_store(&dev->time_source, DATAX_TIME_PPS_ALIGNED);
+		rebase_unwritten(s);
+		for (size_t i = 0; i < s->ncmds; i++) {
+			long seq = s->cmds[i].state == CMD_WRITTEN ? s->cmds[i].seq : 0;
+			struct sched_cmd *c;
+			struct datax_sched_result res = {
+				.status = DATAX_COMPLETION_DROPPED, .tick_status = UINT32_MAX,
+			};
+
+			if (!seq)
+				continue;
+			c = datax_sched_find(s, seq);
+			if (!c || c->state == CMD_DONE)
+				continue;
+			res.requested_ticks = c->api_ts;
+			snprintf(res.detail, sizeof(res.detail),
+				 "device time jumped on a late PPS edge");
+			datax_sched_finish(s, c, &res);   /* may drop s->lock for a hook */
+			dropped++;
+			i = (size_t)-1;                   /* the table may have moved: rescan */
+		}
+		s->kick = true;
+		pthread_cond_signal(&s->wake);
+		pthread_mutex_unlock(&s->lock);
+	} else {
+		atomic_store(&dev->time_off, 0);
+		atomic_store(&dev->time_source, DATAX_TIME_PPS_ALIGNED);
+	}
+	(void)datax_tick_read_u64(dev, "current_time_ticks", &hw);
+	emit_pps(dev, s, hw,
+		 "late PPS edge: device time jumped to epoch; %u queued commands dropped",
+		 dropped);
+}
+
 int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long epoch_ticks)
 {
 	struct datax_sched *s;
 	struct datax_io_hold h;
 	bool locked;
-	unsigned long long present = 0, aligned = 0, hw = 0;
-	unsigned int waited;
-	const char *why = "no PPS";
-	int ret;
+	unsigned long long present = 0, aligned = 0, hw = 0, deadline, now;
+	char why[96] = "no PPS";
+	int ret, wret = 0;
 
 	if (!dev)
 		return -EINVAL;
@@ -155,6 +226,8 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 	locked = s && !datax_sched_holds_io(s);
 	if (locked)
 		datax_sched_io_lock(s, &h);
+	/* an edge that landed since the last look moved the counter already */
+	datax_devtime_check_late_edge(dev, s);
 	if (s && sched_has_queued(s)) {
 		ret = datax_error_ret(dev->ctx, EBUSY, "time",
 				      "scheduler has queued commands; flush first");
@@ -163,18 +236,28 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 	/* A missing or unreadable pps_present is the same as no PPS. */
 	if (datax_tick_read_u64(dev, "pps_present", &present))
 		present = 0;
-	if (present &&
-	    !datax_tick_write_u64(dev, "time_epoch_ticks", epoch_ticks) &&
-	    !datax_tick_write_u64(dev, "arm_time_next_pps", 1)) {
-		for (waited = 0;; waited++) {
-			if (!datax_tick_read_u64(dev, "time_aligned", &aligned) && aligned)
-				break;
-			if (waited >= PPS_WAIT_MS) {
-				/* Tick stays armed: the poller adopts a late edge. */
-				atomic_store(&dev->time_armed, true);
-				break;
+	if (present) {
+		deadline = datax_mono_ns() + (unsigned long long)PPS_WAIT_MS * 1000000ULL;
+		/* Tick reads the epoch register at the edge: an alignment still
+		 * armed from an earlier call takes this epoch instead. */
+		wret = datax_tick_write_u64(dev, "time_epoch_ticks", epoch_ticks);
+		if (!wret)
+			wret = datax_tick_write_u64(dev, "arm_time_next_pps", 1);
+		if (wret) {
+			snprintf(why, sizeof(why), "arming the PPS alignment failed (%d)", wret);
+		} else {
+			/* one monotonic deadline; the last read is at or after it */
+			for (;;) {
+				now = datax_mono_ns();
+				if (!datax_tick_read_u64(dev, "time_aligned", &aligned) && aligned)
+					break;
+				if (now >= deadline) {
+					/* Tick stays armed: a late edge is adopted */
+					atomic_store(&dev->time_armed, true);
+					break;
+				}
+				sleep_ms(1);
 			}
-			sleep_ms(1);
 		}
 		if (aligned) {
 			atomic_store(&dev->time_armed, false);
@@ -187,7 +270,8 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 			ret = 0;
 			goto out;
 		}
-		why = "no PPS edge within 2 s";
+		if (!wret)
+			snprintf(why, sizeof(why), "no PPS edge within 2 s");
 	}
 	ret = align_soft(dev, s, epoch_ticks, why);
 out:
@@ -203,26 +287,16 @@ out:
  * - pps_present appearing (0 -> 1 after a first observation) while the clock
  *   is not PPS-aligned: an event saying a hard alignment is now possible.
  *   Time does not jump.
- * - an armed alignment that timed out and then lands: Tick loaded the epoch,
- *   so the soft offset (if any) is dropped and the source is PPS_ALIGNED.
+ * - a late armed edge: see datax_devtime_check_late_edge.
  * No loss detection (see the file comment).
  */
 void datax_devtime_poll(struct datax_sched *s)
 {
 	struct datax_device *dev = s->dev;
-	unsigned long long v = 0, hw = 0;
+	unsigned long long v = 0;
 	int now_state;
 
-	if (atomic_load(&dev->time_armed) &&
-	    !datax_tick_read_u64(dev, "time_aligned", &v) && v) {
-		atomic_store(&dev->time_armed, false);
-		atomic_store(&dev->time_off, 0);
-		atomic_store(&dev->time_source, DATAX_TIME_PPS_ALIGNED);
-		rebase_building(s);
-		(void)datax_tick_read_u64(dev, "current_time_ticks", &hw);
-		datax_sched_emit(s, DATAX_EVT_PPS_LOCK_CHANGE, hw, -1,
-				 "aligned on a late fabric PPS edge");
-	}
+	datax_devtime_check_late_edge(dev, s);
 	if (datax_tick_read_u64(dev, "pps_present", &v))
 		return;
 	now_state = v ? 2 : 1;

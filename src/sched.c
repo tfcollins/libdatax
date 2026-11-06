@@ -673,7 +673,11 @@ int datax_sched_commit(struct datax_sched *s)
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *c = &s->cmds[i];
 
-		if (c->state == CMD_BUILD && c->hw_ts < now + s->guard_ticks) {
+		/* In API time: a past API time must not wrap into the far future
+		 * when the soft offset is subtracted. */
+		if (c->state == CMD_BUILD &&
+		    (c->api_ts < datax_devtime_from_hw(s->dev, now) + s->guard_ticks ||
+		     c->hw_ts < now + s->guard_ticks)) {
 			datax_error_set(s->ctx, "sched",
 					"commit: seq %ld at %llu is inside the guard margin "
 					"(%llu ms) of now (%llu); batch discarded", c->seq,

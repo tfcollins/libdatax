@@ -124,6 +124,16 @@ long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spe
 int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
 			uint32_t value);
 
+/*
+ * Ask the poller to run an iteration as soon as device time reaches
+ * hw_ticks, instead of at its next period (the earliest request wins; it is
+ * consumed when the iteration runs, so a hook that still needs it asks
+ * again). The poller converts it to host time from its last device-time
+ * read. FHM: the poll hook must see an unreported edge fire promptly.
+ * Thread-safe; s->lock not held.
+ */
+void datax_sched_wake_at(struct datax_sched *s, unsigned long long hw_ticks);
+
 /* Install the per-iteration hook (NULL fn removes it). 0 or -EINVAL. */
 int datax_sched_set_poll_hook(struct datax_sched *s, datax_sched_poll_fn fn, void *user);
 
@@ -223,6 +233,8 @@ struct datax_sched {
 	/* poller observations (hardware ticks) */
 	unsigned long long last_hw;        /* latest device time read */
 	unsigned long long last_hw_mono;   /* host monotonic ns of that read */
+	unsigned long long wake_hw;        /* run an iteration at this hardware time
+					    * (0: none; datax_sched_wake_at) */
 	unsigned long long late_seen, overflow_seen;
 	int pps_seen_state;                /* devtime.c watch: 0 unknown, 1 absent, 2 present */
 	unsigned long host_late;           /* commands the feeder could not write in time */

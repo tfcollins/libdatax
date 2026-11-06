@@ -398,6 +398,47 @@ static void test_consumed_flush_events(void)
 	printf("test_consumed_flush_events: ok\n");
 }
 
+static unsigned long long wake_of(struct datax_sched *s)
+{
+	unsigned long long v;
+
+	pthread_mutex_lock(&s->lock);
+	v = s->wake_hw;
+	pthread_mutex_unlock(&s->lock);
+	return v;
+}
+
+/* A spent wake target (device time has reached it) is cleared by the next
+ * iteration, and never blocks a later request; an earlier pending request
+ * still wins over a later one. */
+static void test_wake_target_spent(void)
+{
+	struct fx x;
+	unsigned long long t, hw;
+
+	fx_open(&x);
+	t = fake_tick_now(x.f);
+	(void)enq(&x, t + 500 * MS, false);          /* keeps the poller active */
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(fake_attr(x.f, "queue_level") == 1);
+	pthread_mutex_lock(&x.s->lock);
+	hw = x.s->last_hw;
+	pthread_mutex_unlock(&x.s->lock);
+	/* spent before any iteration: a later request replaces it */
+	datax_sched_wake_at(x.s, hw - 10);
+	datax_sched_wake_at(x.s, t + 300 * MS);
+	CHECK(wake_of(x.s) == t + 300 * MS);
+	datax_sched_wake_at(x.s, t + 200 * MS);       /* earlier pending wins */
+	CHECK(wake_of(x.s) == t + 200 * MS);
+	datax_sched_wake_at(x.s, t + 250 * MS);
+	CHECK(wake_of(x.s) == t + 200 * MS);
+	/* reached: the next iteration clears it */
+	fake_tick_advance(x.f, 210 * MS);
+	WAIT_FOR(wake_of(x.s) == 0);
+	fx_close(&x);
+	printf("test_wake_target_spent: ok\n");
+}
+
 int main(void)
 {
 	test_destroy_finishes_hooks();
@@ -405,6 +446,7 @@ int main(void)
 	test_poll_hook_contract();
 	test_consumed_result_not_kept();
 	test_consumed_flush_events();
+	test_wake_target_spent();
 	printf("test_sched_hooks: all ok\n");
 	return 0;
 }

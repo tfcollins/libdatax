@@ -1,7 +1,7 @@
 # Design: libdatax P3a — timed control on the ADRV9009-ZU11EG
 
 Date: 2026-11-05
-Status: draft. The owner said "go ahead, start P3" and opted out of questions. Every decision
+Status: implemented 2026-11-06 (libdatax main, phase exit); tron green, see "Phase exit evidence". Originally drafted under the owner's "go ahead, start P3" with questions opted out.
 below is the implementer's call and is marked as such. A builder check and a hardware spike
 (section "Spike") come before the plan.
 Board: P3 on <https://github.com/users/tfcollins/projects/4>
@@ -372,3 +372,27 @@ Checked against the Tick RTL at the pinned revision (`axi_timed_command_schedule
 - The poller interval: start at 1 ms, and make it a scheduler option if needed.
 - How Python marshals events onto its thread.
 - The CSV formatting details, which the P1 packer already pins.
+
+## Phase exit evidence (2026-11-06)
+
+- **tron (ADRV9009-ZU11EG)**: 21 passed, 6 skipped, at libdatax `3392cd7`, on hopcap's SFP image with
+  the Tick PPS selector (XSA `6292e762…`), with nothing on the external PPS input. The skips are the
+  P2 TX and loopback tests, because TX DMA feeds vrt49's deframer on this image. The evidence and
+  image hashes are in `docs/evidence/p3a/`.
+- **Changed by hardware:**
+  - the priming lead is at least the guard margin, and the poller wakes at the priming edge;
+  - the first timed tune on this board must be at least now + 20 ms ahead.
+
+  Found by run 2 ("stage late" on the second tune) and fixed in `1d8c6c9`.
+- **Changed by the final review:**
+  - an unexecuted fall parks GPIO bit 0;
+  - an alignment resets the FHM history, refreshes the poller's time snapshot, and returns `-EBUSY`
+    while a tune is live.
+
+  Run 5 caught the stale snapshot after a hard PPS load (`7679d86`).
+- **Matrix:** `timed-gpio`, `fhm-hop`, `sdk-timed` and `mcs` are *integration artifacts* until
+  `hw-test.yml` has a green run (freeze rule).
+- **`PHASE_COHERENT`:** stays false, because `adi,dig-clocks-rf-pll-phase-sync-mode` is not enabled.
+- **Not covered here:**
+  - REQ-TEST-031 and REQ-TEST-032 need RF cabling;
+  - REQ-TEST-022's timed-capture and gated-burst items moved to P3b (datax_sdk_sdr#28).

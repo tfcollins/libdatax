@@ -1,0 +1,803 @@
+{
+  "datax_module": "python/datax/__init__.py",
+  "iio_context": {
+    "attributes": {
+      "hdl_system_id": "[adrv9009zu11eg_vrt49] on [corundum] git branch [(HEAD] git [e57851ffcea3d92d821a38c908c909d61db4a492] dirty [2026-11-06 04:42:54] UTC",
+      "hw_carrier": "Analog Devices ADRV9009-ZU11EG Rev.A",
+      "ip,ip-addr": "<ip>",
+      "local,kernel": "6.1.70-g2e8908932dfd-dirty",
+      "unique_id": "10400014ac040013100027006dbb9c09f2",
+      "uri": "ip:host"
+    },
+    "description": "Linux host 6.1.70-g2e8908932dfd-dirty #3 SMP Thu Nov  5 11:57:12 EST 2026 aarch64 <ip>",
+    "version": "0.26-5e1e9cb"
+  },
+  "image": "hopcap-sfp",
+  "image_hashes": "xsa=6292e7622810612a4cd19b3a1774ac84630bbbbedc997720fb0f650de13304c9 Image=18e592b58b4e589f2d61b7d4fe5db925233a2f1cf2a16c44da518f8341a925be dtb=1acf636a0ac124bbdb2dc94c3ef63aa4f152f47a0571a3d83e05df21a809963b",
+  "libdatax_commit": "3392cd7088bfee9e0958da634c8ed95a03701471",
+  "libdatax_library": "build/libdatax.so.0.1.0",
+  "libdatax_version": "0.1",
+  "libiio_pin": "6534f14215f4738cec224bf50f13f475fe5264a6",
+  "pps_source": "internal",
+  "tests": {
+    "test_dense_hops_library_readback_each_edge": {
+      "all_on_time": true,
+      "all_seqs_reported": true,
+      "completions": [
+        {
+          "detail": "",
+          "executed": 13518729166,
+          "requested": 13518729166,
+          "seq": 914453215,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13520229166,
+          "requested": 13520229166,
+          "seq": 914453217,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13521729166,
+          "requested": 13521729166,
+          "seq": 914453219,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13523229166,
+          "requested": 13523229166,
+          "seq": 914453221,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13524729166,
+          "requested": 13524729166,
+          "seq": 914453223,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13526229166,
+          "requested": 13526229166,
+          "seq": 914453225,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13527729166,
+          "requested": 13527729166,
+          "seq": 914453227,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13529229166,
+          "requested": 13529229166,
+          "seq": 914453229,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13530729166,
+          "requested": 13530729166,
+          "seq": 914453231,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13532229166,
+          "requested": 13532229166,
+          "seq": 914453233,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13533729166,
+          "requested": 13533729166,
+          "seq": 914453235,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13535229166,
+          "requested": 13535229166,
+          "seq": 914453237,
+          "skew_ticks": 0,
+          "status": "OK"
+        }
+      ],
+      "final_pll_hz": 2480000000,
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 497,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7455,
+        "tick_hz": 100000000
+      },
+      "pulse_us_derived": 7500,
+      "report_spacing_us": 7455,
+      "reported": 12,
+      "spacing_us": 15000,
+      "tick_counters_after": {
+        "late_count": 11,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_before": {
+        "late_count": 9,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tunes": 12,
+      "want_final_hz": 2480000000
+    },
+    "test_dense_hops_x1_2_measurement": {
+      "all_on_time": true,
+      "all_seqs_reported": true,
+      "completions": [
+        {
+          "detail": "",
+          "executed": 13589764533,
+          "requested": 13589764533,
+          "seq": 914453243,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13590664533,
+          "requested": 13590664533,
+          "seq": 914453245,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13591564533,
+          "requested": 13591564533,
+          "seq": 914453247,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13592464533,
+          "requested": 13592464533,
+          "seq": 914453249,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13593364533,
+          "requested": 13593364533,
+          "seq": 914453251,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13594264533,
+          "requested": 13594264533,
+          "seq": 914453253,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13595164533,
+          "requested": 13595164533,
+          "seq": 914453255,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13596064533,
+          "requested": 13596064533,
+          "seq": 914453257,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13596964533,
+          "requested": 13596964533,
+          "seq": 914453259,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13597864533,
+          "requested": 13597864533,
+          "seq": 914453261,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13598764533,
+          "requested": 13598764533,
+          "seq": 914453263,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13599664533,
+          "requested": 13599664533,
+          "seq": 914453265,
+          "skew_ticks": 0,
+          "status": "OK"
+        }
+      ],
+      "final_pll_hz": 2480000000,
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 520,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7453,
+        "tick_hz": 100000000
+      },
+      "outcome": "held",
+      "pulse_us_derived": 4500,
+      "report_spacing_us": 7453,
+      "reported": 12,
+      "spacing_us": 9000,
+      "tick_counters_after": {
+        "late_count": 13,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_before": {
+        "late_count": 11,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tunes": 12,
+      "want_final_hz": 2480000000
+    },
+    "test_family_and_channels": {
+      "channels": 4,
+      "device": "adrv9009",
+      "family": "adrv9009"
+    },
+    "test_fhm_enable_readback": {
+      "fhm_enable_after_stage": 1,
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 547,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7330,
+        "tick_hz": 100000000
+      },
+      "tick_counters_after": {
+        "late_count": 17,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_before": {
+        "late_count": 15,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      }
+    },
+    "test_hop_schedule": {
+      "tunes": [
+        {
+          "executed": 13160415989,
+          "got": 2420000000,
+          "requested": 13160415989,
+          "seq": 914453167,
+          "status": "OK",
+          "want": 2420000000
+        },
+        {
+          "executed": 13180415989,
+          "got": 2440000000,
+          "requested": 13180415989,
+          "seq": 914453169,
+          "status": "OK",
+          "want": 2440000000
+        },
+        {
+          "executed": 13200415989,
+          "got": 2460000000,
+          "requested": 13200415989,
+          "seq": 914453171,
+          "status": "OK",
+          "want": 2460000000
+        },
+        {
+          "executed": 13220415989,
+          "got": 2480000000,
+          "requested": 13220415989,
+          "seq": 914453173,
+          "status": "OK",
+          "want": 2480000000
+        }
+      ]
+    },
+    "test_late_dropped": {
+      "commit_errors": [],
+      "completion": [
+        {
+          "detail": "seq 914453195: host could not keep the queue fed",
+          "executed": 0,
+          "requested": 13379426188,
+          "seq": 914453195,
+          "skew_ticks": -13379426188,
+          "status": "LATE"
+        }
+      ],
+      "guard_margin_ms": 10,
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 525,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7194,
+        "tick_hz": 100000000
+      },
+      "margin_over_guard_ms": 12,
+      "past_commit_error": "[errno 62] commit: seq 914453192 at 13376609435 is inside the guard margin (10 ms) of now (13376999374); batch discarded",
+      "pll_hz_after": 2480000000,
+      "tick_counter_note": "late_count/overflow_count may stay flat: a command that is late before the poller feeds it never reaches the Tick",
+      "tick_counters_around": {
+        "after": {
+          "late_count": 6,
+          "overflow_count": 0,
+          "pps_present": 1,
+          "time_aligned": 0
+        },
+        "before": {
+          "late_count": 6,
+          "overflow_count": 0,
+          "pps_present": 1,
+          "time_aligned": 0
+        }
+      }
+    },
+    "test_phase_coherent_false": {
+      "caps": [
+        "timed_commands",
+        "fhm_hop",
+        "mcs"
+      ]
+    },
+    "test_phase_sync_attribute_listing": {
+      "phase_named_attributes": {
+        "adrv9009-phy": [
+          "adi,dig-clocks-rf-pll-phase-sync-mode",
+          "calibrate_rx_phase_correction_en"
+        ],
+        "adrv9009-phy-b": [
+          "adi,dig-clocks-rf-pll-phase-sync-mode",
+          "calibrate_rx_phase_correction_en"
+        ]
+      },
+      "phase_or_sync_attributes": {
+        "adrv9009-phy": [
+          "adi,dig-clocks-rf-pll-phase-sync-mode",
+          "adi,fhm-mode-enable-mcs-sync",
+          "adi,jesd204-deframer-a-syncb-out-cmos-drive-level",
+          "adi,jesd204-deframer-a-syncb-out-cmos-slew-rate",
+          "adi,jesd204-deframer-a-syncb-out-lvds-mode",
+          "adi,jesd204-deframer-a-syncb-out-lvds-pn-invert",
+          "adi,jesd204-deframer-a-syncb-out-select",
+          "adi,jesd204-deframer-b-syncb-out-cmos-drive-level",
+          "adi,jesd204-deframer-b-syncb-out-cmos-slew-rate",
+          "adi,jesd204-deframer-b-syncb-out-lvds-mode",
+          "adi,jesd204-deframer-b-syncb-out-lvds-pn-invert",
+          "adi,jesd204-deframer-b-syncb-out-select",
+          "adi,jesd204-framer-a-syncb-in-lvds-mode",
+          "adi,jesd204-framer-a-syncb-in-lvds-pn-invert",
+          "adi,jesd204-framer-a-syncb-in-select",
+          "adi,jesd204-framer-b-syncb-in-lvds-mode",
+          "adi,jesd204-framer-b-syncb-in-lvds-pn-invert",
+          "adi,jesd204-framer-b-syncb-in-select",
+          "adi,rxagc-agc-enable-sync-pulse-for-gain-counter",
+          "calibrate_rx_phase_correction_en",
+          "multichip_sync"
+        ],
+        "adrv9009-phy-b": [
+          "adi,dig-clocks-rf-pll-phase-sync-mode",
+          "adi,fhm-mode-enable-mcs-sync",
+          "adi,jesd204-deframer-a-syncb-out-cmos-drive-level",
+          "adi,jesd204-deframer-a-syncb-out-cmos-slew-rate",
+          "adi,jesd204-deframer-a-syncb-out-lvds-mode",
+          "adi,jesd204-deframer-a-syncb-out-lvds-pn-invert",
+          "adi,jesd204-deframer-a-syncb-out-select",
+          "adi,jesd204-deframer-b-syncb-out-cmos-drive-level",
+          "adi,jesd204-deframer-b-syncb-out-cmos-slew-rate",
+          "adi,jesd204-deframer-b-syncb-out-lvds-mode",
+          "adi,jesd204-deframer-b-syncb-out-lvds-pn-invert",
+          "adi,jesd204-deframer-b-syncb-out-select",
+          "adi,jesd204-framer-a-syncb-in-lvds-mode",
+          "adi,jesd204-framer-a-syncb-in-lvds-pn-invert",
+          "adi,jesd204-framer-a-syncb-in-select",
+          "adi,jesd204-framer-b-syncb-in-lvds-mode",
+          "adi,jesd204-framer-b-syncb-in-lvds-pn-invert",
+          "adi,jesd204-framer-b-syncb-in-select",
+          "adi,rxagc-agc-enable-sync-pulse-for-gain-counter",
+          "calibrate_rx_phase_correction_en",
+          "multichip_sync"
+        ]
+      },
+      "phys_listed": {
+        "adrv9009-phy": {
+          "channels": 25,
+          "debug_attrs": 310,
+          "device_attrs": 19
+        },
+        "adrv9009-phy-b": {
+          "channels": 25,
+          "debug_attrs": 310,
+          "device_attrs": 19
+        }
+      }
+    },
+    "test_pps_alignment": {
+      "align_call_s": 0.8912127770017833,
+      "device_advance_s": 2.00219241,
+      "device_offset_after_align_s": 0.002479,
+      "events": [
+        {
+          "detail": "aligned on a fabric PPS edge",
+          "seq": -1,
+          "ticks": 100000165091,
+          "type": "PPS_LOCK_CHANGE"
+        }
+      ],
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 518,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7389,
+        "tick_hz": 100000000
+      },
+      "pps_present_after": 1,
+      "pps_present_before": 1,
+      "source": "PPS_ALIGNED",
+      "tick_before": {
+        "late_count": 21,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_after": {
+        "late_count": 21,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 1
+      },
+      "tick_counters_before": {
+        "late_count": 21,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "time_aligned": 1,
+      "wall_advance_s": 2.0024084899923764
+    },
+    "test_priming_edge_lands_on_init": {
+      "attempts": [
+        {
+          "attempt": 0,
+          "read_period_ms": 1.9013159981113859,
+          "samples": 17,
+          "seen_hz": [
+            2420000000,
+            2450000000,
+            2480000000
+          ]
+        }
+      ]
+    },
+    "test_readback_exact_across_band": {
+      "band_readback": [
+        {
+          "got": 2400000000,
+          "status": "OK",
+          "want": 2400000000
+        },
+        {
+          "got": 2500000000,
+          "status": "OK",
+          "want": 2500000000
+        },
+        {
+          "got": 2450000000,
+          "status": "OK",
+          "want": 2450000000
+        },
+        {
+          "got": 2400000000,
+          "status": "OK",
+          "want": 2400000000
+        },
+        {
+          "got": 2450000000,
+          "status": "OK",
+          "want": 2450000000
+        }
+      ],
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 545,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 6224,
+        "tick_hz": 100000000
+      },
+      "tick_counters_after": {
+        "late_count": 15,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_before": {
+        "late_count": 13,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      }
+    },
+    "test_recv_timeout_recovers": {
+      "first_recv": "data arrived within 1 ms"
+    },
+    "test_reenable_reprimes": {
+      "completion": [
+        {
+          "detail": "",
+          "executed": 13887864778,
+          "requested": 13887864778,
+          "seq": 914453297,
+          "skew_ticks": 0,
+          "status": "OK"
+        }
+      ],
+      "final_pll_hz": 2420000000
+    },
+    "test_run_mcs_verifies": {
+      "fsm_state": "opt_post_running_stage",
+      "phase_coherent_rc": 0,
+      "phase_coherent_reason": "RF PLL phase sync not enabled"
+    },
+    "test_rx_block_nonconstant_per_channel": {
+      "std_by_channel": {
+        "0": 30146.90625,
+        "1": 33.41901397705078,
+        "2": 91.28165435791016,
+        "3": 23.88129425048828
+      }
+    },
+    "test_rx_throughput_recorded": {
+      "direct_reg_access": true,
+      "mb_per_s": 51.716576912276054,
+      "rx_device": "axi-adrv9009-rx-hpc",
+      "samples": 129302528,
+      "seconds": 10.000857420964167,
+      "stats": {
+        "blocks_done": 1973,
+        "enabled": false,
+        "overflow_detect": true,
+        "overflows": 96,
+        "status_polls": 98,
+        "underflows": 0
+      }
+    },
+    "test_staircase": {
+      "completions": [
+        {
+          "detail": "",
+          "executed": 13094455845,
+          "requested": 13094455845,
+          "seq": 914453155,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13095899045,
+          "requested": 13095899045,
+          "seq": 914453156,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13097342245,
+          "requested": 13097342245,
+          "seq": 914453157,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13098785445,
+          "requested": 13098785445,
+          "seq": 914453158,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13100228645,
+          "requested": 13100228645,
+          "seq": 914453159,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13101671845,
+          "requested": 13101671845,
+          "seq": 914453160,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13103115045,
+          "requested": 13103115045,
+          "seq": 914453161,
+          "skew_ticks": 0,
+          "status": "OK"
+        },
+        {
+          "detail": "",
+          "executed": 13104558245,
+          "requested": 13104558245,
+          "seq": 914453162,
+          "skew_ticks": 0,
+          "status": "OK"
+        }
+      ],
+      "edges": 8,
+      "independent_check": "none: no scope on this rig; completion records only",
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7216,
+        "tick_hz": 100000000
+      },
+      "report_spacing_us": 7216,
+      "spacing_us": 14432,
+      "tick_counters_after": {
+        "late_count": 0,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_before": {
+        "late_count": 0,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      }
+    },
+    "test_trigger_low_after_flush": {
+      "first_tune_wait": "[errno 22] wait: seq 914453200 is unknown or already consumed",
+      "flush_attempts": [
+        {
+          "after": 13443162201,
+          "before": 13442760557,
+          "rise": 13442199566,
+          "while_high": true
+        }
+      ],
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 525,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7435,
+        "tick_hz": 100000000
+      },
+      "tick_counters_after": {
+        "late_count": 9,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tick_counters_before": {
+        "late_count": 6,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 0
+      },
+      "tunes_after_flush": [
+        {
+          "detail": "",
+          "got": 2460000000,
+          "status": "OK",
+          "want": 2460000000
+        },
+        {
+          "detail": "",
+          "got": 2480000000,
+          "status": "OK",
+          "want": 2480000000
+        }
+      ]
+    },
+    "test_tune_after_alignment": {
+      "align": {
+        "after": 158504,
+        "before": 100252038686,
+        "source": "PPS_ALIGNED"
+      },
+      "limits": {
+        "guard_margin_ms": 10,
+        "hop_stage_us": 518,
+        "hop_table_depth": 64,
+        "max_channels": 4,
+        "queue_depth": 16,
+        "report_spacing_us": 7209,
+        "tick_hz": 100000000
+      },
+      "tick_counters_after": {
+        "late_count": 23,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 1
+      },
+      "tick_counters_before": {
+        "late_count": 21,
+        "overflow_count": 0,
+        "pps_present": 1,
+        "time_aligned": 1
+      },
+      "tune_after_alignment": {
+        "completion": [
+          {
+            "detail": "",
+            "executed": 20231843,
+            "requested": 20231843,
+            "seq": 914453307,
+            "skew_ticks": 0,
+            "status": "OK"
+          }
+        ],
+        "pll_hz": 2460000000
+      }
+    }
+  },
+  "uri": "ip:host"
+}

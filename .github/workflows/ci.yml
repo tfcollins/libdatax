@@ -93,5 +93,5 @@ jobs:
           python-version: "3.12"
       - name: Validate support.json
         run: |
-          pip install "git+https://github.com/tfcollins/datax_sdk_sdr@25f6b3d"
+          pip install "git+https://github.com/tfcollins/datax_sdk_sdr@63a8bec"
           datax-support check support.json --repo-root .

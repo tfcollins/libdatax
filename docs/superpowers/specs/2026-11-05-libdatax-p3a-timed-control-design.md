@@ -285,6 +285,36 @@ pattern, to settle the unknowns:
 7. The device tree's Talise RF PLL phase-sync setting.
 8. Last, and only if step 4 shows a safe way: a resync, with RX data checked afterwards.
 
+## Spike results (tron, hopcap SFP image, 2026-11-05)
+
+Host nemo, libiio v1 over `ip:` to stock `iiod`; raw log on nemo `~/hopcap-artifacts/p3a-spike/`.
+
+| Item | Result |
+|---|---|
+| Devices | `axi-timed-command-scheduler` present; capability bitmap `0x9f` (GPIO, PPS epoch, marker, stream gate, TDD, repeat; no arm-release, no timestamp), queue depth 16, 100 MHz |
+| Attribute read RTT | 0.21 ms median idle; 0.23 ms median, 0.87 ms p95, 2.16 ms max while an RX stream runs |
+| Descriptor write | about 0.27 ms |
+| Completion drain (7 reads + ack) | 1.76 ms median → `DATAX_LIMIT_REPORT_SPACING_US` = 5300 on this setup |
+| FHM stage write | 0.52 ms idle, 1.05 ms while RX streams |
+| FHM edges | Two rise+fall pulses, both edges reported, no drain between them: the rise fired, the fall was **held** by the full completion slot, the next rise never fired, and the PLL stayed at 2450 MHz. This is ruling 1 seen on hardware. `queue_tune` reports the rising edge only. |
+| Timed GPIO staircase | 8 reported edges 20 ms apart, drained 0.5 s later: every record says skew 0. Under ruling 1 those records cannot be trusted, which is exactly tick#38. The Tier 2 staircase therefore spaces reported edges more than the drain time and drains between them. |
+| PPS | `pps_present` 0, `time_aligned` 0 (Tick `pps_in` tied off on this image). |
+| MCS / JESD | `jesd204_fsm_ctrl` 1, state `opt_post_running_stage`, `jesd204_fsm_error` 0, not paused, on both phys; `multichip_sync` exists; `jesd204_fsm_resume` is write-only. |
+| RF PLL phase sync | No `adi,*phase*` / `adi,*mcs*` device-tree properties on either phy. |
+
+Decisions this changes:
+- **`run_mcs()` in P3a only verifies**: both phys report `opt_post_running_stage` with no error and
+  not paused. A resync path is not proven, so P3a implements none. It returns 0, or `-EIO` naming
+  the phy and state.
+- **`PHASE_COHERENT` stays false on this image.** JESD MCS completed, but the device tree enables
+  no RF PLL phase sync, so the two chips' LO phases are not fixed relative to each other. A true
+  flag would break the anti-goal. `MCS` (board ability, JESD MCS complete) is true. The flag
+  becomes reachable on an image whose device tree enables Talise RF PLL phase sync, with
+  REQ-TEST-032 as its proof.
+- The hop floor is about 1 ms of staging plus the one-behind pipeline. Hops closer than
+  `REPORT_SPACING` (5.3 ms) report only every Nth rising edge. The scheduler picks N so the spacing
+  holds, and the PLL readback check runs on reported edges only.
+
 ## Rulings from the builder check (2026-11-05)
 
 Checked against the Tick RTL at the pinned revision (`axi_timed_command_scheduler.v`).

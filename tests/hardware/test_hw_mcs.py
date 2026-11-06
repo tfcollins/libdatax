@@ -7,7 +7,6 @@ import pytest
 
 import datax
 import hwtimed as ht
-import loopback as lb
 
 pytestmark = pytest.mark.p3a
 
@@ -41,7 +40,7 @@ def test_phase_coherent_false(dev, record):
     assert rc == 0, reason
 
 
-def test_phase_sync_attribute_absent(dev, hw_ctx, record):
+def test_phase_sync_attribute_listing(dev, hw_ctx, record):
     """List every attribute of the adrv9009 phys that mentions phase or sync.
     The record documents why PHASE_COHERENT is false: the only sync-like
     attribute is the JESD multichip_sync; no RF PLL phase sync control is

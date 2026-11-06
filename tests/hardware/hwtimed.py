@@ -18,12 +18,29 @@ IMAGES = ("hopcap-sfp", "stock")
 DEFAULT_IMAGE = "stock"
 
 
-def normalize_image(value):
-    """The DATAX_HW_IMAGE value (None or empty: the default), else ValueError."""
+def normalize_image(value, required=False):
+    """The DATAX_HW_IMAGE value (None or empty: the default), else ValueError.
+    ``required`` (DATAX_HW_REQUIRE=1): an unset value is an error too, so a run
+    that must prove P3a cannot go green by skipping it on the default image."""
     if not value:
+        if required:
+            raise ValueError("DATAX_HW_IMAGE is required when DATAX_HW_REQUIRE=1 "
+                             f"(one of {', '.join(IMAGES)})")
         return DEFAULT_IMAGE
     if value not in IMAGES:
         raise ValueError(f"DATAX_HW_IMAGE={value!r}: expected one of {', '.join(IMAGES)}")
+    return value
+
+
+PPS_MODES = ("internal", "none")
+
+
+def normalize_pps(value):
+    """The DATAX_HW_PPS value (None or empty: internal), else ValueError."""
+    if not value:
+        return "internal"
+    if value not in PPS_MODES:
+        raise ValueError(f"DATAX_HW_PPS={value!r}: expected one of {', '.join(PPS_MODES)}")
     return value
 
 
@@ -103,6 +120,24 @@ def offset_after_align_ok(now_ticks, epoch, hz, max_s=0.25):
 def advance_ok(dev_ticks, hz, wall_s, tol_s=0.05):
     """Device time advanced ``dev_ticks`` while ``wall_s`` seconds passed."""
     return abs(dev_ticks / float(hz) - wall_s) <= tol_s
+
+
+def redact_tree(x):
+    """Copy of nested evidence data with every string run through the
+    suite's redaction (addresses, hostnames); tuples become lists."""
+    if isinstance(x, str):
+        return lb.redact_text(x)
+    if isinstance(x, dict):
+        return {k: redact_tree(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [redact_tree(v) for v in x]
+    return x
+
+
+def flush_while_high(before, after, rise, pulse):
+    """Device times read just before and after a flush show it happened while
+    the trigger pulse was high: the rise had fired and the fall had not."""
+    return rise <= before and after < rise + pulse
 
 
 def completion_log(done):

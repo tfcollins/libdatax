@@ -21,6 +21,22 @@ def test_normalize_image():
         ht.normalize_image("sfp")
 
 
+def test_image_required_when_hw_required():
+    with pytest.raises(ValueError, match="DATAX_HW_IMAGE.*required"):
+        ht.normalize_image(None, required=True)
+    with pytest.raises(ValueError, match="DATAX_HW_IMAGE.*required"):
+        ht.normalize_image("", required=True)
+    assert ht.normalize_image("stock", required=True) == "stock"
+
+
+def test_normalize_pps():
+    assert ht.normalize_pps(None) == "internal"
+    assert ht.normalize_pps("") == "internal"
+    assert ht.normalize_pps("none") == "none"
+    with pytest.raises(ValueError, match="DATAX_HW_PPS"):
+        ht.normalize_pps("external")
+
+
 @pytest.mark.parametrize("image,marks,skipped", [
     ("stock", ["p3a"], True),
     ("stock", ["needs_tx"], False),
@@ -96,3 +112,15 @@ def test_evidence_redaction_is_reused():
     # The timed suite records through lb.redact_*: no address survives.
     assert lb.redact_uri("ip:10.1.2.3") == "ip:host"
     assert "10.1.2.3" not in lb.redact_text("BOOT.BIN from 10.1.2.3 on Linux tron 6.1")
+
+
+def test_redact_tree_scrubs_nested_strings():
+    got = ht.redact_tree({"a": ["fail at 10.1.2.3", {"b": "Linux tron 6.1"}], "n": 5, "t": ("x",)})
+    assert got == {"a": ["fail at <ip>", {"b": "Linux host 6.1"}], "n": 5, "t": ["x"]}
+
+
+def test_flush_while_high():
+    pulse = 100
+    assert ht.flush_while_high(before=1010, after=1050, rise=1000, pulse=pulse)
+    assert not ht.flush_while_high(before=990, after=1010, rise=1000, pulse=pulse)   # before the rise
+    assert not ht.flush_while_high(before=1010, after=1100, rise=1000, pulse=pulse)  # after the fall

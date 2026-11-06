@@ -57,11 +57,11 @@ Notes:
   and the image hashes.
 - Beyond the planned set, each of these exists because only hardware can prove it:
   `test_trigger_low_after_flush` (a flush with the trigger high must not leave
-  the next tune one behind), `test_dense_hops_readback_every_edge` (pulses under
+  the next tune one behind), `test_dense_hops_library_readback_each_edge` (pulses under
   10 ms move the PLL; pulse width recorded), `test_readback_exact_across_band`
   (2400/2450/2500 MHz), `test_fhm_enable_readback` / `test_reenable_reprimes`
   (a re-stage lands the first edge on the init frequency, observed by sampling
-  the PLL from a parked frequency) and `test_phase_sync_attribute_absent` (lists
+  the PLL from a parked frequency) and `test_phase_sync_attribute_listing` (lists
   the phy attributes mentioning phase or sync; documents why `PHASE_COHERENT`
   is false).
 - The tests restage and recreate the scheduler as needed; libdatax disables FHM

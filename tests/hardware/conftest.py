@@ -66,7 +66,7 @@ def radio_channels():
 
 
 def _image():
-    return ht.normalize_image(os.environ.get("DATAX_HW_IMAGE"))
+    return ht.normalize_image(os.environ.get("DATAX_HW_IMAGE"), required=_required())
 
 
 def pytest_configure(config):
@@ -74,6 +74,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "needs_tx: uses the TX DMA (not on hopcap-sfp)")
     try:
         _image()
+        ht.normalize_pps(os.environ.get("DATAX_HW_PPS"))
     except ValueError as e:
         raise pytest.UsageError(str(e))
 
@@ -163,7 +164,7 @@ def hw_ctx(evidence):
     ctx = datax.Context(uri)
     evidence["uri"] = lb.redact_uri(uri)
     evidence["image"] = _image()
-    evidence["pps_source"] = os.environ.get("DATAX_HW_PPS") or "internal"
+    evidence["pps_source"] = ht.normalize_pps(os.environ.get("DATAX_HW_PPS"))
     if os.environ.get("DATAX_HW_IMAGE_HASHES"):
         evidence["image_hashes"] = lb.redact_text(os.environ["DATAX_HW_IMAGE_HASHES"])
     _provenance(evidence, ctx)
@@ -189,5 +190,5 @@ def family(dev):
 def record(request, evidence):
     """record(key, value): store a per-test measurement in the evidence."""
     def _rec(key, value):
-        evidence["tests"].setdefault(request.node.name, {})[key] = value
+        evidence["tests"].setdefault(request.node.name, {})[key] = ht.redact_tree(value)
     return _rec

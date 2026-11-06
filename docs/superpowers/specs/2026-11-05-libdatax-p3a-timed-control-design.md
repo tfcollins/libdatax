@@ -259,7 +259,7 @@ Checked against the Tick RTL at the pinned revision (`axi_timed_command_schedule
      caller asks (a `report` flag on the builder). `queue_tune` reports its rising edge only, which is
      hopcap's proven pattern. `wait(seq)` on an unreported sequence returns `-EINVAL`.
    - The real fix belongs upstream in Tick: record the actual dispatch tick, and report
-     `LATE_EXECUTED` when the stall delayed it. File it as a Tick issue. When it lands, the spacing
+     `LATE_EXECUTED` when the stall delayed it (tfcollins/tick#38). When it lands, the spacing
      rule relaxes without an API change.
    - A lost report (slot full when a late-drop or reject is reported) shows only as a rise in
      `overflow_count`. The poller turns any rise into `DATAX_EVT_QUEUE_OVERFLOW`. Any seq still

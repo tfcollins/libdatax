@@ -356,19 +356,27 @@ static bool fall_alive(struct datax_sched *s, const struct fhm_edge *e)
 
 /* e's rise did not fire: if its fall is not written yet, move it to the
  * minimum pulse after the rise's time, so the line (low anyway) is not held
- * against a later edge. A written fall cannot move; the gap rule then keeps
- * later edges two full pulses away from it. */
+ * against a later edge. If that time is already inside the guard margin the
+ * feeder would complete the fall host-late, with an event for a seq the
+ * caller never saw: drop it quietly instead (the line is low; nothing is
+ * lost). A written fall cannot move; the gap rule then keeps later edges two
+ * full pulses away from it. */
 static void shorten_fall(struct datax_sched *s, struct fhm_edge *e)
 {
-	unsigned long long p = us_ticks(FHM_PULSE_MIN_US, s->tick_hz);
+	unsigned long long p = us_ticks(FHM_PULSE_MIN_US, s->tick_hz), now;
 	struct sched_cmd *c;
 
 	pthread_mutex_lock(&s->lock);
 	c = datax_sched_find(s, e->fall_seq);
-	if (c && c->state == CMD_PENDING && p < e->pulse) {
-		c->api_ts = e->api + p;
-		c->hw_ts = datax_devtime_to_hw(s->dev, c->api_ts);
-		e->pulse = p;
+	if (c && c->state == CMD_PENDING) {
+		if (p < e->pulse) {
+			c->api_ts = e->api + p;
+			c->hw_ts = datax_devtime_to_hw(s->dev, c->api_ts);
+			e->pulse = p;
+		}
+		now = s->last_hw + ns_ticks(datax_mono_ns() - s->last_hw_mono, s->tick_hz);
+		if (c->hw_ts < now + s->guard_ticks)
+			datax_sched_remove(s, c);    /* unwritten, unreported: no hook */
 	}
 	pthread_mutex_unlock(&s->lock);
 }
@@ -536,9 +544,9 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 
 /*
  * A fall's hook: only a flush or destroy matters. flush_queue dropped this
- * fall; if its rise executed (or may have, by the time estimate) bit 0 is
- * left high, and the next priming rise would write 1 onto a high line: no
- * edge, reported EXECUTED, every later tune one behind. Park the line low
+ * fall; if its rise executed bit 0 is left high, and the next priming rise
+ * would write 1 onto a high line: no edge, reported EXECUTED, every later
+ * tune one behind. Park the line low
  * through the undroppable immediate write (datax_tick_gpio_now): the
  * scheduler's builder would need a commit a hook cannot make, and is lost
  * on destroy. io held (flush's or destroy's caller); the queue is empty.
@@ -546,27 +554,15 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_result *r,
 			void *user)
 {
-	struct datax_fhm *m = user;
-	unsigned long long now;
-	bool park = false;
-
+	(void)seq;
+	(void)user;
 	if (r->discarded || r->status != DATAX_COMPLETION_FLUSHED)
 		return;
-	pthread_mutex_lock(&s->lock);
-	now = s->last_hw + ns_ticks(datax_mono_ns() - s->last_hw_mono, s->tick_hz);
-	pthread_mutex_unlock(&s->lock);
-	pthread_mutex_lock(&m->lock);
-	for (size_t i = 0; i < m->n && !park; i++) {
-		const struct fhm_edge *e = &m->e[i];
-
-		if (e->fall_seq == seq)
-			park = e->st == E_FIRED ||
-			       (e->st == E_LIVE &&
-				edge_hw(s, e) <= now + us_ticks(FHM_MARGIN_US, s->tick_hz));
-	}
-	pthread_mutex_unlock(&m->lock);
-	if (park)
-		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+	/* Always (round 3 ruling): the queue is empty, so whatever pulse is on
+	 * the line is orphaned. Deciding from the rise's state misses a rise
+	 * that executed before the poller saw it (record undrained, or not yet
+	 * pruned): destroy does not drain first. */
+	(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
 }
 
 static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_result *r,
@@ -723,6 +719,15 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 				      "stage_hop_table: timed tunes are queued; flush them first");
 		goto out;
 	}
+	/* A fired tune's pulse still on the line: the park below would cut
+	 * it. Wait for its fall (or flush, which parks the line itself). */
+	for (size_t i = 0; s && i < m->n; i++)
+		if (fall_alive(s, &m->e[i])) {
+			ret = datax_error_ret(dev->ctx, EBUSY, "fhm",
+					      "stage_hop_table: a tune's trigger pulse is still "
+					      "on the line; wait for it or flush");
+			goto out;
+		}
 	/* Park the trigger low first, as hopcap (TickSession.park_trigger_low)
 	 * and the Tick demo do before enabling FHM: the priming rise needs a
 	 * low line to make an edge. */

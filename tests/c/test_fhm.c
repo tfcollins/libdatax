@@ -505,7 +505,10 @@ static void test_enable_checked_and_disabled_at_teardown(void)
 	x.s = NULL;
 	CHECK(!fake_fhm_enabled(x.m));
 	CHECK(x.sh.enable_writes[0] == 1);
-	CHECK(fake_tick_exec_log(x.f, 0, NULL, 0) == x.ebase);   /* flushed, never ran */
+	/* the tune was flushed and never ran; destroy parked bit 0 low, once
+	 * per dropped fall (the priming edge's and the tune's) */
+	CHECK(fake_tick_exec_log(x.f, 0, NULL, 0) == x.ebase + 2);
+	CHECK(!(fake_tick_gpio(x.f) & 0x1));
 	fx_close(&x);
 
 	fx_open(&x, false);                    /* never staged: no write */
@@ -948,7 +951,9 @@ static void test_prime_too_close_refused(void)
 	CHECK(datax_sched_queue_tune(x.s, t + 20 * MS + 500 * US, 0, F_B) == -EINVAL);
 	CHECK(strstr(lasterr(&x), "needs a priming edge") != NULL);
 	CHECK(strstr(lasterr(&x), "too close to the previous edge") != NULL);
-	CHECK(datax_sched_queue_tune(x.s, t + 40 * MS, 0, F_B) > 0);
+	/* well clear of the guard: queue_tune estimates device time from the
+	 * host clock, which runs on while the fake clock waits for the test */
+	CHECK(datax_sched_queue_tune(x.s, t + 300 * MS, 0, F_B) > 0);
 	fx_close(&x);
 	printf("test_prime_too_close_refused: ok\n");
 }
@@ -1118,6 +1123,115 @@ static void test_trigger_parked_low(void)
 	printf("test_trigger_parked_low: ok\n");
 }
 
+/* The rise has executed but the poller has not seen it yet (paused: its
+ * record undrained, or, unreported, not yet pruned). Destroy, and flush,
+ * finish it FLUSHED; its fall is dropped with the queue, so bit 0 must be
+ * parked low anyway (round 3: a flushed fall always parks). */
+static void test_park_when_rise_unseen(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+
+	/* destroy, reported rise, record undrained */
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	fed(&x);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	while (now(&x) < t + 150 * US)
+		fake_tick_advance(x.f, 10 * US);
+	CHECK(fake_tick_gpio(x.f) & 0x1);
+	datax_sched_destroy(x.s);
+	x.s = NULL;
+	CHECK(!(fake_tick_gpio(x.f) & 0x1));
+	fx_close(&x);
+
+	/* flush, unreported rise (a reported GPIO 0.5 ms before it takes the
+	 * report spacing), not yet pruned */
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	{
+		long g = datax_sched_queue_gpio(x.s, t - 500 * US, 0x2, 0x2);
+
+		CHECK(g > 0 && datax_sched_report(x.s, g) == 0);
+	}
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 5;
+	fed(&x);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	while (now(&x) < t + 150 * US)
+		fake_tick_advance(x.f, 10 * US);
+	CHECK(fake_tick_gpio(x.f) & 0x1);
+	CHECK(datax_sched_flush(x.s) == 0);
+	CHECK(!(fake_tick_gpio(x.f) & 0x1));
+	fx_close(&x);
+	printf("test_park_when_rise_unseen: ok\n");
+}
+
+/* Restaging while a fired tune's pulse is still on the line (its fall
+ * queued) would cut the pulse with the park: -EBUSY until the fall ran. */
+static void test_stage_busy_while_fall_pending(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_A) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	to_edge(&x, 2, 200 * MS);
+	CHECK(fake_tick_gpio(x.f) & 0x1);
+	CHECK(datax_device_stage_hop_table(x.dev, plan, 2) == -EBUSY);
+	CHECK(fake_tick_gpio(x.f) & 0x1);           /* the pulse was not cut */
+	fake_tick_advance(x.f, 11 * MS);
+	msleep(5);
+	WAIT_FOR(datax_device_stage_hop_table(x.dev, plan, 2) == 0);
+	fx_close(&x);
+	printf("test_stage_busy_while_fall_pending: ok\n");
+}
+
+/* Rises completing host-late (the poller was held past them): their falls,
+ * pulled in to the minimum pulse, are inside the guard too and are dropped
+ * quietly instead of raising host-late events for seqs the caller never saw.
+ * Only the two rises report host-late. */
+static void test_shortened_fall_inside_guard_quiet(void)
+{
+	static const unsigned long long plan[1] = { F_A };
+	struct fx x;
+	unsigned long long t;
+	size_t late = 0;
+	long s1;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 1);
+	t = now(&x) + 100 * MS;
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	s1 = datax_sched_queue_tune(x.s, t, 0, F_A);
+	CHECK(s1 > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	fake_tick_advance(x.f, 95 * MS);            /* everything inside the guard */
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	WAIT_FOR(has_event(&x.ev, DATAX_EVT_LATE_COMMAND, s1, "host could not keep"));
+	msleep(10);
+	pthread_mutex_lock(&x.ev.m);
+	for (size_t i = 0; i < x.ev.n; i++)
+		late += strstr(x.ev.e[i].detail, "host could not keep") != NULL;
+	pthread_mutex_unlock(&x.ev.m);
+	CHECK(late == 2);                            /* priming rise and tune rise */
+	CHECK(fake_attr_u(x.f, "queue_level") == 0);
+	fx_close(&x);
+	printf("test_shortened_fall_inside_guard_quiet: ok\n");
+}
+
 /* A consumed (timed set_frequency) tune flushed by teardown raises no event:
  * nobody asked, and its delivery would race the teardown. */
 static void test_teardown_flush_is_silent(void)
@@ -1159,6 +1273,9 @@ int main(int argc, char **argv)
 		{ "noedge_fall_still_counts", test_noedge_fall_still_counts },
 		{ "trigger_parked_low", test_trigger_parked_low },
 		{ "teardown_flush_is_silent", test_teardown_flush_is_silent },
+		{ "park_when_rise_unseen", test_park_when_rise_unseen },
+		{ "stage_busy_while_fall_pending", test_stage_busy_while_fall_pending },
+		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },
 	};
 
 	for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {

@@ -7,7 +7,7 @@
 #include <errno.h>
 
 #include "internal.h"
-#include "platform/tick.h"
+#include "tick_ops.h"
 
 #define GUARD_MARGIN_MS 10
 
@@ -15,7 +15,6 @@
 
 int datax_caps_build(struct datax_device *dev)
 {
-	struct iio_device *tick;
 	unsigned long long hz = 0;
 	unsigned int depth = 0, bitmap = 0;
 	unsigned int probe = 0;
@@ -27,13 +26,16 @@ int datax_caps_build(struct datax_device *dev)
 	dev->caps.limits[DATAX_LIMIT_GUARD_MARGIN_MS] = GUARD_MARGIN_MS;
 	dev->caps.limits[DATAX_LIMIT_TICK_HZ] = 0;
 	dev->caps.limits[DATAX_LIMIT_QUEUE_DEPTH] = 0;
+	/* Measured when a scheduler is created (P3a); until then get_limit
+	 * returns -ENOTSUP for them (caps_access.c). */
+	dev->caps.limits[DATAX_LIMIT_REPORT_SPACING_US] = 0;
+	dev->caps.limits[DATAX_LIMIT_HOP_STAGE_US] = 0;
 
-	tick = datax_tick_find(dev->ctx->iio);
-	if (tick && datax_tick_read_limits(tick, NULL, NULL, &bitmap) == 0) {
+	if (datax_tick_read_limits(dev, NULL, NULL, &bitmap) == 0) {
 		probe |= CAP_BIT(DATAX_CAP_TIMED_COMMANDS);
-		if (datax_tick_read_limits(tick, &hz, NULL, NULL) == 0)
+		if (datax_tick_read_limits(dev, &hz, NULL, NULL) == 0)
 			dev->caps.limits[DATAX_LIMIT_TICK_HZ] = hz;
-		if (datax_tick_read_limits(tick, NULL, &depth, NULL) == 0)
+		if (datax_tick_read_limits(dev, NULL, &depth, NULL) == 0)
 			dev->caps.limits[DATAX_LIMIT_QUEUE_DEPTH] = depth;
 	}
 

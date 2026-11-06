@@ -12,7 +12,9 @@
 
 #include "family.h"
 #include "table.h"
+#include "tick.h"
 #include "../error.h"
+#include "../tick_ops.h"
 
 #define ADRV9009_PHY   "adrv9009-phy"
 #define ADRV9009_PHY_B "adrv9009-phy-b"
@@ -53,6 +55,7 @@ static void free_devices(struct datax_context *ctx)
 int datax_fold_devices(struct datax_context *ctx)
 {
 	unsigned int n = iio_context_get_devices_count(ctx->iio);
+	struct iio_device *tick = datax_tick_find(ctx->iio);
 	bool have_adrv = false;
 
 	if (n)
@@ -104,6 +107,11 @@ int datax_fold_devices(struct datax_context *ctx)
 		if (ops->tx_stream_dev)
 			dev->stream_dev[DATAX_TX] =
 				iio_context_find_device(ctx->iio, ops->tx_stream_dev);
+		/* The Tick seam: real libiio ops on the context's Tick device. */
+		if (tick) {
+			dev->tick_ops = &datax_tick_iio_ops;
+			dev->tick_h = tick;
+		}
 		datax_caps_build(dev);
 		ctx->devices[ctx->ndevices++] = dev;
 	}

@@ -1,0 +1,350 @@
+{
+ "config": {
+  "queue_depth": 16,
+  "tick_hz": 100000000
+ },
+ "description": "Out-of-order submission executes in timestamp order; equal timestamps keep submission order.",
+ "name": "ordered_queue",
+ "provenance": {
+  "generator": "tests/traces/gen_traces.py",
+  "generator_sha256": "3ff0ada68367b71166bcfa01aa16881e7e797662890a8c2310aad84449782570",
+  "model": "tests/vendor/tick/hdl_model.py",
+  "model_sha256": "2d91bf9f2c9810863afe06836c5c16f5d348b7d8e05ef1240cc4a5b892686a0a",
+  "scheduler_sha256": "dfb2e4f937c2488d943dbf9e99b312c1b70e88f4eb67e32f504d47009194ddc7",
+  "tick_revision": "ed6c8a4c955d1933eb5da33f3c1fefcb72d32123"
+ },
+ "rules": [
+  "completion_* read 0 while the slot is empty (RTL REG_COMP_0..7 read completion_valid ? word : 0, axi_timed_command_scheduler.v:624-631); the model keeps its last completion after an ack",
+  "a dropped completion's executed timestamp is 0 (RTL completion_words[4/5] <= 0 on every drop path); the model says None",
+  "time advances event by event: the generator steps the model to every due queue timestamp, as the RTL dispatches on the cycle a command comes due",
+  "every write is followed by a settle (model.advance_to(now)): the RTL's dispatch runs on the cycle after a push, ack or flush",
+  "gpio_out is fake-only state (the driver exposes no GPIO attribute)"
+ ],
+ "source": "model",
+ "steps": [
+  {
+   "attr": "command_descriptor",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 0,
+    "gpio_out": 0,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 1,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "write",
+   "t_ticks": 0,
+   "value": "0x00300001,0x00000001,0x00000bb8,0x00000000,0x00000003,0x00000001,0x00000002,0x00000002,0x00000000,0x00000000,0x00000000,0x00000000"
+  },
+  {
+   "attr": "command_descriptor",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 0,
+    "gpio_out": 0,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 2,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "write",
+   "t_ticks": 0,
+   "value": "0x00300001,0x00000001,0x000003e8,0x00000000,0x00000003,0x00000002,0x00000004,0x00000004,0x00000000,0x00000000,0x00000000,0x00000000"
+  },
+  {
+   "attr": "command_descriptor",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 0,
+    "gpio_out": 0,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 3,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "write",
+   "t_ticks": 0,
+   "value": "0x00300001,0x00000001,0x000007d0,0x00000000,0x00000003,0x00000003,0x00000008,0x00000008,0x00000000,0x00000000,0x00000000,0x00000000"
+  },
+  {
+   "attr": "command_descriptor",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 0,
+    "gpio_out": 0,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 4,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "note": "same timestamp as seq 3: runs after it (submission order)",
+   "op": "write",
+   "t_ticks": 0,
+   "value": "0x00300001,0x00000001,0x000007d0,0x00000000,0x00000002,0x00000004,0x00000008,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000"
+  },
+  {
+   "attr": null,
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 999,
+    "gpio_out": 0,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 4,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "advance",
+   "t_ticks": 0,
+   "value": 999
+  },
+  {
+   "attr": null,
+   "completions": [
+    {
+     "command_id": 1,
+     "detail": 0,
+     "executed_timestamp_ticks": 1000,
+     "requested_timestamp_ticks": 1000,
+     "sequence_id": 2,
+     "status": 0,
+     "status_name": "EXECUTED",
+     "target_id": 0
+    }
+   ],
+   "expect": {
+    "completion_command_id": 1,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 1000,
+    "completion_requested_timestamp_ticks": 1000,
+    "completion_sequence_id": 2,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 1000,
+    "gpio_out": 4,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 3,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "note": "seq 2 executes first",
+   "op": "advance",
+   "t_ticks": 999,
+   "value": 1
+  },
+  {
+   "attr": "completion_ack",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 1000,
+    "gpio_out": 4,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 3,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "write",
+   "t_ticks": 1000,
+   "value": "1"
+  },
+  {
+   "attr": null,
+   "completions": [
+    {
+     "command_id": 1,
+     "detail": 0,
+     "executed_timestamp_ticks": 2000,
+     "requested_timestamp_ticks": 2000,
+     "sequence_id": 3,
+     "status": 0,
+     "status_name": "EXECUTED",
+     "target_id": 0
+    }
+   ],
+   "expect": {
+    "completion_command_id": 1,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 2000,
+    "completion_requested_timestamp_ticks": 2000,
+    "completion_sequence_id": 3,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 2000,
+    "gpio_out": 4,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 1,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "note": "seq 3 then seq 4 at the same tick; only seq 3 reports",
+   "op": "advance",
+   "t_ticks": 1000,
+   "value": 1000
+  },
+  {
+   "attr": "completion_ack",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 2000,
+    "gpio_out": 4,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 1,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "write",
+   "t_ticks": 2000,
+   "value": "1"
+  },
+  {
+   "attr": null,
+   "completions": [
+    {
+     "command_id": 1,
+     "detail": 0,
+     "executed_timestamp_ticks": 3000,
+     "requested_timestamp_ticks": 3000,
+     "sequence_id": 1,
+     "status": 0,
+     "status_name": "EXECUTED",
+     "target_id": 0
+    }
+   ],
+   "expect": {
+    "completion_command_id": 1,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 3000,
+    "completion_requested_timestamp_ticks": 3000,
+    "completion_sequence_id": 1,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 3000,
+    "gpio_out": 6,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 0,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "advance",
+   "t_ticks": 2000,
+   "value": 1000
+  },
+  {
+   "attr": "completion_ack",
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 3000,
+    "gpio_out": 6,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 0,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "write",
+   "t_ticks": 3000,
+   "value": "1"
+  },
+  {
+   "attr": null,
+   "completions": [],
+   "expect": {
+    "completion_command_id": 0,
+    "completion_detail": 0,
+    "completion_executed_timestamp_ticks": 0,
+    "completion_requested_timestamp_ticks": 0,
+    "completion_sequence_id": 0,
+    "completion_status": 0,
+    "completion_target_id": 0,
+    "current_time_ticks": 4000,
+    "gpio_out": 6,
+    "late_count": 0,
+    "overflow_count": 0,
+    "pps_present": 0,
+    "queue_level": 0,
+    "time_aligned": 0,
+    "time_epoch_ticks": 0
+   },
+   "op": "advance",
+   "t_ticks": 3000,
+   "value": 1000
+  }
+ ]
+}

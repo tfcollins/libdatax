@@ -35,6 +35,14 @@ int datax_internal_device_stream_info(const struct datax_device *dev,
 				      enum datax_direction dir, char *name,
 				      size_t len, int *detect);
 
+/* Tick ops seam (layout in src/tick_ops.h: two function pointers, read then
+ * write). Replace the Tick access of a live device with ops/h, for tests
+ * driving a fake Tick; NULL ops detaches Tick. Capabilities and limits are
+ * re-probed through the new ops. 0, or -EINVAL. */
+struct datax_tick_ops;
+int datax_internal_tick_bind_fake(struct datax_device *dev,
+				  const struct datax_tick_ops *ops, void *h);
+
 #ifdef __cplusplus
 }
 #endif

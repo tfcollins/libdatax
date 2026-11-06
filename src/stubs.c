@@ -73,6 +73,12 @@ long datax_sched_queue_stream_gate(struct datax_sched *sched, datax_time when,
 	return -ENOTSUP;
 }
 
+int datax_sched_report(struct datax_sched *sched, long seq)
+{
+	(void)sched; (void)seq;
+	return -ENOTSUP;
+}
+
 int datax_sched_commit(struct datax_sched *sched)
 {
 	(void)sched;

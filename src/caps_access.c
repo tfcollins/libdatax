@@ -15,6 +15,9 @@ int datax_caps_get_limit(const struct datax_caps *caps, enum datax_limit which,
 {
 	if (!caps || !value || (unsigned int)which >= DATAX_LIMIT_COUNT)
 		return -EINVAL;
+	/* Measured at scheduler create; no scheduler exists yet (P3a Task 2). */
+	if (which == DATAX_LIMIT_REPORT_SPACING_US || which == DATAX_LIMIT_HOP_STAGE_US)
+		return -ENOTSUP;
 	*value = caps->limits[which];
 	return 0;
 }

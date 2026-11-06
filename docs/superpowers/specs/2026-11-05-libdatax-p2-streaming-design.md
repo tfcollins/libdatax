@@ -157,7 +157,9 @@ returns `-ENOTSUP` from `stream_create` with last-error naming the missing devic
   partial block, waits until every queued block has been handed to the device (each bounded by
   the context timeout), then disables; it returns `-ETIMEDOUT` if a block did not drain, after
   disabling anyway. When `stop()` returns 0, every sample passed to `send` has reached the DMA
-  (the tail may still be in flight in fabric). Cyclic TX disables at once. Blocks return to the
+  (the tail may still be in flight in fabric). Cyclic TX first takes its block back (on the legacy path that dequeue is where a failed
+  write surfaces, and disabling first would park the worker under a pending token), then
+  disables. Blocks return to the
   stream's free list; a later `start()` begins afresh. Stopping a stopped stream is 0.
 - `destroy()`: stops if needed, frees blocks, buffer and channel masks. NULL is a no-op.
 - `start_at()`: `-ENOTSUP` (P3).

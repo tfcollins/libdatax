@@ -125,14 +125,34 @@ struct tshim {
 	pthread_mutex_t mu;
 	unsigned int ndesc, fail_at;     /* 1-based; 0 never */
 	unsigned int sleep_us;           /* real latency per access (repro mode) */
+	/* repro mode: the longest host-time gap between two Tick accesses (the
+	 * poller makes several per period while it has work) */
+	unsigned long long last_ns, max_gap_ns;
 	unsigned int stall_at;           /* before forwarding this one ... */
 	unsigned long long stall_to;     /* ... advance the clock to here */
 };
+
+static void tshim_gap(struct tshim *sh)
+{
+	struct timespec ts;
+	unsigned long long now;
+
+	if (!sh->sleep_us)
+		return;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
+	pthread_mutex_lock(&sh->mu);
+	if (sh->last_ns && now - sh->last_ns > sh->max_gap_ns)
+		sh->max_gap_ns = now - sh->last_ns;
+	sh->last_ns = now;
+	pthread_mutex_unlock(&sh->mu);
+}
 
 static int tshim_read(void *h, const char *attr, char *buf, size_t len)
 {
 	struct tshim *sh = h;
 
+	tshim_gap(sh);
 	if (sh->sleep_us)
 		usleep_(sh->sleep_us);
 	return fake_tick_read(sh->f, attr, buf, len);
@@ -144,6 +164,7 @@ static int tshim_write(void *h, const char *attr, const char *val)
 	bool fail = false;
 	unsigned long long to = 0;
 
+	tshim_gap(sh);
 	if (sh->sleep_us)
 		usleep_(sh->sleep_us);
 	if (!strcmp(attr, "command_descriptor")) {
@@ -643,7 +664,8 @@ static void test_fhm_one_behind_pipeline(void)
 	 * priming pulse is half its lead */
 	n = fake_tick_exec_log(x.f, x.ebase, rec, 16) - x.ebase;
 	CHECK(n == 8);
-	CHECK(rec[0].requested_ticks < t0 && rec[0].requested_ticks > t0 - 10 * MS);
+	/* the priming lead: at least the guard margin (fix/p3a-stage-late) */
+	CHECK(rec[0].requested_ticks == t0 - 10 * MS);
 	CHECK(!rec[0].reported);
 	CHECK(rec[1].requested_ticks - rec[0].requested_ticks == (t0 - rec[0].requested_ticks) / 2);
 	for (int i = 1; i < 4; i++)
@@ -1067,7 +1089,8 @@ static void test_noedge_fall_still_counts(void)
 	CHECK(datax_sched_queue_tune(x.s, t + 15 * MS, 0, F_B) == -EINVAL);
 	/* (it needs a priming edge, which would sit inside that gap) */
 	CHECK(strstr(lasterr(&x), "too close to the previous edge") != NULL);
-	CHECK(datax_sched_queue_tune(x.s, t + 25 * MS, 0, F_B) > 0);
+	/* its priming edge (one guard margin before it) clears the 20 ms */
+	CHECK(datax_sched_queue_tune(x.s, t + 35 * MS, 0, F_B) > 0);
 	fx_close(&x);
 
 	fx_open(&x, true);
@@ -1284,6 +1307,7 @@ struct rtclock {
 	struct fake_tick *f;
 	atomic_bool stop;
 	pthread_t th;
+	_Atomic unsigned long long max_gap_ns;   /* longest stall between ticks */
 };
 
 static void *rtclock_main(void *arg)
@@ -1302,14 +1326,20 @@ static void *rtclock_main(void *arg)
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		now = (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
 		fake_tick_advance(c->f, (now - last) * HZ / 1000000000ULL);
+		if (now - last > atomic_load(&c->max_gap_ns))
+			atomic_store(&c->max_gap_ns, now - last);
 		last = now;
 	}
 	return NULL;
 }
 
-/* n reported tunes `apart` ticks apart, the first `lead` ahead; returns the
- * number completing LATE "stage late" and prints each outcome. */
-static unsigned int repro_run(unsigned int n, unsigned long long first, unsigned long long apart)
+/* n reported tunes `apart` ticks apart, the first `first` ahead; returns the
+ * number not completing OK (printing each such outcome; all with verbose).
+ * *starved: the host could not keep this run real time (the clock thread
+ * stalled over 3 ms, the poller went over 5 ms between Tick accesses, or
+ * the scheduler itself reported "poller lagged"). */
+static unsigned int repro_run(unsigned int n, unsigned long long first, unsigned long long apart,
+			      bool verbose, bool *starved)
 {
 	static const unsigned long long plan[4] = { 2420000000ULL, 2440000000ULL,
 						    2460000000ULL, 2480000000ULL };
@@ -1325,48 +1355,102 @@ static unsigned int repro_run(unsigned int n, unsigned long long first, unsigned
 	x.sh.sleep_us = 460;
 	clk.f = x.f;
 	atomic_init(&clk.stop, false);
+	atomic_init(&clk.max_gap_ns, 0);
+	*starved = false;
 	CHECK(pthread_create(&clk.th, NULL, rtclock_main, &clk) == 0);
 	CHECK(datax_sched_create(x.dev, &x.s) == 0);
 	CHECK(datax_device_stage_hop_table(x.dev, plan, 4) == 0);
 	CHECK(datax_caps_get_limit(datax_device_get_caps(x.dev), DATAX_LIMIT_HOP_STAGE_US, &v) == 0);
-	printf("repro: hop_stage_us %llu", v);
+	if (verbose)
+		printf("realtime: hop_stage_us %llu", v);
 	CHECK(datax_caps_get_limit(datax_device_get_caps(x.dev), DATAX_LIMIT_REPORT_SPACING_US,
 				   &v) == 0);
-	printf(", report_spacing_us %llu\n", v);
+	if (verbose)
+		printf(", report_spacing_us %llu\n", v);
 	t = now(&x) + first;
 	for (unsigned int i = 0; i < n; i++) {
 		seq[i] = datax_sched_queue_tune(x.s, t + i * apart, 0, plan[i % 4]);
 		CHECK(seq[i] > 0);
 	}
 	CHECK(datax_sched_commit(x.s) == 0);
+	pthread_mutex_lock(&x.tsh.mu);
+	x.tsh.max_gap_ns = 0;                    /* judge the schedule, not the setup */
+	pthread_mutex_unlock(&x.tsh.mu);
 	for (unsigned int i = 0; i < n; i++) {
 		struct datax_completion c;
 		int ret = datax_sched_wait(x.s, seq[i], 5000, &c);
 
-		printf("repro: tune %u seq %ld: ret %d status %d %s\n", i + 1, seq[i], ret,
-		       ret ? -1 : (int)c.status,
-		       ret || c.status == DATAX_COMPLETION_OK ? "" : lasterr(&x));
-		late += !ret && c.status == DATAX_COMPLETION_LATE && strstr(lasterr(&x), "stage late");
+		if (verbose || ret || c.status != DATAX_COMPLETION_OK)
+			printf("realtime: tune %u seq %ld: ret %d status %d %s\n", i + 1, seq[i], ret,
+			       ret ? -1 : (int)c.status,
+			       ret || c.status == DATAX_COMPLETION_OK ? "" : lasterr(&x));
+		late += ret || c.status != DATAX_COMPLETION_OK;
+		if (!ret && c.status != DATAX_COMPLETION_OK && strstr(lasterr(&x), "poller lagged"))
+			*starved = true;
 	}
 	atomic_store(&clk.stop, true);
 	pthread_join(clk.th, NULL);
+	if (atomic_load(&clk.max_gap_ns) > 3000000ULL)
+		*starved = true;
+	/* the poller went more than 5 ms (5 periods) without touching Tick */
+	pthread_mutex_lock(&x.tsh.mu);
+	if (x.tsh.max_gap_ns > 5000000ULL)
+		*starved = true;
+	pthread_mutex_unlock(&x.tsh.mu);
 	fx_close(&x);
 	return late;
 }
 
-static void test_repro_hop_schedule(void)
-{
-	unsigned int late = repro_run(4, 200 * MS, 200 * MS);
+/*
+ * Regression for the tron stage-late tune (fix/p3a-stage-late): with tron's
+ * latencies, tune 2's staging window is the priming lead, which used to be
+ * about 2 ms and was missed by the poll hook every run. Every tune of both
+ * hardware schedules must complete OK, RUNS times each.
+ */
+#define REALTIME_RUNS 10
 
-	printf("repro_hop_schedule: %u of 4 stage late\n", late);
+/*
+ * One schedule, retried (at most 3 attempts) while the host was starved.
+ * Only unstarved runs are judged: a starved host produces honest late and
+ * dropped outcomes (poller lagged, host-late, readback after the next edge)
+ * that say nothing about the pipeline, while the pipeline fault this guards
+ * against showed on every unstarved run (19 of 160 tunes, c38a845).
+ * Returns the bad tunes of the judged run; *judged: whether one was.
+ */
+static unsigned int realtime_schedule(unsigned int n, unsigned long long apart, bool verbose,
+				      unsigned int *retries, bool *judged)
+{
+	unsigned int bad = 0;
+	bool starved = true;
+
+	for (int a = 0; a < 3 && starved; a++) {
+		if (a)
+			(*retries)++;
+		bad = repro_run(n, 50 * MS, apart, verbose && !a, &starved);
+	}
+	*judged = !starved;
+	return starved ? 0 : bad;
 }
 
-static void test_repro_dense(void)
+static void test_realtime_no_stage_late(void)
 {
-	/* 2 x the measured report spacing (about 5.4 ms here) */
-	unsigned int late = repro_run(12, 200 * MS, 11 * MS);
+	unsigned int bad = 0, retries = 0, judged[2] = { 0, 0 };
 
-	printf("repro_dense: %u of 12 stage late\n", late);
+	for (int i = 0; i < REALTIME_RUNS; i++) {
+		bool j;
+
+		/* test_hop_schedule: 4 tunes 200 ms apart */
+		bad += realtime_schedule(4, 200 * MS, i == 0, &retries, &j);
+		judged[0] += j;
+		/* test_dense_hops_library_readback_each_edge: 12 at ~2 x spacing */
+		bad += realtime_schedule(12, 11 * MS, false, &retries, &j);
+		judged[1] += j;
+	}
+	printf("realtime: %u tunes not OK in %u + %u judged runs of %d each (%u retries: host "
+	       "starved)\n", bad, judged[0], judged[1], REALTIME_RUNS, retries);
+	CHECK(bad == 0);
+	CHECK(judged[0] > 0 && judged[1] > 0);   /* not vacuous */
+	printf("test_realtime_no_stage_late: ok\n");
 }
 
 int main(int argc, char **argv)
@@ -1396,11 +1480,10 @@ int main(int argc, char **argv)
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },
 	};
 
-	/* Repro mode (not in the default run): tron-like timing with a
-	 * wall-clock fake and per-access latency. Reports, does not assert. */
-	if (argc > 1 && !strcmp(argv[1], "repro")) {
-		test_repro_hop_schedule();
-		test_repro_dense();
+	/* Real-time mode (its own ctest, test_fhm_realtime): tron-like timing
+	 * with a wall-clock fake and per-access latency. */
+	if (argc > 1 && !strcmp(argv[1], "realtime")) {
+		test_realtime_no_stage_late();
 		return 0;
 	}
 	for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {

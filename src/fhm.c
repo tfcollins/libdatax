@@ -546,6 +546,21 @@ static bool settled(const struct fhm_edge *e)
 	return !e->hz || e->staged || e->late || e->stage_err || e->st == E_NOEDGE;
 }
 
+/* The poll hook alone notices an unreported edge fire (reconcile), and the
+ * next staging may wait on it: wake the poller just after the earliest one
+ * (its time plus the margin) rather than at its next period. */
+static void request_wake(struct datax_fhm *m, struct datax_sched *s)
+{
+	for (size_t i = 0; i < m->n; i++) {
+		const struct fhm_edge *e = &m->e[i];
+
+		if (e->st == E_LIVE && !e->reported) {
+			datax_sched_wake_at(s, edge_hw(s, e) + us_ticks(FHM_MARGIN_US, s->tick_hz));
+			return;
+		}
+	}
+}
+
 /* Drop edges nobody needs any more (their pulse is over too); keep the
  * last two for ordering. */
 static void trim(struct datax_fhm *m, struct datax_sched *s)
@@ -568,6 +583,7 @@ static void fhm_poll(struct datax_sched *s, unsigned long long hw_now, void *use
 	reconcile(m, s);
 	advance(m, s, "poll");
 	trim(m, s);
+	request_wake(m, s);
 	pthread_mutex_unlock(&m->lock);
 }
 
@@ -999,10 +1015,27 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 	m = fhm_get(dev, false);
 	pthread_mutex_lock(&m->lock);
 	pmax = us_ticks(FHM_PULSE_MAX_US, hzt);
-	/* Time to stage one frequency after an edge: a poll period, the
-	 * staging round trip (twice, as it varies under load) and the margin. */
+	/*
+	 * The priming lead is tune 2's whole staging window: its frequency is
+	 * staged after the (unreported) priming edge fires and before tune 1.
+	 * Only the poll hook sees the priming edge fire, so the lead must cover
+	 * (tron finding, fix/p3a-stage-late):
+	 *   window: a poll period (the poller is also woken at the edge's time
+	 *           plus the margin, datax_sched_wake_at), the staging round
+	 *           trip twice (it varies under load) and the margin;
+	 *   + one poller iteration before the hook runs: six Tick round trips
+	 *     (time, completion seq, late_count, overflow_count, queue_level,
+	 *     one descriptor write) at the access cost measured at create;
+	 *   + two minimum pulses;
+	 * and never less than the guard margin (DATAX_LIMIT_GUARD_MARGIN_MS,
+	 * 10 ms), which dominates on tron (the sum is about 3.5 ms there).
+	 * The first tune after staging or after the hops drained therefore needs
+	 * when >= now + guard + lead (20 ms on tron).
+	 */
 	window = us_ticks(2 * m->stage_us + s->poll_us + FHM_MARGIN_US, hzt);
-	lead = window + 2 * us_ticks(FHM_PULSE_MIN_US, hzt);
+	lead = window + 6 * s->access_ticks + 2 * us_ticks(FHM_PULSE_MIN_US, hzt);
+	if (lead < s->guard_ticks)
+		lead = s->guard_ticks;
 	if (lead < us_ticks(FHM_MIN_LEAD_US, hzt))
 		lead = us_ticks(FHM_MIN_LEAD_US, hzt);
 	ppulse = lead / 2 < pmax ? lead / 2 : pmax;
@@ -1115,6 +1148,7 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 					  .pulse = pmax };
 	m->fresh = false;
 	(void)datax_sched_set_poll_hook(s, fhm_poll, m);
+	request_wake(m, s);
 	ret = seqs[2];
 out:
 	pthread_mutex_unlock(&m->lock);

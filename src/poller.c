@@ -533,15 +533,29 @@ static void *poller_main(void *arg)
 		if (s->stop)
 			break;
 		if (!s->kick) {
+			unsigned long long now = datax_mono_ns(), until = now + s->poll_us * 1000ULL;
 			struct timespec dl;
 
-			clock_gettime(CLOCK_MONOTONIC, &dl);
-			dl.tv_nsec += (long)s->poll_us * 1000L;
-			while (dl.tv_nsec >= 1000000000L) {
-				dl.tv_sec++;
-				dl.tv_nsec -= 1000000000L;
+			/* A targeted wake (datax_sched_wake_at) earlier than the
+			 * period: device time to host time from the last read. */
+			if (s->wake_hw) {
+				unsigned long long d = s->wake_hw > s->last_hw ?
+						       s->wake_hw - s->last_hw : 0;
+				unsigned long long at = s->last_hw_mono + d / s->tick_hz * 1000000000ULL +
+							d % s->tick_hz * 1000000000ULL / s->tick_hz;
+
+				if (at <= now) {
+					s->wake_hw = 0;    /* due: run now */
+					until = now;
+				} else if (at < until) {
+					until = at;
+				}
 			}
-			pthread_cond_timedwait(&s->wake, &s->lock, &dl);
+			if (until > now) {
+				dl.tv_sec = (time_t)(until / 1000000000ULL);
+				dl.tv_nsec = (long)(until % 1000000000ULL);
+				pthread_cond_timedwait(&s->wake, &s->lock, &dl);
+			}
 		}
 		s->kick = false;
 	}
@@ -574,6 +588,19 @@ void datax_poller_stop(struct datax_sched *s)
 		pthread_join(s->thread, NULL);
 	pthread_mutex_lock(&s->lock);
 	s->thread_started = false;
+	pthread_mutex_unlock(&s->lock);
+}
+
+void datax_sched_wake_at(struct datax_sched *s, unsigned long long hw_ticks)
+{
+	if (!s || !hw_ticks)
+		return;
+	pthread_mutex_lock(&s->lock);
+	if (!s->wake_hw || hw_ticks < s->wake_hw) {
+		s->wake_hw = hw_ticks;
+		if (!datax_poller_is_self(s))
+			pthread_cond_signal(&s->wake);   /* re-plan its sleep */
+	}
 	pthread_mutex_unlock(&s->lock);
 }
 

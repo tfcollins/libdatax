@@ -122,7 +122,8 @@ def _fake_path():
     env = os.environ.get("DATAX_FAKE_TICK_LIBRARY")
     if env:
         return Path(env)
-    return Path(os.environ["DATAX_LIBRARY"]).resolve().parent / "tests" / "c" / "libdatax_fake_tick.so"
+    lib = os.environ.get("DATAX_LIBRARY") or str(ROOT / "build" / "libdatax.so")
+    return Path(lib).resolve().parent / "tests" / "c" / "libdatax_fake_tick.so"
 
 
 _fake = None
@@ -144,6 +145,7 @@ def fake_lib():
         ("fake_tick_pps_edge", None, [vp]), ("fake_tick_gpio", C.c_uint32, [vp]),
         ("fake_tick_set_access_cost", None, [vp, u64]),
         ("fake_tick_access_count", C.c_ulong, [vp, C.c_char_p, C.c_bool]),
+        ("fake_tick_inject_error", None, [vp, C.c_char_p, C.c_int]),
         ("fake_fhm_new", vp, [u64]), ("fake_fhm_free", None, [vp]),
         ("fake_fhm_attach", None, [vp, vp]), ("fake_fhm_pll_hz", u64, [vp]),
         ("fake_fhm_edges", C.c_uint, [vp]),
@@ -204,6 +206,14 @@ class FakeRig:
     def writes(self, attr="command_descriptor"):
         return self.fk.fake_tick_access_count(self.tick, attr.encode(), True)
 
+    def inject_error(self, attr, err):
+        """The next access to ``attr`` fails with -err (one shot)."""
+        self.fk.fake_tick_inject_error(self.tick, attr.encode(), -abs(err))
+
+    def pause(self, on=True):
+        """Pause / resume the scheduler's poller (feed and drain)."""
+        assert self.lib.datax_internal_sched_pause(self.dev.scheduler._h, on) == 0
+
     def pps_edge(self):
         self.fk.fake_tick_pps_edge(self.tick)
 
@@ -238,13 +248,19 @@ class FakeRig:
             self.fk.fake_tick_set_access_cost(self.tick, 0)
 
     def start_clock(self, hz_ratio=1.0):
-        """Advance device time in the background, 1 ms per 1 ms of wall time."""
+        """Advance device time in the background, ``hz_ratio`` ms per ms of wall
+        time. A step is taken only while the poller is idle (no descriptor
+        written during the last millisecond), so a loaded host slows the
+        clock instead of making the poller miss a deadline."""
         stop = threading.Event()
 
         def run():
             while not stop.is_set():
-                self.advance(int(MS * hz_ratio))
+                n = self.writes()
                 _time.sleep(0.001)
+                if self.writes() != n:
+                    continue
+                self.advance(int(MS * hz_ratio))
 
         t = threading.Thread(target=run, daemon=True)
         t.start()

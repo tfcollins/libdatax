@@ -51,7 +51,9 @@ class EventType(enum.IntEnum):
 @dataclass(frozen=True)
 class Completion:
     """The outcome of a reported command. ``detail`` is libdatax's text for a
-    non-OK status (empty for OK)."""
+    non-OK status (empty for OK). It is read from the context's last-error
+    text right after the wait, which is shared by the whole context: another
+    thread's failing call in between can replace it, so treat it as a hint."""
     seq: int
     status: CompletionStatus
     requested_ticks: int
@@ -135,8 +137,13 @@ class Scheduler:
         try:
             # A finalizer that cyclic GC runs inside a callback leaks instead
             # of joining the poller from itself.
-            if self._h is not None and not self._ctx._closed and not in_event_callback():
-                self._close_for_context()
+            if self._h is not None and not self._ctx._closed:
+                if in_event_callback():
+                    # cannot join the poller from itself: park it on the
+                    # context, whose close() destroys it from another thread
+                    self._ctx._leaked_scheds.append(self)
+                else:
+                    self._close_for_context()
         except Exception:
             pass
 
@@ -166,18 +173,25 @@ class Scheduler:
         batch is discarded."""
         h = self._live()
         rc = get_lib().datax_sched_commit(h)
-        batch, self._building = self._building, []
         if rc:
+            # C discards the batch only for LATE (guard margin) and EINVAL
+            # (report spacing); any other failure leaves it queued, so keep
+            # tracking it for the retry.
+            if -rc in (errno.ETIME, errno.EINVAL):
+                self._building = []
             raise self._ctx._error(rc)
-        self._committed.extend(batch)
+        self._committed.extend(self._building)
+        self._building = []
 
     def flush(self):
-        """Cancel everything outstanding (commands complete ``FLUSHED``)."""
+        """Cancel everything outstanding (commands complete ``FLUSHED`` and can
+        still be ``wait``-ed for; ``wait_all`` stops tracking them). On a
+        failure (Tick access) nothing was flushed and tracking is kept."""
         h = self._live()
         rc = get_lib().datax_sched_flush(h)
-        self._building, self._committed = [], []
         if rc:
             raise self._ctx._error(rc)
+        self._building, self._committed = [], []
 
     # -- completions -------------------------------------------------------
 

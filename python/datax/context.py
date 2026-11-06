@@ -38,6 +38,7 @@ class Context:
         self._devices = []
         self._streams = weakref.WeakSet()  # live RxStream/TxStream
         self._scheds = weakref.WeakSet()   # live Scheduler
+        self._leaked_scheds = []           # finalized on the poller thread; close() destroys
         for i in range(lib.datax_context_get_device_count(self._ptr)):
             d = C.c_void_p()
             rc = lib.datax_context_get_device(self._ptr, i, C.byref(d))
@@ -141,9 +142,10 @@ class Context:
         # Schedulers first: destroying one joins its poller, so no event
         # callback is running or can start afterwards. Then the streams: C
         # handles die with the C context, so none is touched afterwards.
-        for sc in list(self._scheds):
+        for sc in list(self._scheds) + self._leaked_scheds:
             sc._close_for_context()
         self._scheds.clear()
+        self._leaked_scheds = []
         for st in list(self._streams):
             st._close_for_context()
         self._streams.clear()

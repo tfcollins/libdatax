@@ -344,3 +344,54 @@ def test_dense_tunes_wait_all_skips_unreported(make_rig):
     assert [c.seq for c in done] == seqs[0::2]    # every second tune reports
     assert all(c.status is datax.CompletionStatus.OK for c in done)
     assert rig.pll_hz() == plan[(n - 1) % 3]
+
+
+def test_commit_failure_keeps_batch_and_tracking(make_rig):
+    """A transient Tick failure at commit leaves the batch queued in C (only
+    LATE / EINVAL discard it): the retry submits it and wait_all still sees it."""
+    rig = make_rig()
+    sched = rig.make_scheduler()
+    t = rig.now + 80 * MS
+    seq = sched.at(t).gpio(0xe, 0x4, report=True)
+    rig.pause()
+    rig.inject_error("current_time_ticks", errno.EIO)
+    with pytest.raises(datax.Error) as ei:
+        sched.commit()
+    assert ei.value.errno == errno.EIO
+    sched.commit()                                   # retry: now succeeds
+    rig.pause(False)
+    rig.run_to(t + 5 * MS)
+    done = sched.wait_all(timeout=3.0)
+    assert [c.seq for c in done] == [seq]
+    assert done[0].status is datax.CompletionStatus.OK
+
+
+def test_discarded_batch_is_forgotten(make_rig):
+    rig = make_rig()
+    sched = rig.make_scheduler()
+    sched.at(rig.now + 80 * MS).gpio(0xe, 0x2, report=True)
+    sched.at(rig.now + 1 * MS).gpio(0xe, 0x4)
+    with pytest.raises(datax.LateError):
+        sched.commit()
+    assert sched.wait_all(timeout=0.1) == []         # nothing left to wait for
+
+
+def test_flush_failure_keeps_tracking(make_rig):
+    rig = make_rig()
+    sched = rig.make_scheduler()
+    t = rig.now + 80 * MS
+    seq = sched.at(t).gpio(0xe, 0x4, report=True)
+    sched.commit()
+    rig.pause()
+    rig.inject_error("current_time_ticks", errno.EIO)
+    with pytest.raises(datax.Error):
+        sched.flush()                                # Tick access failed: nothing flushed
+    rig.pause(False)
+    rig.run_to(t + 5 * MS)
+    assert [c.seq for c in sched.wait_all(timeout=3.0)] == [seq]
+    # a successful flush does drop the tracking
+    seq2 = sched.at(rig.now + 80 * MS).gpio(0xe, 0x2, report=True)
+    sched.commit()
+    sched.flush()
+    assert sched.wait_all(timeout=0.1) == []          # tracking dropped ...
+    assert sched.wait(seq2, 1000).status is datax.CompletionStatus.FLUSHED   # ... still waitable

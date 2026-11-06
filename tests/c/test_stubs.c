@@ -14,7 +14,7 @@ int main(void)
 	CHECK(datax_stream_create(NULL, NULL, &s) == -EINVAL);
 	CHECK(datax_sched_create(NULL, &sched) == -EINVAL);
 	CHECK(datax_device_run_mcs(NULL) == -ENOTSUP);
-	CHECK(datax_device_stage_hop_table(NULL, &f, 1) == -ENOTSUP);
+	CHECK(datax_device_stage_hop_table(NULL, &f, 1) == -EINVAL);
 	CHECK(datax_stream_start(NULL) == -EINVAL);
 	CHECK(datax_stream_start_at(NULL, 5) == -ENOTSUP);
 	CHECK(datax_stream_stop(NULL) == -EINVAL);
@@ -22,11 +22,11 @@ int main(void)
 	CHECK(datax_stream_send(NULL, NULL, 0, 0) == -EINVAL);
 	CHECK(datax_stream_get_block(NULL, NULL, NULL, 0) == -EINVAL);
 	CHECK(datax_stream_put_block(NULL, NULL) == -EINVAL);
-	/* The scheduler (P3a) rejects a NULL handle; tunes and stream gates
-	 * stay -ENOTSUP (FHM tunes, P3b timed streams). */
+	/* The scheduler (P3a) rejects a NULL handle, tunes included; stream
+	 * gates stay -ENOTSUP (P3b timed streams). */
 	CHECK(datax_sched_queue_gpio(NULL, 0, 0, 0) == -EINVAL);
 	CHECK(datax_sched_queue_marker(NULL, 0, 0, 0) == -EINVAL);
-	CHECK(datax_sched_queue_tune(NULL, 0, 0, 0) == -ENOTSUP);
+	CHECK(datax_sched_queue_tune(NULL, 0, 0, 0) == -EINVAL);
 	CHECK(datax_sched_queue_stream_gate(NULL, 0, NULL, false) == -ENOTSUP);
 	CHECK(datax_sched_commit(NULL) == -EINVAL);
 	CHECK(datax_sched_flush(NULL) == -EINVAL);

@@ -14,6 +14,7 @@
 #include "table.h"
 #include "tick.h"
 #include "../error.h"
+#include "../fhm.h"
 #include "../tick_ops.h"
 
 #define ADRV9009_PHY   "adrv9009-phy"
@@ -93,6 +94,17 @@ int datax_fold_devices(struct datax_context *ctx)
 			if (b)
 				dev->phy[dev->nphy++] = b;
 			have_adrv = true;
+			/* FHM seam: chip A's TRX LO (only its FHM GPIO is wired to
+			 * Tick on the ZU11EG image, spec decision 7). */
+			if (a) {
+				struct iio_channel *lo =
+					iio_device_find_channel(a, "altvoltage0", true);
+
+				if (lo) {
+					dev->fhm_ops = &datax_fhm_iio_ops;
+					dev->fhm_h = lo;
+				}
+			}
 		}
 		/* One source of truth: the family ops carry the per-phy counts. */
 		ops = datax_family_ops(fam);

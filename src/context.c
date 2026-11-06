@@ -7,6 +7,7 @@
 #include <iio/iio.h>
 
 #include "error.h"
+#include "fhm.h"
 #include "platform/table.h"
 #include "scheduler.h"
 
@@ -75,8 +76,10 @@ void datax_context_destroy(struct datax_context *ctx)
 	for (unsigned int i = 0; i < ctx->ndevices; i++)
 		for (int d = DATAX_RX; d <= DATAX_TX; d++)
 			datax_stream_destroy(ctx->devices[i]->stream[d]);
-	for (unsigned int i = 0; i < ctx->ndevices; i++)
+	for (unsigned int i = 0; i < ctx->ndevices; i++) {
+		datax_fhm_free(ctx->devices[i]);   /* after its scheduler's hooks */
 		free(ctx->devices[i]);
+	}
 	free(ctx->devices);
 	iio_context_destroy(ctx->iio);
 	pthread_mutex_destroy(&ctx->lock);

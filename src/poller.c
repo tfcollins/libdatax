@@ -9,7 +9,8 @@
  *   4. feeds PENDING commands to command_descriptor in timestamp order,
  *      keeping queue_level at most depth - 1, and completes LATE ("host
  *      could not keep the queue fed") any it can no longer write before its
- *      time minus the guard margin;
+ *      time minus the guard margin; before each write it checks for a late
+ *      armed PPS edge (devtime.c);
  *   5. runs the poll hook, then delivers queued events with no lock held.
  * Rules: api-c-core "Scheduler semantics"; spec rulings 1 and 3.
  */
@@ -311,10 +312,12 @@ static struct sched_cmd *earliest_pending(struct datax_sched *s)
 
 static int feed(struct datax_sched *s)
 {
-	unsigned long long level, t0, h0, accesses = 1;
+	unsigned long long level, t0, h0, accesses;
 	char buf[160];
 	int ret;
 
+restart:
+	accesses = 1;
 	pthread_mutex_lock(&s->lock);
 	if (!earliest_pending(s)) {
 		pthread_mutex_unlock(&s->lock);
@@ -367,6 +370,26 @@ static int feed(struct datax_sched *s)
 		}
 		if (level + 1 >= s->depth)   /* at most depth - 1: one entry spare */
 			break;
+		/*
+		 * Before every write: has a late armed PPS edge moved the counter
+		 * (Task 3 review)? Adopting it flushes the queue, drops what was
+		 * written and re-bases PENDING, so level, t0 and c are stale: read
+		 * the time and start the pass again. Without an armed alignment
+		 * this is one atomic load. An edge landing between this check and
+		 * the write is the documented residual window.
+		 */
+		seq = c->seq;
+		pthread_mutex_unlock(&s->lock);
+		if (datax_devtime_check_late_edge(s->dev, s)) {
+			ret = datax_poller_read_time(s);
+			if (ret)
+				return ret;
+			goto restart;
+		}
+		pthread_mutex_lock(&s->lock);
+		c = datax_sched_find(s, seq);
+		if (!c || c->state != CMD_PENDING)
+			continue;
 		datax_sched_format_desc(c, buf, sizeof(buf));
 		c->state = CMD_WRITTEN;
 		seq = c->seq;

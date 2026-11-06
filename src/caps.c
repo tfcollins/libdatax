@@ -46,6 +46,11 @@ int datax_caps_build(struct datax_device *dev)
 		else if (dev->family == DATAX_FAMILY_AD936X)
 			probe |= CAP_BIT(DATAX_CAP_FASTLOCK_HOP);
 	}
+	/* The FHM hop table is a host-side set of 64 (spec decision 10; fhm.c),
+	 * usable only with Tick to trigger the hops. */
+	if (dev->family == DATAX_FAMILY_ADRV9009)
+		dev->caps.limits[DATAX_LIMIT_HOP_TABLE_DEPTH] =
+			(probe & CAP_BIT(DATAX_CAP_TIMED_COMMANDS)) ? 64 : 0;
 	if (dev->family == DATAX_FAMILY_ADRV9009 && dev->nphy == 2)
 		probe |= CAP_BIT(DATAX_CAP_MCS);
 

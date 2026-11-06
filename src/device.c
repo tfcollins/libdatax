@@ -5,6 +5,7 @@
 #include <datax/datax.h>
 
 #include "error.h"
+#include "fhm.h"
 #include "platform/family.h"
 
 /* Common checks. On success *ops is the family's op table. */
@@ -28,8 +29,9 @@ static int check_timed(const struct datax_device *dev, datax_time when)
 {
 	if (when != DATAX_TIME_NOW)
 		return datax_error_ret(dev->ctx, ENOTSUP, "device",
-				       "timed radio calls arrive with FHM tunes (P3a); "
-				       "use datax_sched_* for timed GPIO and markers");
+				       "timed set_gain is not supported: only set_frequency "
+				       "takes a time (FHM tunes); use datax_sched_* for timed "
+				       "GPIO and markers");
 	return 0;
 }
 
@@ -39,9 +41,12 @@ int datax_device_set_frequency(struct datax_device *dev, unsigned int ch,
 	const struct datax_family_ops *ops;
 	int ret = prepare(dev, true, ch, &ops);
 
-	if (!ret)
-		ret = check_timed(dev, when);
-	return ret ? ret : ops->set_frequency(dev, ch, hz);
+	if (ret)
+		return ret;
+	/* Timed: a tune on the device's scheduler (fhm.c; ruling 3). */
+	if (when != DATAX_TIME_NOW)
+		return datax_fhm_timed_set_frequency(dev, ch, hz, when);
+	return ops->set_frequency(dev, ch, hz);
 }
 
 int datax_device_get_frequency(const struct datax_device *dev, unsigned int ch,

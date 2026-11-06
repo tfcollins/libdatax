@@ -16,6 +16,7 @@
 #include <datax/datax_internal.h>
 
 #include "error.h"
+#include "fhm.h"
 #include "scheduler.h"
 #include "tick_descriptor.h"
 #include "tick_ops.h"
@@ -579,11 +580,9 @@ long datax_sched_queue_marker(struct datax_sched *s, datax_time when,
 long datax_sched_queue_tune(struct datax_sched *s, datax_time when,
 			    unsigned int ch, unsigned long long hz)
 {
-	(void)when; (void)ch; (void)hz;
-	if (s)
-		return datax_error_ret(s->ctx, ENOTSUP, "sched",
-				       "queue_tune: arrives with FHM tunes (P3a)");
-	return -ENOTSUP;
+	if (!s)
+		return -EINVAL;
+	return datax_fhm_queue_tune(s, when, ch, hz);   /* fhm.c */
 }
 
 long datax_sched_queue_stream_gate(struct datax_sched *s, datax_time when,
@@ -622,13 +621,53 @@ int datax_sched_report(struct datax_sched *s, long seq)
 
 /* ---- commit ------------------------------------------------------------------- */
 
+/*
+ * A rejected commit discards every uncommitted command. Each one's hook
+ * runs with r->discarded set (a terminal outcome; nothing is published), so
+ * state kept beside the scheduler (the FHM tune pipeline) forgets it too.
+ * s->lock held on entry and return, dropped around each hook; io held.
+ * Snapshotted first: a command a hook enqueues stays queued.
+ */
 static void discard_batch(struct datax_sched *s)
 {
-	for (size_t i = 0; i < s->ncmds;)
+	long *seqs = malloc((s->ncmds ? s->ncmds : 1) * sizeof(*seqs));
+	size_t n = 0;
+
+	if (!seqs) {      /* out of memory: discard without the hooks */
+		for (size_t i = 0; i < s->ncmds;)
+			if (s->cmds[i].state == CMD_BUILD)
+				s->cmds[i] = s->cmds[--s->ncmds];
+			else
+				i++;
+		return;
+	}
+	for (size_t i = 0; i < s->ncmds; i++)
 		if (s->cmds[i].state == CMD_BUILD)
-			s->cmds[i] = s->cmds[--s->ncmds];
-		else
-			i++;
+			seqs[n++] = s->cmds[i].seq;
+	for (size_t i = 0; i < n; i++) {
+		struct sched_cmd *c = datax_sched_find(s, seqs[i]);
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_FLUSHED,
+			.tick_status = UINT32_MAX,
+			.discarded = true,
+		};
+		datax_sched_complete_fn fn;
+		void *user;
+
+		if (!c || c->state != CMD_BUILD)
+			continue;
+		fn = c->on_complete;
+		user = c->user;
+		res.requested_ticks = c->api_ts;
+		snprintf(res.detail, sizeof(res.detail), "discarded: the commit was rejected");
+		datax_sched_remove(s, c);
+		if (fn) {
+			pthread_mutex_unlock(&s->lock);
+			fn(s, seqs[i], &res, user);
+			pthread_mutex_lock(&s->lock);
+		}
+	}
+	free(seqs);
 }
 
 struct rep_ts {

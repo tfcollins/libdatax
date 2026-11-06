@@ -36,8 +36,10 @@ int main(void)
 	CHECK(datax_sched_create(&dev, &sched) == -ENOTSUP);
 	CHECK(sched == NULL);
 	CHECK(strstr(datax_context_get_last_error(&ctx), "no Tick scheduler"));
+	/* Hop staging is implemented for the adrv9009 family (FHM); this
+	 * device has no family. */
 	CHECK(datax_device_stage_hop_table(&dev, &f, 1) == -ENOTSUP);
-	CHECK(strstr(datax_context_get_last_error(&ctx), "stage_hop_table: arrives in P3"));
+	CHECK(strstr(datax_context_get_last_error(&ctx), "no hop staging for this device family"));
 	CHECK(datax_device_set_time_next_pps(&dev, 0) == -ENOTSUP);
 	CHECK(strstr(datax_context_get_last_error(&ctx), "no Tick scheduler in this context"));
 	CHECK(datax_device_run_mcs(&dev) == -ENOTSUP);

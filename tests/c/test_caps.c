@@ -67,7 +67,12 @@ int main(void)
 					   DATAX_LIMIT_TICK_HZ, &v) == 0 && v == 100000000ULL);
 		CHECK(datax_caps_get_limit(datax_device_get_caps(dev),
 					   DATAX_LIMIT_QUEUE_DEPTH, &v) == 0 && v == 16);
+		/* FHM hop table: a host-side set of 64 (spec decision 10) */
+		CHECK(datax_caps_get_limit(datax_device_get_caps(dev),
+					   DATAX_LIMIT_HOP_TABLE_DEPTH, &v) == 0 && v == 64);
 	} else if (!strcmp(xml, "adrv9009-zu11eg")) {
+		CHECK(datax_caps_get_limit(datax_device_get_caps(dev),
+					   DATAX_LIMIT_HOP_TABLE_DEPTH, &v) == 0 && v == 0);
 		CHECK(datax_internal_probe_flags(dev) == BIT(DATAX_CAP_MCS));
 	} else if (!strcmp(xml, "adrv9009-single")) {
 		CHECK(datax_internal_probe_flags(dev) == 0);

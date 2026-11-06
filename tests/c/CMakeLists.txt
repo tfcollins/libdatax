@@ -306,6 +306,19 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_devtime PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # FHM timed tunes (Task 4): fake Tick + fake Talise FHM on the adrv9009 pair.
+  add_executable(test_fhm test_fhm.c)
+  target_link_libraries(test_fhm PRIVATE datax datax_fake_tick Threads::Threads)
+  target_include_directories(test_fhm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(test_fhm PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_fhm PRIVATE _POSIX_C_SOURCE=200809L)
+  add_test(NAME test_fhm
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_fhm>)
+  set_tests_properties(test_fhm PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 120)
   # The internal hook contract (src/scheduler.h) for Task 4: compiled from
   # the library sources, since the hooks and datax_sched_enqueue are not
   # exported.

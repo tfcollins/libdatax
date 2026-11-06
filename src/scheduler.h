@@ -98,6 +98,10 @@ struct datax_sched_cmd_spec {
 	uint16_t command_id, target_id;
 	uint32_t args[4];
 	bool report;                  /* REPORT_COMPLETION; spacing rule applies */
+	/* Reported, but the result is not kept: after the hook it leaves the
+	 * table instead of becoming DONE (nobody can wait on it: timed
+	 * set_frequency's tune on the device's own scheduler). */
+	bool consume;
 	datax_sched_complete_fn on_complete;  /* may be NULL */
 	void *user;
 };
@@ -154,6 +158,7 @@ struct sched_cmd {
 	uint16_t command_id, target_id;
 	uint32_t args[4];
 	bool report;
+	bool consume;                      /* see datax_sched_cmd_spec */
 	bool lagged;                       /* a drain came after hw_ts: may be held */
 	datax_sched_complete_fn on_complete;
 	void *user;

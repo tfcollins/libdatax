@@ -108,7 +108,7 @@ void datax_sched_remove(struct datax_sched *s, struct sched_cmd *c)
 
 static void publish(struct datax_sched *s, struct sched_cmd *c)
 {
-	if (!c->report) {
+	if (!c->report || c->consume) {
 		datax_sched_remove(s, c);
 		return;
 	}
@@ -531,6 +531,7 @@ long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spe
 	c->target_id = spec->target_id;
 	memcpy(c->args, spec->args, sizeof(c->args));
 	c->report = spec->report;
+	c->consume = spec->consume;
 	c->on_complete = spec->on_complete;
 	c->user = spec->user;
 	pthread_mutex_unlock(&s->lock);

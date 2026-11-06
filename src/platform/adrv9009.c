@@ -227,7 +227,9 @@ const struct datax_family_ops datax_adrv9009_ops = {
 	.get_bandwidth = adrv9009_get_bandwidth,
 	.rx_channels_per_phy = CH_PER_PHY,
 	.tx_channels_per_phy = CH_PER_PHY,
-	.hop_table_depth = 0, /* driver has no table attribute; P3 defines it */
+	/* No Tick, no timed hops: 0. caps.c raises it to 64 (the FHM table,
+	 * fhm.c) when a Tick is bound. */
+	.hop_table_depth = 0,
 	.rx_stream_dev = "axi-adrv9009-rx-hpc",
 	.tx_stream_dev = "axi-adrv9009-tx-hpc",
 	.stream_channel_ids = adrv9009_stream_channel_ids,

@@ -684,6 +684,8 @@ static void test_timed_set_frequency_uses_device_sched(void)
 	to_edge(&x, 3, 200 * MS);
 	to_edge(&x, 4, 50 * MS);
 	CHECK(fake_fhm_pll_hz(x.m) == F_A);
+	/* Nobody holds this scheduler, so its tunes keep no completions (the
+	 * hooks still verify them; test_sched_hooks consumed_result_not_kept). */
 	(void)out;
 	(void)n;
 	fx_close(&x);                            /* context destroy frees it */

@@ -645,7 +645,7 @@ static int check_tune(struct datax_device *dev, unsigned int ch, unsigned long l
 }
 
 static long enqueue_edge(struct datax_sched *s, datax_time when, bool rise, bool report,
-			 struct datax_fhm *m)
+			 bool consume, struct datax_fhm *m)
 {
 	struct datax_sched_cmd_spec spec = {
 		.when = when,
@@ -653,6 +653,7 @@ static long enqueue_edge(struct datax_sched *s, datax_time when, bool rise, bool
 		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
 		.args = { TRIGGER_MASK, rise ? TRIGGER_MASK : 0u, 0, 0 },
 		.report = report,
+		.consume = consume,
 		.on_complete = rise ? fhm_on_edge : NULL,
 		.user = rise ? m : NULL,
 	};
@@ -672,8 +673,10 @@ static void unqueue(struct datax_sched *s, const long *seqs, size_t n)
 	pthread_mutex_unlock(&s->lock);
 }
 
-long datax_fhm_queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
-			  unsigned long long hz)
+/* consume: the tune's result is not kept (timed set_frequency: the caller
+ * has no seq to wait on). Its hook still verifies it. */
+static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
+		       unsigned long long hz, bool consume)
 {
 	struct datax_device *dev = s->dev;
 	struct datax_fhm *m;
@@ -750,14 +753,14 @@ long datax_fhm_queue_tune(struct datax_sched *s, datax_time when, unsigned int c
 		m->cap = cap;
 	}
 	if (prime) {
-		seqs[0] = enqueue_edge(s, when - lead, true, false, m);
+		seqs[0] = enqueue_edge(s, when - lead, true, false, false, m);
 		if (seqs[0] > 0)
-			seqs[1] = enqueue_edge(s, when - lead + pulse, false, false, m);
+			seqs[1] = enqueue_edge(s, when - lead + pulse, false, false, false, m);
 	}
 	if (!prime || seqs[1] > 0) {
-		seqs[2] = enqueue_edge(s, when, true, report, m);
+		seqs[2] = enqueue_edge(s, when, true, report, consume, m);
 		if (seqs[2] > 0)
-			seqs[3] = enqueue_edge(s, when + pulse, false, false, m);
+			seqs[3] = enqueue_edge(s, when + pulse, false, false, false, m);
 	}
 	if (seqs[3] <= 0) {
 		for (int i = 0; i < 4; i++)
@@ -776,6 +779,12 @@ long datax_fhm_queue_tune(struct datax_sched *s, datax_time when, unsigned int c
 out:
 	pthread_mutex_unlock(&m->lock);
 	return ret;
+}
+
+long datax_fhm_queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
+			  unsigned long long hz)
+{
+	return queue_tune(s, when, ch, hz, false);
 }
 
 /* ---- timed set_frequency ------------------------------------------------------ */
@@ -821,7 +830,11 @@ int datax_fhm_timed_set_frequency(struct datax_device *dev, unsigned int ch,
 				       "set_frequency: the device's scheduler has %zu uncommitted "
 				       "commands; use datax_sched_queue_tune and commit", nb);
 	}
-	seq = datax_fhm_queue_tune(s, when, ch, hz);
+	/* The caller gets no seq, so the result is not kept (it would pile up
+	 * on a scheduler nobody holds). The hook still stages and verifies it;
+	 * a LATE result raises DATAX_EVT_LATE_COMMAND, a DROPPED one (PLL
+	 * mismatch) has no surface. */
+	seq = queue_tune(s, when, ch, hz, true);
 	ret = seq < 0 ? (int)seq : datax_sched_commit(s);
 	datax_sched_put(s);
 	return ret;

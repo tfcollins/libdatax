@@ -5,7 +5,7 @@ import errno
 
 from ._lib import c_ull, get_lib
 from .caps import Capabilities
-from .errors import Error
+from .errors import CapabilityError, Error
 from .time import DeviceTime
 
 
@@ -141,11 +141,13 @@ class Device(_ChannelProps):
         self._ptr_ = ptr
         self._caps_ptr_ = get_lib().datax_device_get_caps(ptr)
         self._valid = True
+        self._sched = None
         self.caps = Capabilities(self)
         self.time = DeviceTime(self)
 
     def _invalidate(self):
         self._valid = False
+        self._sched = None
         self._ptr_ = None
         self._caps_ptr_ = None
 
@@ -169,6 +171,22 @@ class Device(_ChannelProps):
 
     def channel(self, n):
         return ChannelView(self, n)
+
+    @property
+    def scheduler(self):
+        """The device's timed-command ``Scheduler`` (created on first use, and
+        again after it was closed). ``CapabilityError`` without the
+        ``timed_commands`` capability."""
+        self._check()
+        s = self._sched
+        if s is not None and not s.closed:
+            return s
+        if "timed_commands" not in self.caps:
+            raise CapabilityError(errno.ENOTSUP, "this device has no timed_commands "
+                                  "capability (no Tick scheduler)")
+        from .sched import Scheduler
+        self._sched = Scheduler(self)
+        return self._sched
 
     def stage_hop_table(self, freqs_hz):
         self._check()
@@ -236,6 +254,9 @@ class Device(_ChannelProps):
             st.close()
 
     def run_mcs(self):
+        """Verify the JESD204 multi-chip sync has completed on every chip
+        (``Error`` EIO naming the chip and FSM state when not;
+        ``CapabilityError`` without the ``mcs`` capability)."""
         self._check()
         self._call(get_lib().datax_device_run_mcs(self._ptr))
 

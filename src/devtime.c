@@ -78,6 +78,33 @@ static void emit_pps(struct datax_device *dev, struct datax_sched *s,
 	}
 }
 
+/*
+ * The counter or its mapping just changed (tron run 5): the poller's cached
+ * device time (s->last_hw, which queue_tune's now-estimate, the feeder's
+ * host-late rule and the FHM hooks' fired/park/late decisions all start
+ * from) is in the old domain until the poller's next read; after a hard load
+ * that is ~1000 s off, and the next tune was refused "inside the guard
+ * margin". Re-read it now, io held, before the aligning mark is cleared (so
+ * no queue_tune sees the old one), and drop a wake target from the old
+ * domain. On a failed read, reset it to 0: an underestimate is safe (commit
+ * and the feeder re-read the time themselves; the hooks only wait longer, and
+ * a staging write is still judged by the read that follows it).
+ */
+static void refresh_snapshot(struct datax_sched *s)
+{
+	if (!s)
+		return;
+	if (datax_poller_read_time(s)) {
+		pthread_mutex_lock(&s->lock);
+		s->last_hw = 0;
+		s->last_hw_mono = datax_mono_ns();
+		pthread_mutex_unlock(&s->lock);
+	}
+	pthread_mutex_lock(&s->lock);
+	s->wake_hw = 0;
+	pthread_mutex_unlock(&s->lock);
+}
+
 static void sleep_ms(unsigned int ms)
 {
 	struct timespec ts = { 0, (long)ms * 1000000L };
@@ -208,6 +235,7 @@ bool datax_devtime_check_late_edge(struct datax_device *dev, struct datax_sched 
 		pthread_mutex_unlock(&s->lock);
 		/* Involuntary: after its drops, forget the FHM history and drop
 		 * the tunes it re-based (their pipeline state is gone). */
+		refresh_snapshot(s);          /* the counter jumped (written or not) */
 		datax_fhm_align_end(dev, s, true, true);
 	} else {
 		atomic_store(&dev->time_off, 0);
@@ -303,6 +331,8 @@ int datax_device_set_time_next_pps(struct datax_device *dev, unsigned long long 
 	ret = align_soft(dev, s, epoch_ticks, why);
 	changed = ret == 0;
 out:
+	if (changed)
+		refresh_snapshot(s);         /* hard: the counter was loaded */
 	if (fhm_begun)                       /* every path: success, error, timeout */
 		datax_fhm_align_end(dev, s, changed, false);
 	if (locked)

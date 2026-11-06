@@ -26,6 +26,7 @@ LIBDATAX_0.1 {
     datax_device_stage_hop_table;
     datax_device_get_time;
     datax_device_set_time_next_pps;
+    datax_device_get_time_source;
     datax_device_run_mcs;
     datax_stream_create;
     datax_stream_destroy;
@@ -42,6 +43,7 @@ LIBDATAX_0.1 {
     datax_sched_queue_marker;
     datax_sched_queue_tune;
     datax_sched_queue_stream_gate;
+    datax_sched_report;
     datax_sched_commit;
     datax_sched_flush;
     datax_sched_wait;
@@ -51,6 +53,7 @@ LIBDATAX_0.1 {
     datax_internal_tick_enum;
     datax_internal_stream_stats;
     datax_internal_device_stream_info;
+    datax_internal_tick_bind_fake;
   local:
     *;
 };

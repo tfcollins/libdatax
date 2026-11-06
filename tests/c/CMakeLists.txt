@@ -235,3 +235,41 @@ if(DATAX_LIBIIO_BUILD)
 else()
   message(STATUS "DATAX_LIBIIO_BUILD not set: emulator-backed tests are not registered")
 endif()
+
+# Fake Tick + fake Talise FHM: a test-only shared library (never installed)
+# so C tests link it and Python tests can load it through ctypes.
+add_library(datax_fake_tick SHARED fake_tick.c)
+target_include_directories(datax_fake_tick PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(datax_fake_tick PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(datax_fake_tick PRIVATE _POSIX_C_SOURCE=200809L)
+target_link_libraries(datax_fake_tick PRIVATE Threads::Threads)
+
+# The fake against every golden hdl_model trace (one test per trace), and
+# its own surface/PPS/FHM checks. No emulator needed.
+add_executable(test_fake_tick test_fake_tick.c)
+target_link_libraries(test_fake_tick PRIVATE datax datax_fake_tick)
+target_include_directories(test_fake_tick PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_fake_tick PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(test_fake_tick PRIVATE _POSIX_C_SOURCE=200809L)
+file(GLOB DATAX_TRACES CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/tests/traces/*.json)
+if(NOT DATAX_TRACES)
+  message(FATAL_ERROR "no golden traces in tests/traces (run tests/traces/gen_traces.py)")
+endif()
+foreach(tr ${DATAX_TRACES})
+  get_filename_component(tn ${tr} NAME_WE)
+  add_test(NAME test_fake_tick_${tn} COMMAND test_fake_tick trace ${tr})
+endforeach()
+add_test(NAME test_fake_tick_unit COMMAND test_fake_tick unit)
+if(DATAX_LIBIIO_BUILD)
+  # The seam: bind the fake to a live device of a fixture without Tick.
+  foreach(fx ad936x adrv9009-zu11eg)
+    add_test(NAME test_fake_tick_seam_${fx}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/${fx}.xml $<TARGET_FILE:test_fake_tick> seam)
+    set_tests_properties(test_fake_tick_seam_${fx} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      TIMEOUT 60)
+  endforeach()
+endif()

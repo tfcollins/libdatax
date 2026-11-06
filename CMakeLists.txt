@@ -45,6 +45,7 @@ add_library(datax SHARED
   src/caps.c
   src/time.c
   src/platform/tick.c
+  src/tick_ops.c
   src/tick_descriptor.c
   src/stream.c
   src/stream_status.c)

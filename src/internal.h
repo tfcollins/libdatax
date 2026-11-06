@@ -8,6 +8,7 @@
 
 struct iio_device;
 struct datax_stream;
+struct datax_tick_ops;
 
 enum datax_family {
 	DATAX_FAMILY_UNKNOWN,
@@ -47,6 +48,11 @@ struct datax_device {
 	struct datax_stream *stream[2];
 	/* Status-register detection seen by streams: 0 unknown, 1 yes, 2 no. */
 	unsigned char status_detect[2];
+	/* Tick seam (tick_ops.h): every Tick access goes through tick_ops with
+	 * tick_h. Bound at fold time to the libiio ops on the context's Tick
+	 * device; NULL ops when there is none. Tests rebind a fake. */
+	const struct datax_tick_ops *tick_ops;
+	void *tick_h;
 };
 
 /* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */

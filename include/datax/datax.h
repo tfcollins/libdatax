@@ -45,7 +45,17 @@ enum datax_cap {                             /* order matches the capability mat
 
 enum datax_limit {
 	DATAX_LIMIT_TICK_HZ, DATAX_LIMIT_QUEUE_DEPTH, DATAX_LIMIT_HOP_TABLE_DEPTH,
-	DATAX_LIMIT_GUARD_MARGIN_MS, DATAX_LIMIT_MAX_CHANNELS, DATAX_LIMIT_COUNT
+	DATAX_LIMIT_GUARD_MARGIN_MS, DATAX_LIMIT_MAX_CHANNELS,
+	DATAX_LIMIT_REPORT_SPACING_US,          /* min spacing of reported commands (measured) */
+	DATAX_LIMIT_HOP_STAGE_US,               /* measured FHM/fastlock staging round trip */
+	DATAX_LIMIT_COUNT
+};
+
+enum datax_time_source {
+	DATAX_TIME_FREE_RUN,      /* internal clock, never aligned */
+	DATAX_TIME_PPS_ALIGNED,   /* epoch loaded on a fabric PPS edge */
+	DATAX_TIME_SOFT_ALIGNED,  /* aligned to the host clock in software (no PPS) */
+	DATAX_TIME_PPS_HOLDOVER   /* was PPS-aligned; PPS lost; running on the internal clock */
 };
 
 bool datax_caps_has(const struct datax_caps *caps, enum datax_cap cap);
@@ -113,6 +123,8 @@ int datax_device_get_time(const struct datax_device *dev,
 			  unsigned long long *ticks, unsigned long long *tick_hz);
 int datax_device_set_time_next_pps(struct datax_device *dev,
 				   unsigned long long epoch_ticks);
+int datax_device_get_time_source(const struct datax_device *dev,
+				 enum datax_time_source *src);
 
 /* Multi-chip sync (DATAX_CAP_MCS) */
 int datax_device_run_mcs(struct datax_device *dev);
@@ -182,6 +194,9 @@ long datax_sched_queue_tune(struct datax_sched *sched, datax_time when,
 			    unsigned int ch, unsigned long long hz);
 long datax_sched_queue_stream_gate(struct datax_sched *sched, datax_time when,
 				   struct datax_stream *stream, bool enable);
+
+/* Mark an already-queued command (by its seq) to report completion. */
+int datax_sched_report(struct datax_sched *sched, long seq);
 
 int datax_sched_commit(struct datax_sched *sched);
 int datax_sched_flush(struct datax_sched *sched);

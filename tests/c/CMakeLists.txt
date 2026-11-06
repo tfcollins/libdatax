@@ -110,6 +110,33 @@ if(DATAX_LIBIIO_BUILD)
       TIMEOUT 120)
   endif()
 
+  # TX (one-shot, cyclic) and zero-copy in both directions. TX blocks are
+  # read back from the emulator's TX file in the same temporary directory.
+  # mode | fixture | pattern device | channels | offset
+  set(DATAX_STREAM_IO_CASES
+    "test_stream_tx|ad936x|-|1|0"
+    "test_stream_zero_copy|ad936x|cf-ad9361-lpc|1|0")
+  foreach(case ${DATAX_STREAM_IO_CASES})
+    string(REPLACE "|" ";" f "${case}")
+    list(GET f 0 t)
+    list(GET f 1 xml)
+    list(GET f 2 pdev)
+    list(GET f 3 nch)
+    list(GET f 4 off)
+    add_executable(${t} ${t}.c)
+    target_link_libraries(${t} PRIVATE datax iio_dep)
+    target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+    target_compile_options(${t} PRIVATE ${DATAX_WARNINGS})
+    target_compile_definitions(${t} PRIVATE _POSIX_C_SOURCE=200809L)
+    add_test(NAME ${t}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu_pattern.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/${xml}.xml ${pdev} ${nch} ${off}
+              $<TARGET_FILE:${t}>)
+    set_tests_properties(${t} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      TIMEOUT 60)
+  endforeach()
+
   # ad936x immediate verbs against the emulator.
   add_executable(test_device_ad936x test_device_ad936x.c)
   target_link_libraries(test_device_ad936x PRIVATE datax iio_dep m)

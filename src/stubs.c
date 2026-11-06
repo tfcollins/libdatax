@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 /*
- * Stubs: the stream TX and zero-copy calls (P2, later tasks), scheduler,
- * hop staging, MCS and PPS time-set are not implemented yet and return
- * -ENOTSUP. Stream lifecycle and RX copying live in stream.c.
+ * Stubs: the scheduler, hop staging, MCS and PPS time-set are not
+ * implemented yet and return -ENOTSUP. Streams (lifecycle, copying and
+ * zero-copy I/O) live in stream.c.
  *
  * Device-taking stubs record "<verb>: arrives in P<n>" as the context's
  * last error when dev is non-NULL; with a NULL dev they return the bare code.
- * Stream/sched handle-taking stubs have no handle layout yet, so they return
+ * Scheduler handle-taking stubs have no handle layout yet, so they return
  * the bare code only (no last-error).
  */
 #include <errno.h>
@@ -32,26 +32,6 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 int datax_device_run_mcs(struct datax_device *dev)
 {
 	return dev_stub(dev, "datax_device_run_mcs: arrives in P3");
-}
-
-int datax_stream_send(struct datax_stream *stream, const void *src, size_t samples,
-		      int timeout_ms)
-{
-	(void)stream; (void)src; (void)samples; (void)timeout_ms;
-	return -ENOTSUP;
-}
-
-int datax_stream_get_block(struct datax_stream *stream, void **data,
-			   struct datax_block_info *info, int timeout_ms)
-{
-	(void)stream; (void)data; (void)info; (void)timeout_ms;
-	return -ENOTSUP;
-}
-
-int datax_stream_put_block(struct datax_stream *stream, void *data)
-{
-	(void)stream; (void)data;
-	return -ENOTSUP;
 }
 
 int datax_sched_create(struct datax_device *dev, struct datax_sched **sched)

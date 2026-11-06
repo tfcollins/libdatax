@@ -31,6 +31,16 @@ time into a temporary copy of the fixture.
 
 A missing RX file makes the emulator fail the buffer enable (`-ENOENT`).
 
+## TX sample data
+
+The emulator creates the TX device's `<name>_buf0.bin` (same naming) when the
+buffer is enabled and overwrites it from the start with each TX block it
+dequeues, so after `stop()` it holds the last block sent. Its server writes
+asynchronously: read the file only after `stop()`, whose drain waits for every
+block. A cyclic block is never written: the pinned iiod binary responder
+answers a cyclic enqueue at once and never dequeues it, so the file stays empty
+(it still shows when the buffer was enabled).
+
 ## Running a command under the emulator
 
 ```sh

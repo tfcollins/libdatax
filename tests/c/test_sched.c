@@ -1079,6 +1079,43 @@ static void test_destroy_cancels_waiters(void)
 	printf("test_destroy_cancels_waiters: ok\n");
 }
 
+/* The same, but the caller destroys the whole context while waiters are
+ * blocked, and only then joins them: a waiter must write its last error
+ * before it leaves (under the scheduler lock), not after the context is
+ * gone. ASan reports the late write as a heap-use-after-free. */
+static void test_context_destroy_cancels_waiters(void)
+{
+	for (int i = 0; i < 50; i++) {
+		struct fx x;
+		struct waiter w[NWAITERS];
+		pthread_t th[NWAITERS];
+		long r;
+
+		fx_open(&x, 0, true);
+		r = gpio(&x, fake_tick_now(x.f) + 1000 * MS, true);
+		CHECK(datax_sched_commit(x.s) == 0);
+		for (int k = 0; k < NWAITERS; k++) {
+			w[k].s = x.s;
+			w[k].seq = r;
+			w[k].timeout_ms = k % 2 ? 10000 : -1;
+			w[k].ret = 1;
+			CHECK(pthread_create(&th[k], NULL, waiter_main, &w[k]) == 0);
+		}
+		msleep(10);
+		x.s = NULL;                      /* the context destroys it */
+		datax_context_destroy(x.ctx);
+		x.ctx = NULL;
+		for (int k = 0; k < NWAITERS; k++) {
+			CHECK(pthread_join(th[k], NULL) == 0);
+			CHECK(w[k].ret == -ECANCELED);
+		}
+		fake_tick_free(x.f);
+		pthread_mutex_destroy(&x.sh.m);
+		pthread_mutex_destroy(&x.ev.m);
+	}
+	printf("test_context_destroy_cancels_waiters: ok\n");
+}
+
 /* get_time racing scheduler create/destroy: it holds a reference while it
  * takes the scheduler's io lock, so destroy cannot free it underneath. */
 struct timer_arg {
@@ -1164,6 +1201,7 @@ int main(int argc, char **argv)
 	if (!strcmp(mode, "destroy")) {
 		test_destroy_while_polling();
 		test_destroy_cancels_waiters();
+		test_context_destroy_cancels_waiters();
 		test_get_time_races_destroy();
 		return 0;
 	}
@@ -1180,6 +1218,7 @@ int main(int argc, char **argv)
 			{ "event_overflow_summarised", test_event_overflow_summarised },
 			{ "destroy_cancels_waiters", test_destroy_cancels_waiters },
 			{ "get_time_races_destroy", test_get_time_races_destroy },
+			{ "context_destroy_cancels_waiters", test_context_destroy_cancels_waiters },
 		};
 
 		for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
@@ -1211,6 +1250,7 @@ int main(int argc, char **argv)
 	test_flush_completes_flushed();
 	test_destroy_while_polling();
 	test_destroy_cancels_waiters();
+	test_context_destroy_cancels_waiters();
 	test_get_time_races_destroy();
 	printf("test_sched: all ok\n");
 	return 0;

@@ -293,6 +293,19 @@ if(DATAX_LIBIIO_BUILD)
       ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
       TIMEOUT 120)
   endforeach()
+  # Device time, PPS alignment and the internal-clock fallback (fake Tick).
+  add_executable(test_devtime test_devtime.c)
+  target_link_libraries(test_devtime PRIVATE datax datax_fake_tick Threads::Threads)
+  target_include_directories(test_devtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(test_devtime PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_devtime PRIVATE _POSIX_C_SOURCE=200809L)
+  add_test(NAME test_devtime
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_devtime>)
+  set_tests_properties(test_devtime PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 120)
   # The internal hook contract (src/scheduler.h) for Task 4: compiled from
   # the library sources, since the hooks and datax_sched_enqueue are not
   # exported.

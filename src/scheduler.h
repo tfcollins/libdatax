@@ -200,6 +200,7 @@ struct datax_sched {
 	unsigned long long last_hw;        /* latest device time read */
 	unsigned long long last_hw_mono;   /* host monotonic ns of that read */
 	unsigned long long late_seen, overflow_seen;
+	int pps_seen_state;                /* devtime.c watch: 0 unknown, 1 absent, 2 present */
 	unsigned long host_late;           /* commands the feeder could not write in time */
 
 	datax_sched_poll_fn poll_fn;
@@ -236,6 +237,10 @@ void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len);
 /* At create, before the poller starts: time DATAX_SCHED_DRAIN_SAMPLES
  * completion drains in device ticks and set access_ticks, spacing_ticks
  * and spacing_us. 0 or a Tick error. */
+/* devtime.c: the PPS watch, run by the poller every IDLE_COUNTER_EVERY
+ * iterations (and on every active one) with io held and s->lock not held. */
+void datax_devtime_poll(struct datax_sched *s);
+
 int datax_poller_measure(struct datax_sched *s);
 /* Read the device time into last_hw/last_hw_mono (io held). */
 int datax_poller_read_time(struct datax_sched *s);

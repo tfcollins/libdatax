@@ -44,6 +44,7 @@ set(DATAX_SOURCES
   src/device.c
   src/caps.c
   src/time.c
+  src/devtime.c
   src/platform/tick.c
   src/tick_ops.c
   src/tick_descriptor.c

@@ -186,22 +186,33 @@ static int adrv9009_set_bandwidth(struct datax_device *dev, unsigned int ch,
 			       "bandwidth is fixed by the profile");
 }
 
-/* adrv9009 radio channel n is the scan pair voltage{n}_i, voltage{n}_q
- * (4 radio channels across both phys, 8 scan channels per direction). */
+/* adrv9009 radio channel n streaming scan pair. Observed on the board
+ * (2026-11-05, stock Kuiper zynqmp-adrv9009-zu11eg, libiio v1 iio_info):
+ * RX axi-adrv9009-rx-hpc names them voltage{n}_i / voltage{n}_q, but TX
+ * axi-adrv9009-tx-hpc uses AD9361-style interleaved voltage0..voltage7, so
+ * radio channel n is I = voltage{2n}, Q = voltage{2n+1}. */
 static int adrv9009_stream_channel_ids(unsigned int radio_ch,
 				       enum datax_direction dir,
 				       const char **id_i, const char **id_q)
 {
-	static const char *const ids_i[] = { "voltage0_i", "voltage1_i",
-					     "voltage2_i", "voltage3_i" };
-	static const char *const ids_q[] = { "voltage0_q", "voltage1_q",
-					     "voltage2_q", "voltage3_q" };
+	static const char *const rx_i[] = { "voltage0_i", "voltage1_i",
+					    "voltage2_i", "voltage3_i" };
+	static const char *const rx_q[] = { "voltage0_q", "voltage1_q",
+					    "voltage2_q", "voltage3_q" };
+	static const char *const tx_ids[] = { "voltage0", "voltage1",
+					      "voltage2", "voltage3",
+					      "voltage4", "voltage5",
+					      "voltage6", "voltage7" };
 
-	(void)dir;
 	if (radio_ch >= 4)
 		return -EINVAL;
-	*id_i = ids_i[radio_ch];
-	*id_q = ids_q[radio_ch];
+	if (dir == DATAX_TX) {
+		*id_i = tx_ids[2 * radio_ch];
+		*id_q = tx_ids[2 * radio_ch + 1];
+	} else {
+		*id_i = rx_i[radio_ch];
+		*id_q = rx_q[radio_ch];
+	}
 	return 0;
 }
 

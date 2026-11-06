@@ -17,9 +17,12 @@ Notes:
 
 - The loopback test switches a debug attribute and restores it to 0 in `finally`.
   ad936x: `loopback` on `ad9361-phy` (RX = TX >> 4, asserted bit-exact).
-  adrv9009: `bist_framer_a_loopback` on `adrv9009-phy` and, when present,
-  `bist_framer_b_loopback` on `adrv9009-phy-b` (unverified on hardware; a
-  missing attribute fails with its name).
+  adrv9009: `bist_framer_a_loopback` on both `adrv9009-phy` and, when present,
+  `adrv9009-phy-b`; register 0x1532 bit 7 of each phy is read back through its
+  `direct_reg_access` (a failure names the phy). The stock framer loopback
+  exchanges I and Q (RX I = TX Q, RX Q = TX I, no shift; tron, 2026-11-05), so
+  the test compares against `expected_loopback()`; an RF loopback would confirm
+  TX I/Q orientation independently. A missing attribute fails with its name.
 - Debug attributes use libiio v1 through ctypes on the libiio already loaded by
   libdatax (`DATAX_LIBIIO_LIB` overrides); pylibiio targets v0 and is not used.
 - `evidence.json` holds the redacted URI, the libiio pin, the libdatax commit,

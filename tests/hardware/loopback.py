@@ -75,6 +75,31 @@ def mismatches_after_shift(tx_raw, rx_raw, lag, shift):
     return int(np.count_nonzero(ref != np.asarray(rx_raw, dtype=np.int16)[:n]))
 
 
+def expected_loopback(family, tx_raw):
+    """The int16 ``(n, 2)`` (I, Q) waveform a digital loopback returns for ``tx_raw``.
+
+    ad936x: ``tx >> 4`` (arithmetic). adrv9009: I and Q exchanged, no shift
+    (observed on tron, stock Kuiper, 2026-11-05: rx_I == tx_Q, rx_Q == tx_I, gain
+    exactly 1, all four channels). Only an RF loopback (REQ-TEST-030 RF part)
+    can independently confirm the TX I/Q orientation.
+    """
+    tx_raw = np.asarray(tx_raw, dtype=np.int16)
+    if family == "ad936x":
+        return tx_raw >> 4
+    if family == "adrv9009":
+        return tx_raw[:, ::-1].copy()
+    raise ValueError(f"unknown family {family!r}")
+
+
+def mismatches_vs_expected(expected, rx_raw, lag):
+    """Count int16 values where ``rx != roll(expected, lag)`` (first ``len(expected)``
+    rows of ``rx_raw``)."""
+    expected = np.asarray(expected, dtype=np.int16)
+    n = expected.shape[0]
+    ref = np.roll(expected, lag, axis=0)
+    return int(np.count_nonzero(ref != np.asarray(rx_raw, dtype=np.int16)[:n]))
+
+
 # ---- evidence helpers --------------------------------------------------------
 
 def redact_uri(uri):
@@ -227,22 +252,50 @@ def family_of(device_name):
     raise ValueError(f"no digital loopback known for device {device_name!r}")
 
 
+BIST_LOOPBACK_REG = 0x1532
+BIST_LOOPBACK_BIT = 0x80
+
+
+def _check_framer_loopback(ctx, phy, on):
+    """Read back Talise register 0x1532 bit 7 through the phy's own SPI
+    ``direct_reg_access`` (plain address: the 0x80000000 flag would route to the
+    AXI core instead) and raise LoopbackError naming the phy on mismatch."""
+    write_debug_attr(ctx, phy, "direct_reg_access", f"0x{BIST_LOOPBACK_REG:04x}")
+    raw = read_debug_attr(ctx, phy, "direct_reg_access")
+    try:
+        val = int(raw.split()[-1], 0)
+    except (ValueError, IndexError):
+        raise LoopbackError(f"{phy}: cannot parse register 0x{BIST_LOOPBACK_REG:04x} "
+                            f"read-back {raw!r}")
+    if bool(val & BIST_LOOPBACK_BIT) != bool(on):
+        raise LoopbackError(
+            f"{phy}: register 0x{BIST_LOOPBACK_REG:04x} = 0x{val:02x}, bit 7 "
+            f"{'clear' if on else 'set'} after switching bist_framer_a_loopback "
+            f"{'on' if on else 'off'}")
+
+
 def set_digital_loopback(ctx, family, on):
     """Switch the transceiver's digital loopback (TX samples appear on RX).
 
     ad936x: debug attribute ``loopback`` of ``ad9361-phy`` (1: RX = TX >> 4
-    bit-exact on stock Kuiper). adrv9009: ``bist_framer_a_loopback`` of
-    ``adrv9009-phy`` and, when ``adrv9009-phy-b`` exists, ``bist_framer_b_loopback``
-    of it. A missing device or attribute raises LoopbackError naming it (the
-    adrv9009 attributes are unverified on hardware; this is a failure, not a skip).
+    bit-exact on stock Kuiper). adrv9009: ``bist_framer_a_loopback`` on BOTH
+    ``adrv9009-phy`` and (when present) ``adrv9009-phy-b`` (verified on tron,
+    2026-11-05; ``..._b_loopback`` is not the right one); afterwards register
+    0x1532 bit 7 of each phy is read back. A missing device or attribute, or a
+    failed read-back, raises LoopbackError naming it (a failure, not a skip).
+    The adrv9009 loopback exchanges I and Q, see ``expected_loopback``.
     """
     val = "1" if on else "0"
     if family == "ad936x":
         write_debug_attr(ctx, "ad9361-phy", "loopback", val)
     elif family == "adrv9009":
-        write_debug_attr(ctx, "adrv9009-phy", "bist_framer_a_loopback", val)
+        phys = ["adrv9009-phy"]
         if find_device(ctx, "adrv9009-phy-b"):
-            write_debug_attr(ctx, "adrv9009-phy-b", "bist_framer_b_loopback", val)
+            phys.append("adrv9009-phy-b")
+        for phy in phys:
+            write_debug_attr(ctx, phy, "bist_framer_a_loopback", val)
+        for phy in phys:
+            _check_framer_loopback(ctx, phy, on)
     else:
         raise ValueError(f"unknown family {family!r}")
 

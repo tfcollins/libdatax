@@ -1,7 +1,7 @@
 # Design: libdatax P2 — streaming MVP over AXI-DMAC
 
 Date: 2026-11-05
-Status: approved by the owner's standing instruction ("do not wait for my input"); every
+Status: implemented 2026-11-05 (libdatax main, phase exit); both labgrid places green — see "Phase exit evidence". Every decision below was the implementer's call under the owner's standing instruction ("do not wait for my input").
 decision below is the implementer's call, marked as such, for the owner to check while reading.
 Decisions 2 and 3 are proven on `lablp` by the spike below; `tron` is proven by plan task 1.
 Board: issue #24 on <https://github.com/users/tfcollins/projects/4>
@@ -294,6 +294,17 @@ running the suite against the board's address.
    creation on both protocols; `recv(0)` polling is unreliable over binary-protocol `iiod` until
    datax_sdk_sdr#26; stop/destroy wait up to one context timeout on a stalled stream; stream
    handles die with their context.
+
+## Phase exit evidence (2026-11-05)
+
+- **lablp (ADRV9361-Z7035)**: stock Kuiper 2023_R2 (`hdl_2023_r2` PL); 10/10 at libdatax `dedc635`.
+- **tron (ADRV9009-ZU11EG)**: 12/12 at `d49c56c`, a tree identical to `dedc635`. The PL was
+  **not** the stock 2023_R2 design: it was the recovery bitstream `a22f4cf6…`, HDL `main`
+  `085a6ed7` (2026-06-09), with the stock 2023_R2 kernel and DTB. The "stock reference designs"
+  goal therefore holds for lablp, and for tron's software stack but not its PL. Booting the true
+  stock 2023_R2 PL, extracted from the stock BOOT.BIN, is open.
+- tron's hardware findings changed the code: TX scan channels are named `voltage0..7`
+  (interleaved), and the Talise loopback needs framer A on both phys and exchanges I and Q.
 
 ## Left to the builder
 

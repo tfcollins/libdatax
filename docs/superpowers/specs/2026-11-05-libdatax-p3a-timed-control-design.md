@@ -169,8 +169,9 @@ Two of the timed capabilities need fabric that no tron image has today:
 2. Python scheduler, hop and MCS surface.
 3. Tier 1: a fake-Tick suite covering REQ-TEST-002 and REQ-TEST-003 in CI, under five minutes.
 4. Tier 2, on tron with hopcap's SFP image:
-   - **timed GPIO staircase:** N edges at known ticks, every completion `OK` with
-     `executed == requested`, cross-checked by Tick's `edge_capture_*` record;
+   - **timed GPIO staircase:** N edges on bits 3:1 at known ticks, spaced at least
+     `REPORT_SPACING`, every reported completion `OK` with `executed == requested`. Evidence is
+     completion records, since no independent scope is available (ruling 2);
    - **hop schedule:** a plan through `queue_tune`, every hop on time, PLL readback equal to the
      plan, the priming edge on `fhmInitFrequency`;
    - **late handling:** a deliberately late descriptor completes `LATE` and does not execute;
@@ -231,10 +232,60 @@ pattern, to settle the unknowns:
 3. `pps_present`, `time_aligned` and the `time_epoch_ticks`/`arm_time_next_pps` behaviour.
 4. The JESD204 FSM attributes on both phys and the hmc7044: what reruns MCS on this kernel, and
    which state shows that it completed.
-5. `edge_capture_*` behaviour after a GPIO edge.
+5. (Answered from RTL: `edge_capture_*` latches only arm/gate commands, not GPIO.)
 6. Round trips for a completion drain and a FHM stage, idle and while an RX stream is running.
 7. The device tree's Talise RF PLL phase-sync setting.
 8. Last, and only if step 4 shows a safe way: a resync, with RX data checked afterwards.
+
+## Rulings from the builder check (2026-11-05)
+
+Checked against the Tick RTL at the pinned revision (`axi_timed_command_scheduler.v`).
+
+1. **Tick holds a reported command while its one completion slot is full, then reports it
+   on time.** `due_command_blocked_by_completion` (line 351) stalls the queue head when it has
+   `REPORT_COMPLETION` and the slot is unacked. When it finally fires, its record is `EXECUTED`
+   with `executed = requested` unless it was late on submit (lines 1010-1030). Commands without
+   `REPORT_COMPLETION` never stall.
+   - **P3a needs no RTL change, because libdatax never lets the stall happen.** Each scheduler
+     measures its completion-drain cost when it is created and exposes it as
+     `DATAX_LIMIT_REPORT_SPACING_US`, the drain cost times 3. `commit()` returns `-EINVAL` "reported
+     commands closer than the report spacing" when two reported descriptors (this batch or already
+     queued) are closer than that.
+   - The poller records the device time of every drain. If a completion is drained after the next
+     reported command's timestamp, the poller lagged. That next command's completion is then marked
+     `DATAX_COMPLETION_LATE` (detail "poller lagged; execution may have been held"), and
+     `DATAX_EVT_LATE_COMMAND` fires.
+   - **Default reporting is sparse.** `queue_gpio` and `queue_marker` do not report unless the
+     caller asks (a `report` flag on the builder). `queue_tune` reports its rising edge only, which is
+     hopcap's proven pattern. `wait(seq)` on an unreported sequence returns `-EINVAL`.
+   - The real fix belongs upstream in Tick: record the actual dispatch tick, and report
+     `LATE_EXECUTED` when the stall delayed it. File it as a Tick issue. When it lands, the spacing
+     rule relaxes without an API change.
+   - A lost report (slot full when a late-drop or reject is reported) shows only as a rise in
+     `overflow_count`. The poller turns any rise into `DATAX_EVT_QUEUE_OVERFLOW`. Any seq still
+     waiting when `wait()` times out completes `DATAX_COMPLETION_DROPPED` with detail "no
+     completion; see overflow_count".
+2. **Tier 2 timing evidence is completion records plus PLL readback, with the limit stated.**
+   - `edge_capture_*` latches only arm and gate commands, so it cannot cross-check GPIO.
+   - With ruling 1, completion records are trustworthy: no reported command can have stalled.
+   - Hops add PLL readback.
+   - The independent scope staircase against PPS (REQ-TEST-023, issue #7) stays open. It needs a
+     scope, and the evidence says so.
+   - GPIO bit 0 is reserved for `queue_tune` (it drives `TAL_GPIO_0`). `queue_gpio` refuses a mask
+     touching it with `-EINVAL`. Bits 3:1 are the hop controller's slot index, are safe while no tune
+     is queued, and are what the staircase toggles.
+3. **One scheduler per device, and Tick is exclusive.**
+   - A second `datax_sched_create` on the same device returns `-EBUSY`.
+   - A timed device call (`set_frequency(when)`) uses the device's scheduler, creating it lazily. It
+     is then destroyed with the device.
+   - The poller belongs to that one scheduler. It stops in `sched_destroy`, or in context destroy
+     before streams and the IIO context are freed.
+   - Other Tick users on the board (hopcap, `iio_attr`) must not run concurrently. The API page and
+     `doctor` say so. `sched_create` warns through last-error if `queue_level` is non-zero at
+     creation.
+4. **`struct datax_completion` is unchanged.** Detail travels in the event (`struct datax_event`
+   already has `detail`) and in the context's last error when `wait()` returns a non-OK status. No
+   ABI change.
 
 ## Left to the builder
 

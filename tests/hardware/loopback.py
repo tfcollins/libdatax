@@ -13,7 +13,6 @@ the calls always go to the same libiio as the context pointer; override with
 ``DATAX_LIBIIO_LIB=/path/to/libiio.so`` when /proc is unavailable.
 """
 import ctypes as C
-import hashlib
 import os
 import re
 
@@ -79,7 +78,8 @@ def mismatches_after_shift(tx_raw, rx_raw, lag, shift):
 # ---- evidence helpers --------------------------------------------------------
 
 def redact_uri(uri):
-    """Replace the host of a libiio URI by a stable hash; keep scheme and port."""
+    """Replace the host of a libiio URI by the token ``host``; keep scheme and port.
+    (No hash: an IPv4 address hash is brute-forceable.)"""
     m = re.match(r"^(?P<scheme>[a-z]+):(?P<rest>.+)$", uri)
     if not m or m.group("scheme") not in ("ip", "tcp", "udp", "daqiri"):
         return uri
@@ -90,16 +90,13 @@ def redact_uri(uri):
     else:
         host, _, tail = rest.partition(":")
         tail = (":" + tail) if tail else ""
-    digest = hashlib.sha256(host.encode()).hexdigest()[:10]
-    return f"{m.group('scheme')}:host-{digest}{tail}"
+    return f"{m.group('scheme')}:host{tail}"
 
 
 def redact_text(text):
     """Hide IPv4 addresses and the hostname of a ``... Linux <host> ...`` description."""
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", text)
-    return re.sub(r"(\bLinux )(\S+)",
-                  lambda m: m.group(1) + "host-" +
-                  hashlib.sha256(m.group(2).encode()).hexdigest()[:10], text)
+    return re.sub(r"(\bLinux )(\S+)", r"\1host", text)
 
 
 # ---- libiio v1 access --------------------------------------------------------

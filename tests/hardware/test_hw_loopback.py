@@ -18,8 +18,8 @@ def test_digital_loopback(dev, hw_ctx, family, ch, record):
     tx_raw[:, 1] = np.rint(tx_c.imag * 32768)
     tx_fs = tx_raw[:, 0].astype(np.float64) + 1j * tx_raw[:, 1]
 
-    lb.set_digital_loopback(hw_ctx, family, True)
     try:
+        lb.set_digital_loopback(hw_ctx, family, True)
         tx = dev.tx_stream(channels=(ch,), block_samples=PERIOD, cyclic=True)
         try:
             tx.start()
@@ -34,8 +34,16 @@ def test_digital_loopback(dev, hw_ctx, family, ch, record):
             except Exception:
                 pass
     finally:
-        lb.set_digital_loopback(hw_ctx, family, False)
+        # Restore even after a partial enable; never mask the original error.
+        try:
+            lb.set_digital_loopback(hw_ctx, family, False)
+        except Exception as e:
+            record("loopback_restore_failed", str(e))
+            restore_err = e
+        else:
+            restore_err = None
 
+    assert restore_err is None, f"loopback restore failed: {restore_err}"
     rx_c = raw[:, 0].astype(np.float64) + 1j * raw[:, 1]
     lag, gain, evm = lb.align_and_fit(tx_fs, rx_c)
     record("lag", lag)

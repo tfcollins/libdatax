@@ -86,8 +86,8 @@ def test_redact_uri_hides_host(uri, host):
     out = lb.redact_uri(uri)
     if host:
         assert host not in out
-        assert out.startswith("ip:host-")
-        assert out == lb.redact_uri(uri)  # stable
+        assert out.startswith("ip:host")
+        assert "-" not in out.split(":")[1]  # no hash of the host
     else:
         assert out == uri
     if uri.endswith(":30431"):
@@ -98,7 +98,7 @@ def test_redact_text_hides_addresses_and_hostname():
     d = "192.168.10.55 Linux analog 4.19.0-g17f4223 #1848 SMP armv7l 10.0.0.1"
     out = lb.redact_text(d)
     assert "192.168" not in out and "10.0.0.1" not in out and " analog " not in out
-    assert "4.19.0-g17f4223" in out and out == lb.redact_text(d)
+    assert "4.19.0-g17f4223" in out and "Linux host 4.19" in out
 
 
 @pytest.mark.parametrize("name,family", [

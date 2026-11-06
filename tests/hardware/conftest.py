@@ -17,13 +17,20 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "python"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-os.environ.setdefault("DATAX_LIBRARY", str(ROOT / "build" / "libdatax.so"))
+HW_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(HW_DIR))  # for `import loopback`; this directory only
+try:
+    import datax  # noqa: F401
+except ImportError:  # not pip-installed: use the source tree
+    sys.path.insert(0, str(ROOT / "python"))
 
 import loopback as lb  # noqa: E402
 
 PLACEHOLDER_CHANNELS = 2  # parametrization when no board can be asked
+
+
+def _ensure_lib():
+    os.environ.setdefault("DATAX_LIBRARY", str(ROOT / "build" / "libdatax.so"))
 
 
 def _uri():
@@ -39,6 +46,7 @@ def radio_channels():
     uri = _uri()
     if uri:
         try:
+            _ensure_lib()
             import datax
             with datax.Context(uri) as ctx:
                 n = int(ctx.devices[0].caps.limits["max_channels"])
@@ -59,7 +67,9 @@ def pytest_collection_modifyitems(config, items):
         return
     skip = pytest.mark.skip(reason="DATAX_HW_URI not set (DATAX_HW_REQUIRE=1 to fail instead)")
     for item in items:
-        item.add_marker(skip)
+        # Only this directory's tests: a bare `pytest` also collects Tier 1.
+        if HW_DIR in Path(str(item.path)).resolve().parents:
+            item.add_marker(skip)
 
 
 def _git_head():
@@ -91,6 +101,7 @@ def hw_ctx(evidence):
         if _required():
             pytest.fail("DATAX_HW_REQUIRE=1 but DATAX_HW_URI is not set")
         pytest.skip("DATAX_HW_URI not set")
+    _ensure_lib()
     import datax
     ctx = datax.Context(uri)
     evidence["uri"] = lb.redact_uri(uri)

@@ -54,14 +54,16 @@ def test_rx_block_nonconstant_per_channel(dev, record):
     assert not flat, f"constant RX data on channels {flat}"
 
 
-def test_recv_timeout_recovers(dev):
+def test_recv_timeout_recovers(dev, record):
     """A 1 ms recv right after start (before a block can arrive) must not
     wedge the stream: a later recv with a normal timeout succeeds."""
     with dev.rx_stream(channels=(0,), block_samples=65536) as rx:
         try:
             rx.recv(65536, timeout_ms=1)
+            record("first_recv", "data arrived within 1 ms")
         except datax.Error as e:
             assert e.errno == errno.ETIMEDOUT, e
+            record("first_recv", "timed out")
         data, _ = rx.recv(65536, timeout_ms=10000)
         assert data.shape == (1, 65536)
         data, _ = rx.recv(RX_BLOCK, timeout_ms=10000)

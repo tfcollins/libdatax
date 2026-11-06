@@ -11,7 +11,8 @@ CAP_NAMES = (
     "net_offload_nic", "net_offload_samples",
 )
 LIMIT_NAMES = ("tick_hz", "queue_depth", "hop_table_depth",
-               "guard_margin_ms", "max_channels")
+               "guard_margin_ms", "max_channels",
+               "report_spacing_us", "hop_stage_us")
 
 
 class Capabilities:

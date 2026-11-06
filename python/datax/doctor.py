@@ -5,7 +5,7 @@ import os
 import sys
 
 from . import Context, Error
-from ._lib import c_ull, get_lib
+from ._lib import get_lib
 
 
 def _streams_line(dev):
@@ -31,9 +31,8 @@ def _streams_line(dev):
     return f"streams: rx={names[0]} tx={names[1]} overflow-detect={det}"
 
 
-# enum datax_time_source order; limit indices follow enum datax_limit.
+# enum datax_time_source order.
 _TIME_SOURCES = ("free-run", "pps-aligned", "soft-aligned", "pps-holdover")
-_LIMIT_REPORT_SPACING_US, _LIMIT_HOP_STAGE_US = 5, 6
 
 
 def _time_line(dev):
@@ -51,12 +50,8 @@ def _scheduler_line(dev):
     """Measured report spacing and hop stage, plus the exclusivity note."""
     if "timed_commands" not in dev.caps:
         return "scheduler: none (no usable Tick scheduler)"
-    lib = get_lib()
-    vals = []
-    for idx in (_LIMIT_REPORT_SPACING_US, _LIMIT_HOP_STAGE_US):
-        v = c_ull()
-        vals.append(v.value if lib.datax_caps_get_limit(dev._caps_ptr, idx, C.byref(v)) == 0
-                    else None)
+    lim = dev.caps.limits   # the measured ones appear only once measured
+    vals = [lim.get("report_spacing_us"), lim.get("hop_stage_us")]
     spacing = "not measured" if vals[0] is None else f"{vals[0]} \u00b5s"
     stage = "not measured" if vals[1] is None else f"{vals[1]} \u00b5s"
     tag = "(measured)" if any(v is not None for v in vals) else "(not measured yet)"
@@ -65,13 +60,24 @@ def _scheduler_line(dev):
 
 
 def _mcs_line(dev):
-    """mcs: <state>; phase-coherent: <yes|no> (<reason>)."""
-    state, reason = C.create_string_buffer(128), C.create_string_buffer(128)
-    rc = get_lib().datax_internal_mcs_info(dev._ptr, state, len(state), reason, len(reason))
+    """mcs: <state>; phase-coherent: <yes|no> (<reason>).
+
+    Doctor is a fresh process, so it verifies first: run_mcs only reads the
+    JESD204 FSM attributes. A failure's last-error text becomes the reason.
+    """
+    lib = get_lib()
+    if "mcs" not in dev.caps:
+        return "mcs: not supported; phase-coherent: no (no multi-chip sync on this board)"
+    failure = None
+    if lib.datax_device_run_mcs(dev._ptr):
+        m = lib.datax_context_get_last_error(dev._ctx._ptr)
+        failure = m.decode(errors="replace") if m else "run_mcs failed"
+    state, reason = C.create_string_buffer(128), C.create_string_buffer(256)
+    rc = lib.datax_internal_mcs_info(dev._ptr, state, len(state), reason, len(reason))
     if rc < 0:
         return "mcs: not supported; phase-coherent: no (no multi-chip sync on this board)"
-    return (f"mcs: {state.value.decode()}; phase-coherent: {'yes' if rc == 1 else 'no'} "
-            f"({reason.value.decode()})")
+    why = failure if failure else reason.value.decode()
+    return f"mcs: {state.value.decode()}; phase-coherent: {'yes' if rc == 1 else 'no'} ({why})"
 
 
 def run(uri, out):

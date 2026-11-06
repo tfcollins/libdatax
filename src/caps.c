@@ -7,7 +7,10 @@
  * P3a gates:
  *   TIMED_COMMANDS  Tick present, GPIO target capability, a usable queue
  *                   (the scheduler can be created).
- *   FHM_HOP         adrv9009 + TIMED_COMMANDS + the FHM attributes on the phy.
+ *   FHM_HOP         adrv9009 + TIMED_COMMANDS + the FHM attributes on chip A's
+ *                   TRX LO. A single-phy board qualifies too: only chip A's FHM
+ *                   trigger is wired to Tick (spec decision 7) and that is the
+ *                   chip FHM drives.
  *   MCS             both adrv9009 phys carry jesd204_fsm_ctrl.
  *   PHASE_COHERENT  live: MCS verified, RF PLL phase sync on, and no
  *                   single-chip tune since (mcs.c on the phase sync input).

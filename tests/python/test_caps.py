@@ -12,7 +12,8 @@ def test_ad936x_caps_empty_in_p1(emu_uri):
         assert "bogus" not in dev.caps
         assert dev.caps.detected == frozenset()
         lim = dev.caps.limits
-        assert set(lim) == set(datax.LIMIT_NAMES)
+        # the two measured limits appear only once measured
+        assert set(lim) == set(datax.LIMIT_NAMES) - {"report_spacing_us", "hop_stage_us"}
         assert lim["max_channels"] >= 1
 
 

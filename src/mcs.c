@@ -116,6 +116,9 @@ int datax_device_run_mcs(struct datax_device *dev)
 	for (unsigned int i = 0; i < dev->nphy && !ret; i++)
 		ret = check_phy(dev, i, why, sizeof(why), state, sizeof(state));
 
+	/* single_chip_tuned is deliberately not cleared here: verifying only
+	 * reads the FSM and does not restore the LO phase relationship a
+	 * single-chip tune broke. */
 	pthread_mutex_lock(&dev->ctx->lock);
 	dev->mcs_verified = !ret;
 	pthread_mutex_unlock(&dev->ctx->lock);
@@ -174,16 +177,4 @@ int datax_internal_mcs_info(const struct datax_device *dev, char *state, size_t 
 	else
 		ret = 1, snprintf(reason, rlen, "MCS verified, RF PLL phase sync on");
 	return ret;
-}
-
-/* Test-only: whether the Tick reports a fabric PPS (pps_present). 1, 0, or -errno. */
-int datax_internal_pps_present(const struct datax_device *dev)
-{
-	unsigned long long v;
-	int ret;
-
-	if (!dev)
-		return -EINVAL;
-	ret = datax_tick_read_u64(dev, "pps_present", &v);
-	return ret ? ret : v != 0;
 }

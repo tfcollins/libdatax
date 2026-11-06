@@ -59,7 +59,7 @@ def test_doctor_p3a_lines(emu_uri):
     assert ("scheduler: report spacing not measured, hop stage not measured "
             "(not measured yet); exclusive use of the board's scheduler") in out
     assert ("mcs: opt_post_running_stage; phase-coherent: no "
-            "(MCS not verified; call run_mcs)") in out
+            "(RF PLL phase sync not enabled)") in out
 
 
 @pytest.mark.parametrize("emu_uri", ["ad936x"], indirect=True)
@@ -69,3 +69,27 @@ def test_doctor_p3a_lines_without_tick(emu_uri):
     assert "time: none (no Tick scheduler)" in r.stdout
     assert "scheduler: none" in r.stdout
     assert "mcs: not supported; phase-coherent: no" in r.stdout
+
+
+def test_doctor_mcs_failing_fsm(tmp_path):
+    """A phy stuck mid-FSM: doctor runs run_mcs and shows why it failed."""
+    import conftest  # noqa: F401  (EMU_DIR on sys.path below)
+    from conftest import EMU_DIR, _emu_available
+    if not _emu_available():
+        pytest.skip("iiod-emu not found")
+    sys.path.insert(0, str(EMU_DIR))
+    from emu import Emulator
+    xml = (EMU_DIR / "adrv9009+tick-fsm.xml").read_text()
+    bad = tmp_path / "bad-fsm.xml"
+    head, sep, tail = xml.partition('name="adrv9009-phy-b"')
+    assert sep
+    bad.write_text(head + sep + tail.replace(
+        'value="opt_post_running_stage"', 'value="opt_pre_clock_stage"', 1))
+    with Emulator(bad) as uri:
+        r = _run([uri])
+    assert r.returncode == 0, r.stderr
+    line = next(ln for ln in r.stdout.splitlines() if "mcs:" in ln)
+    assert "opt_post_running_stage / opt_pre_clock_stage" in line
+    assert "phase-coherent: no" in line
+    assert "adrv9009-phy-b" in line and "opt_pre_clock_stage" in line
+    assert "not verified" not in line

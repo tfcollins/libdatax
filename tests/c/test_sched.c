@@ -52,6 +52,8 @@ struct shim {
 	/* one-shot: advance the fake this much just before forwarding the
 	 * next completion_ack (a slow ack round trip) */
 	uint64_t ack_delay;
+	/* stall_and_fill also pauses this scheduler (from the poller thread) */
+	struct datax_sched *pause_s;
 };
 
 static uint32_t csv_word(const char *csv, int idx)
@@ -139,6 +141,12 @@ struct evrec {
 	struct { enum datax_event_type type; long seq; char detail[128]; } e[256];
 	size_t n;
 	unsigned int sleep_us;      /* the callback dawdles (lifetime test) */
+	/* the callback calls datax_sched_wait(wait_s, wait_seq, -1) once */
+	struct datax_sched *wait_s;
+	long wait_seq;
+	int wait_ret;
+	bool waited;
+	char wait_err[256];
 };
 
 static void on_event(const struct datax_event *evt, void *user)
@@ -154,6 +162,14 @@ static void on_event(const struct datax_event *evt, void *user)
 		r->n++;
 	}
 	pthread_mutex_unlock(&r->m);
+	if (r->wait_s && !r->waited) {
+		struct datax_completion c;
+
+		r->wait_ret = datax_sched_wait(r->wait_s, r->wait_seq, -1, &c);
+		pthread_mutex_lock(&r->m);
+		r->waited = true;
+		pthread_mutex_unlock(&r->m);
+	}
 	if (r->sleep_us) {
 		struct timespec ts = { 0, (long)r->sleep_us * 1000 };
 
@@ -360,32 +376,75 @@ static void test_one_scheduler_per_device(void)
 	printf("test_one_scheduler_per_device: ok\n");
 }
 
-/* Sequence ids never repeat across scheduler lifetimes on one device, so a
- * record left in Tick by a destroyed scheduler is never matched. */
-static void test_seq_survives_destroy(void)
+/* Destroy leaves Tick empty (ruling 3, Tick is exclusive): nothing a
+ * destroyed scheduler queued runs unattended or holds the next one's
+ * reported heads; stale records in the slot are never matched. */
+static void test_destroy_leaves_tick_empty(void)
 {
 	struct fx x;
 	unsigned long long t;
-	long a, b;
-	struct datax_completion c;
+	long a, b, c, d;
+	struct datax_completion cc;
 
 	fx_open(&x, 0, true);
 	t = fake_tick_now(x.f);
+	/* (1) written descriptors are flushed from Tick by destroy */
 	a = gpio(&x, t + 50 * MS, true);
+	(void)gpio(&x, t + 60 * MS, false);
 	CHECK(datax_sched_commit(x.s) == 0);
-	WAIT_FOR(shim_wrote(&x.sh, a));
+	WAIT_FOR(shim_count(&x.sh) == 2);
+	CHECK(fake_attr(x.f, "queue_level") == 2);
 	datax_sched_destroy(x.s);
 	x.s = NULL;
+	CHECK(fake_attr(x.f, "queue_level") == 0);
+	fake_tick_advance(x.f, 100 * MS);
+	CHECK(fake_tick_exec_log(x.f, 0, NULL, 0) == 0);     /* nothing ran unattended */
+
+	/* (2) an executed, undrained report is acked by destroy */
 	CHECK(datax_sched_create(x.dev, &x.s) == 0);
-	b = gpio(&x, t + 80 * MS, true);
-	CHECK(b != a && b != 0);
+	t = fake_tick_now(x.f);
+	b = gpio(&x, t + 20 * MS, true);
+	CHECK(b != a);                                        /* ids never repeat */
 	CHECK(datax_sched_commit(x.s) == 0);
-	run_until(&x, t + 90 * MS, 5 * MS);
-	c = wait_ok(&x, b);
-	CHECK(c.status == DATAX_COMPLETION_OK && c.requested_ticks == t + 80 * MS);
-	CHECK(datax_sched_wait(x.s, a, 0, &c) == -EINVAL);
+	WAIT_FOR(shim_wrote(&x.sh, b));
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	fake_tick_advance(x.f, 30 * MS);                      /* b ran; slot full */
+	CHECK(fake_attr(x.f, "completion_sequence_id") == (unsigned long long)b);
+	datax_sched_destroy(x.s);
+	x.s = NULL;
+	CHECK(fake_attr(x.f, "completion_sequence_id") == 0);
+
+	/* (3) another user's record in the slot at create is not ours */
+	foreign_push(x.f, 4040, 1, DATAX_TICK_FLAG_LATE_DROP);
+	CHECK(fake_attr(x.f, "completion_sequence_id") == 4040);
+	CHECK(datax_sched_create(x.dev, &x.s) == 0);
+	CHECK(fake_attr(x.f, "completion_sequence_id") == 0);  /* create acked it */
+	t = fake_tick_now(x.f);
+	c = gpio(&x, t + 20 * MS, true);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(shim_wrote(&x.sh, c));
+	/* (4) a stale record whose seq collides with a written command (same
+	 * seq and command, another timestamp) is not matched to it */
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	foreign_push(x.f, (uint32_t)c, 1, DATAX_TICK_FLAG_LATE_DROP);
+	CHECK(fake_attr(x.f, "completion_sequence_id") == (unsigned long long)c);
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	WAIT_FOR(fake_attr(x.f, "completion_sequence_id") == 0);
+	CHECK(datax_sched_wait(x.s, c, 0, &cc) == -ETIMEDOUT);  /* still pending */
+	run_until(&x, t + 25 * MS, MS);
+	cc = wait_ok(&x, c);
+	CHECK(cc.status == DATAX_COMPLETION_OK && cc.requested_ticks == t + 20 * MS &&
+	      cc.executed_ticks == t + 20 * MS);
+	/* (5) the context's destroy flushes too */
+	d = gpio(&x, fake_tick_now(x.f) + 50 * MS, true);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(shim_wrote(&x.sh, d));
+	x.s = NULL;
+	datax_context_destroy(x.ctx);
+	x.ctx = NULL;
+	CHECK(fake_attr(x.f, "queue_level") == 0);
 	fx_close(&x);
-	printf("test_seq_survives_destroy: ok\n");
+	printf("test_destroy_leaves_tick_empty: ok\n");
 }
 
 static void test_builder_sorts(void)
@@ -552,6 +611,24 @@ static void test_feeder_starved_marks_late(void)
 		CHECK(fake_tick_exec_log(x.f, 0, NULL, 0) == 3);
 	}
 	fx_close(&x);
+
+	/* (3) the queue is full of later commands: an earlier one committed
+	 * after them cannot be written, and the detail says why */
+	fx_open(&x, 4, true);
+	t = fake_tick_now(x.f);
+	for (int i = 0; i < 3; i++)
+		(void)gpio(&x, t + 100 * MS + (unsigned long long)i, false);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(shim_count(&x.sh) == 3);
+	a = gpio(&x, t + 20 * MS, true);
+	CHECK(datax_sched_commit(x.s) == 0);
+	msleep(10);
+	CHECK(!shim_wrote(&x.sh, a));
+	fake_tick_advance(x.f, 15 * MS);
+	CHECK(datax_sched_wait(x.s, a, 3000, &c) == 0);
+	CHECK(c.status == DATAX_COMPLETION_LATE);
+	CHECK(strstr(lasterr(&x), "queue held depth-1 (3) commands, 3 of them later") != NULL);
+	fx_close(&x);
 	printf("test_feeder_starved_marks_late: ok\n");
 }
 
@@ -707,37 +784,137 @@ static void stall_and_fill(struct shim *sh, uint32_t seq)
 	sh->hook_done = true;
 	foreign_push(sh->f, 4242, 1, DATAX_TICK_FLAG_LATE_DROP);  /* late: fills the slot */
 	fake_tick_advance(sh->f, 30 * MS);
+	if (sh->pause_s)   /* on the poller thread, mid-feed */
+		CHECK(datax_internal_sched_pause(sh->pause_s, true) == 0);
 }
 
-static void test_lost_report_dropped(void)
+enum lost_mode { LOST_WAIT_FOREVER, LOST_GET_COMPLETIONS, LOST_FLUSH };
+
+/* A proven loss completes DROPPED as soon as it is proven: wait(-1)
+ * returns it, get_completions surfaces it, and flush reports it DROPPED
+ * rather than FLUSHED. */
+static void lost_case(enum lost_mode mode)
 {
 	struct fx x;
 	unsigned long long t;
 	long a;
 	struct datax_completion c;
 	struct fake_tick_exec log[4];
+	size_t n = 0;
 
 	fx_open(&x, 0, true);
 	t = fake_tick_now(x.f);
 	a = gpio(&x, t + 20 * MS, true);
 	x.sh.hook_seq = (uint32_t)a;
 	x.sh.before_desc = stall_and_fill;
+	if (mode == LOST_FLUSH)
+		x.sh.pause_s = x.s;
 	CHECK(datax_sched_commit(x.s) == 0);
 	WAIT_FOR(shim_wrote(&x.sh, a));
 	CHECK(fake_tick_exec_log(x.f, 0, log, 4) == 2);
 	CHECK(log[1].sequence_id == (uint32_t)a && !log[1].reported &&
 	      log[1].status == DATAX_TICK_STATUS_LATE_DROPPED);
 	CHECK(fake_attr(x.f, "overflow_count") == 1);
-	CHECK(datax_sched_wait(x.s, a, 100, &c) == 0);
+	switch (mode) {
+	case LOST_WAIT_FOREVER:
+		CHECK(datax_sched_wait(x.s, a, -1, &c) == 0);
+		CHECK(strstr(lasterr(&x), "no completion; see overflow_count (1)") != NULL);
+		break;
+	case LOST_GET_COMPLETIONS:
+		for (int i = 0; i < 3000 && n == 0; i++) {
+			CHECK(datax_sched_get_completions(x.s, &c, 1, &n) == 0);
+			if (!n)
+				msleep(1);
+		}
+		CHECK(n == 1 && c.seq == a);
+		break;
+	case LOST_FLUSH:
+		msleep(5);
+		CHECK(fake_attr(x.f, "completion_sequence_id") == 4242);  /* undrained */
+		CHECK(datax_sched_flush(x.s) == 0);
+		CHECK(datax_sched_get_completions(x.s, &c, 1, &n) == 0 && n == 1);
+		CHECK(c.seq == a);
+		CHECK(datax_internal_sched_pause(x.s, false) == 0);
+		break;
+	}
 	CHECK(c.status == DATAX_COMPLETION_DROPPED && c.executed_ticks == 0);
 	CHECK(c.requested_ticks == t + 20 * MS);
-	CHECK(strstr(lasterr(&x), "no completion; see overflow_count") != NULL);
-	CHECK(strstr(lasterr(&x), "(1)") != NULL);
 	WAIT_FOR(has_event(&x.ev, DATAX_EVT_QUEUE_OVERFLOW, -1, "overflow_count"));
-	/* declared DROPPED: consumed */
+	/* consumed */
 	CHECK(datax_sched_wait(x.s, a, 0, &c) == -EINVAL);
 	fx_close(&x);
+}
+
+static void test_lost_report_dropped(void)
+{
+	lost_case(LOST_WAIT_FOREVER);
+	lost_case(LOST_GET_COMPLETIONS);
+	lost_case(LOST_FLUSH);
 	printf("test_lost_report_dropped: ok\n");
+}
+
+/* An event callback runs on the poller thread: a wait there would stall or
+ * deadlock the poller, so it is refused, and the poller keeps going. */
+static void test_wait_in_callback_refused(void)
+{
+	struct fx x;
+	unsigned long long t;
+	long r;
+
+	fx_open(&x, 0, true);
+	t = fake_tick_now(x.f);
+	r = gpio(&x, t + 50 * MS, true);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(shim_wrote(&x.sh, r));
+	x.ev.wait_seq = r;
+	x.ev.wait_ret = 1;
+	x.ev.wait_s = x.s;
+	foreign_push(x.f, 6060, 1, DATAX_TICK_FLAG_LATE_DROP);   /* late_count rises */
+	{
+		int i = 0;
+		bool w = false;
+
+		while (!w && i++ < 3000) {
+			pthread_mutex_lock(&x.ev.m);
+			w = x.ev.waited;
+			pthread_mutex_unlock(&x.ev.m);
+			if (!w)
+				msleep(1);
+		}
+		CHECK(w);
+	}
+	CHECK(x.ev.wait_ret == -EDEADLK);
+	CHECK(strstr(lasterr(&x), "event callback") != NULL);
+	run_until(&x, t + 55 * MS, MS);
+	CHECK(wait_ok(&x, r).status == DATAX_COMPLETION_OK);   /* the poller lives */
+	fx_close(&x);                                          /* and joins */
+	printf("test_wait_in_callback_refused: ok\n");
+}
+
+/* More events in one iteration than the queue holds: one summary. */
+static void test_event_overflow_summarised(void)
+{
+	struct fx x;
+	unsigned long long t;
+	size_t late = 0;
+
+	fx_open(&x, 0, true);
+	t = fake_tick_now(x.f);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	for (int i = 0; i < 40; i++)
+		(void)gpio(&x, t + GUARD + MS + (unsigned long long)i, false);
+	CHECK(datax_sched_commit(x.s) == 0);
+	fake_tick_advance(x.f, 2 * MS);     /* all 40 host-late in one feed pass */
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	WAIT_FOR(has_event(&x.ev, DATAX_EVT_LATE_COMMAND, -1, "8 events dropped"));
+	pthread_mutex_lock(&x.ev.m);
+	for (size_t i = 0; i < x.ev.n; i++)
+		late += x.ev.e[i].type == DATAX_EVT_LATE_COMMAND && x.ev.e[i].seq > 0;
+	pthread_mutex_unlock(&x.ev.m);
+	CHECK(late == 32);
+	CHECK(shim_count(&x.sh) == 0);
+	fx_close(&x);
+	printf("test_event_overflow_summarised: ok\n");
 }
 
 static void test_events_late_and_overflow(void)
@@ -889,12 +1066,28 @@ int main(int argc, char **argv)
 		test_reserved_gpio_bit(false);
 		return 0;
 	}
+	if (!strcmp(mode, "one") && argc > 2) {
+		static const struct { const char *name; void (*fn)(void); } t[] = {
+			{ "destroy_leaves_tick_empty", test_destroy_leaves_tick_empty },
+			{ "feeder_starved", test_feeder_starved_marks_late },
+			{ "lost_report_dropped", test_lost_report_dropped },
+			{ "wait_in_callback_refused", test_wait_in_callback_refused },
+			{ "event_overflow_summarised", test_event_overflow_summarised },
+		};
+
+		for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+			if (!strcmp(argv[2], t[i].name)) {
+				t[i].fn();
+				return 0;
+			}
+		return 2;
+	}
 	if (strcmp(mode, "all")) {
-		fprintf(stderr, "usage: %s all | ad936x | destroy\n", argv[0]);
+		fprintf(stderr, "usage: %s all | ad936x | destroy | one <test>\n", argv[0]);
 		return 2;
 	}
 	test_one_scheduler_per_device();
-	test_seq_survives_destroy();
+	test_destroy_leaves_tick_empty();
 	test_builder_sorts();
 	test_commit_guard_margin_late();
 	test_commit_streams_large_batch();
@@ -904,6 +1097,8 @@ int main(int argc, char **argv)
 	test_poller_lag_marks_late();
 	test_slow_ack_marks_late();
 	test_lost_report_dropped();
+	test_wait_in_callback_refused();
+	test_event_overflow_summarised();
 	test_events_late_and_overflow();
 	test_reserved_gpio_bit(true);
 	test_flush_completes_flushed();

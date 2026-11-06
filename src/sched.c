@@ -46,7 +46,9 @@ static void emit_v(struct datax_sched *s, enum datax_event_type type,
 	struct sched_event *e;
 
 	if (s->nevq == SCHED_EVQ_LEN) {
+		/* summarised at delivery: "N events dropped" */
 		s->evq_lost++;
+		s->evq_lost_type = type;
 		return;
 	}
 	e = &s->evq[s->nevq++];
@@ -386,6 +388,21 @@ void datax_sched_destroy(struct datax_sched *s)
 	/* From an event callback (the poller thread): it cannot join itself. */
 	if (datax_poller_is_self(s))
 		return;
+	/*
+	 * Leave Tick empty (it is exclusive, ruling 3). Descriptors left queued
+	 * would run unattended: a reported one fills the slot, nobody acks it,
+	 * and Tick holds every later reported head (RTL line 351) until the next
+	 * scheduler's create acks it and releases them late, recorded on time.
+	 * Under io, after the current iteration; stop first so the poller does
+	 * no further I/O. Best effort: destroy cannot fail.
+	 */
+	pthread_mutex_lock(&s->io);
+	pthread_mutex_lock(&s->lock);
+	s->stop = true;
+	pthread_mutex_unlock(&s->lock);
+	(void)datax_tick_write_str(s->dev, "flush_queue", "1");
+	(void)datax_poller_clear_slot(s);
+	pthread_mutex_unlock(&s->io);
 	datax_poller_stop(s);
 	release_device(s->dev);
 	free_sched(s, true);
@@ -587,7 +604,7 @@ int datax_sched_commit(struct datax_sched *s)
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *c = &s->cmds[i];
 
-		if (c->report && !c->lost && c->state != CMD_DONE)
+		if (c->report && c->state != CMD_DONE)
 			r[nr++] = (struct rep_ts){ c->hw_ts, c->seq, c->state == CMD_BUILD };
 	}
 	qsort(r, nr, sizeof(*r), cmp_rep);
@@ -714,6 +731,12 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 		return -EINVAL;
 	if (!out)
 		return datax_error_ret(s->ctx, EINVAL, "sched", "wait: NULL output");
+	/* On the poller thread (an event callback) a wait would stall or
+	 * deadlock the thread that produces completions. */
+	if (datax_poller_is_self(s))
+		return datax_error_ret(s->ctx, EDEADLK, "sched",
+				       "wait from an event callback (the poller thread) would "
+				       "block it; use get_completions");
 	if (timeout_ms >= 0)
 		deadline_after(&dl, timeout_ms);
 	pthread_mutex_lock(&s->lock);
@@ -737,18 +760,14 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 		}
 		if (c->state == CMD_DONE)
 			break;
+		if (s->stop) {      /* destroy is joining the poller */
+			pthread_mutex_unlock(&s->lock);
+			return datax_error_ret(s->ctx, ECANCELED, "sched",
+					       "wait: the scheduler is being destroyed");
+		}
+		/* A proven loss is already DONE (DROPPED, poller.c finish_lost);
+		 * anything else at the deadline is not yet known (ruling). */
 		if (timeout_ms >= 0 && passed(&dl)) {
-			if (c->state == CMD_WRITTEN && c->lost) {
-				/* Ruling 1: a lost report shows only in overflow_count. */
-				c->res = (struct datax_sched_result){
-					.status = DATAX_COMPLETION_DROPPED,
-					.requested_ticks = c->api_ts,
-					.tick_status = UINT32_MAX,
-				};
-				snprintf(c->res.detail, sizeof(c->res.detail),
-					 "no completion; see overflow_count (%llu)", s->overflow_seen);
-				break;
-			}
 			st = c->state;
 			pthread_mutex_unlock(&s->lock);
 			return datax_error_ret(s->ctx, ETIMEDOUT, "sched",

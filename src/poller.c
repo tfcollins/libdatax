@@ -131,17 +131,57 @@ int datax_poller_measure(struct datax_sched *s)
 
 /* ---- drain ---------------------------------------------------------------------- */
 
-/* The slot read empty after last_hw: a reported command written and due
- * before then, with no record yet, lost its report (ruling 1: a report
- * lost to a full slot shows only in overflow_count). s->lock held. */
-static void mark_lost(struct datax_sched *s)
+/* A reported command written and due before last_hw, with no record yet,
+ * when the slot reads empty after last_hw. s->lock held. */
+static struct sched_cmd *next_lost(struct datax_sched *s)
 {
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *c = &s->cmds[i];
 
 		if (c->state == CMD_WRITTEN && c->report && c->hw_ts < s->last_hw)
-			c->lost = true;
+			return c;
 	}
+	return NULL;
+}
+
+/*
+ * The slot read empty after last_hw. Every reported command written and due
+ * before then without a record has provably lost its report: a command held
+ * behind a full slot refills it the cycle after the ack, so the slot cannot
+ * read empty while one is pending. Ruling 1: a lost report shows only in
+ * overflow_count; it completes DROPPED now, so wait(-1) and get_completions
+ * see it. io held, s->lock not held.
+ */
+static int finish_lost(struct datax_sched *s)
+{
+	unsigned long long ovf = 0;
+	struct sched_cmd *c;
+	bool any;
+	int ret;
+
+	pthread_mutex_lock(&s->lock);
+	any = next_lost(s) != NULL;
+	pthread_mutex_unlock(&s->lock);
+	if (!any)
+		return 0;
+	/* For the detail only; check_counters raises the overflow event. */
+	ret = rd(s, "overflow_count", &ovf);
+	if (ret)
+		return ret;
+	pthread_mutex_lock(&s->lock);
+	while ((c = next_lost(s))) {
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_DROPPED,
+			.requested_ticks = c->api_ts,
+			.tick_status = UINT32_MAX,
+		};
+
+		snprintf(res.detail, sizeof(res.detail),
+			 "no completion; see overflow_count (%llu)", ovf);
+		datax_sched_finish(s, c, &res);   /* DONE: no longer WRITTEN */
+	}
+	pthread_mutex_unlock(&s->lock);
+	return 0;
 }
 
 /* One drained record v, its drain read at hardware time t. s->lock held. */
@@ -160,16 +200,18 @@ static void process(struct datax_sched *s, const unsigned long long v[7], unsign
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *o = &s->cmds[i];
 
-		if (o->state == CMD_WRITTEN && o->report && !o->lost &&
+		if (o->state == CMD_WRITTEN && o->report &&
 		    (uint32_t)o->seq != rseq && o->hw_ts <= t)
 			o->lagged = true;
 	}
 	for (size_t i = 0; i < s->ncmds && !c; i++)
 		if (s->cmds[i].state == CMD_WRITTEN && s->cmds[i].report &&
-		    (uint32_t)s->cmds[i].seq == rseq && s->cmds[i].command_id == v[R_CMD])
+		    (uint32_t)s->cmds[i].seq == rseq && s->cmds[i].command_id == v[R_CMD] &&
+		    s->cmds[i].hw_ts == v[R_REQ])
 			c = &s->cmds[i];
-	/* Not ours (another Tick user, a destroyed scheduler) or an unreported
-	 * late drop, which late_count already reports. */
+	/* Not ours (another Tick user, a stale record whose seq collides: it
+	 * must also match the command and its timestamp) or an unreported late
+	 * drop, which late_count already reports. */
 	if (!c)
 		return;
 	memset(&res, 0, sizeof(res));
@@ -184,6 +226,21 @@ static void process(struct datax_sched *s, const unsigned long long v[7], unsign
 	datax_sched_finish(s, c, &res);
 }
 
+int datax_poller_clear_slot(struct datax_sched *s)
+{
+	for (unsigned int n = 0; n <= s->depth + 1; n++) {
+		unsigned long long seq;
+		int ret = rd(s, comp_attrs[R_SEQ], &seq);
+
+		if (ret || !seq)
+			return ret;
+		ret = datax_tick_write_str(s->dev, "completion_ack", "1");
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 int datax_poller_drain(struct datax_sched *s)
 {
 	for (unsigned int n = 0; n <= s->depth + 1; n++) {
@@ -194,10 +251,7 @@ int datax_poller_drain(struct datax_sched *s)
 			return ret;
 		if (!v[R_SEQ]) {
 			/* Empty: seq 0 is never issued (no valid bit, tick#39). */
-			pthread_mutex_lock(&s->lock);
-			mark_lost(s);
-			pthread_mutex_unlock(&s->lock);
-			return 0;
+			return finish_lost(s);
 		}
 		ret = read_record(s, v, &t);
 		if (ret)
@@ -230,6 +284,8 @@ static int check_counters(struct datax_sched *s)
 		datax_sched_emit_locked(s, DATAX_EVT_QUEUE_OVERFLOW, s->last_hw, -1,
 					"overflow_count %llu (was %llu): a report or command "
 					"may have been lost", ovf, s->overflow_seen);
+	/* Always re-baseline, so a counter that went backwards (Tick reset or
+	 * reloaded) raises the next event on its next rise. */
 	s->late_seen = late;
 	s->overflow_seen = ovf;
 	pthread_mutex_unlock(&s->lock);
@@ -291,8 +347,19 @@ static int feed(struct datax_sched *s)
 				.tick_status = UINT32_MAX,
 			};
 
-			snprintf(res.detail, sizeof(res.detail),
-				 "host could not keep the queue fed");
+			if (level + 1 >= s->depth) {
+				unsigned int later = 0;
+
+				for (size_t i = 0; i < s->ncmds; i++)
+					later += s->cmds[i].state == CMD_WRITTEN &&
+						 s->cmds[i].hw_ts > c->hw_ts;
+				snprintf(res.detail, sizeof(res.detail),
+					 "host could not keep the queue fed: the Tick queue held "
+					 "depth-1 (%llu) commands, %u of them later", level, later);
+			} else {
+				snprintf(res.detail, sizeof(res.detail),
+					 "host could not keep the queue fed");
+			}
 			s->host_late++;
 			/* finish raises DATAX_EVT_LATE_COMMAND, reported or not */
 			datax_sched_finish(s, c, &res);
@@ -336,7 +403,7 @@ static bool has_work(const struct datax_sched *s)
 	for (size_t i = 0; i < s->ncmds; i++) {
 		const struct sched_cmd *c = &s->cmds[i];
 
-		if (c->state == CMD_PENDING || (c->state == CMD_WRITTEN && !c->lost))
+		if (c->state == CMD_PENDING || c->state == CMD_WRITTEN)
 			return true;
 	}
 	return false;
@@ -358,12 +425,17 @@ static void prune(struct datax_sched *s)
 void datax_poller_deliver(struct datax_sched *s)
 {
 	struct sched_event q[SCHED_EVQ_LEN];
+	enum datax_event_type lost_type;
+	unsigned long lost;
 	unsigned int n;
 
 	pthread_mutex_lock(&s->lock);
 	n = s->nevq;
 	memcpy(q, s->evq, n * sizeof(q[0]));
 	s->nevq = 0;
+	lost = s->evq_lost;
+	lost_type = s->evq_lost_type;
+	s->evq_lost = 0;
 	pthread_mutex_unlock(&s->lock);
 	for (unsigned int i = 0; i < n; i++) {
 		struct datax_event evt = {
@@ -373,6 +445,16 @@ void datax_poller_deliver(struct datax_sched *s)
 			.detail = q[i].detail,
 		};
 
+		datax_event_fire(s->ctx, &evt);
+	}
+	if (lost) {
+		char detail[DATAX_SCHED_DETAIL_LEN];
+		struct datax_event evt = { .type = lost_type, .ticks = 0, .seq = -1,
+					   .detail = detail };
+
+		snprintf(detail, sizeof(detail),
+			 "%lu events dropped (more than %u in one poller iteration)",
+			 lost, SCHED_EVQ_LEN);
 		datax_event_fire(s->ctx, &evt);
 	}
 }
@@ -460,6 +542,7 @@ void datax_poller_stop(struct datax_sched *s)
 	s->stop = true;
 	started = s->thread_started;
 	pthread_cond_signal(&s->wake);
+	pthread_cond_broadcast(&s->done);   /* waiters return -ECANCELED */
 	pthread_mutex_unlock(&s->lock);
 	if (started)
 		pthread_join(s->thread, NULL);

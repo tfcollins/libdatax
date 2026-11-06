@@ -124,7 +124,6 @@ struct sched_cmd {
 	uint32_t args[4];
 	bool report;
 	bool lagged;                       /* a drain came after hw_ts: may be held */
-	bool lost;                         /* slot seen empty after hw_ts with no record */
 	datax_sched_complete_fn on_complete;
 	void *user;
 	/* CMD_DONE */
@@ -179,7 +178,8 @@ struct datax_sched {
 
 	struct sched_event evq[SCHED_EVQ_LEN];
 	unsigned int nevq;
-	unsigned long evq_lost;
+	unsigned long evq_lost;            /* dropped since the last delivery */
+	enum datax_event_type evq_lost_type; /* type of the last dropped one */
 };
 
 /* sched.c, called with s->lock held */
@@ -216,6 +216,9 @@ bool datax_poller_is_self(const struct datax_sched *s);
 /* One drain pass (io held): every pending record, until the slot reads
  * empty. Returns 0 or the first Tick error. */
 int datax_poller_drain(struct datax_sched *s);
+/* Ack the completion slot until it reads empty, discarding records (io
+ * held; destroy, after flush_queue). 0 or the first Tick error. */
+int datax_poller_clear_slot(struct datax_sched *s);
 /* Deliver queued events (no lock held). */
 void datax_poller_deliver(struct datax_sched *s);
 /* Monotonic host time in nanoseconds. */

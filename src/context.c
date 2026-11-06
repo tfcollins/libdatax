@@ -8,6 +8,7 @@
 
 #include "error.h"
 #include "platform/table.h"
+#include "scheduler.h"
 
 static int create(const char *uri, struct datax_context **out)
 {
@@ -61,6 +62,15 @@ void datax_context_destroy(struct datax_context *ctx)
 {
 	if (!ctx)
 		return;
+	/* Called from an event callback, on a poller thread: that poller
+	 * cannot join itself, so refuse (destroy it from another thread). */
+	for (unsigned int i = 0; i < ctx->ndevices; i++)
+		if (ctx->devices[i]->sched && datax_poller_is_self(ctx->devices[i]->sched))
+			return;
+	/* Schedulers first: each poller is joined before any stream, device or
+	 * the IIO context it uses is freed. */
+	for (unsigned int i = 0; i < ctx->ndevices; i++)
+		datax_sched_destroy(ctx->devices[i]->sched);
 	/* Streams still alive hold IIO buffers of this context. */
 	for (unsigned int i = 0; i < ctx->ndevices; i++)
 		for (int d = DATAX_RX; d <= DATAX_TX; d++)

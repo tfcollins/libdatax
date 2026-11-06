@@ -54,6 +54,7 @@ LIBDATAX_0.1 {
     datax_internal_stream_stats;
     datax_internal_device_stream_info;
     datax_internal_tick_bind_fake;
+    datax_internal_sched_pause;
   local:
     *;
 };

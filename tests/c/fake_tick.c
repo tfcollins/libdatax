@@ -16,6 +16,14 @@
  * sharing a timestamp run on consecutive cycles; here they run on the same
  * tick. Their records are identical (a non-repeat records executed =
  * requested either way).
+ *
+ * Simplification: the RTL dispatches on the cycle after a register write
+ * (a push, an ack, a flush), so a command executed late (LATE_EXECUTE_NOW
+ * on submit, a late repeat, or a reported head released by the ack of a
+ * held completion slot) runs and is stamped one cycle after that write;
+ * here it is stamped with the tick of the write itself. Tests must never
+ * assert the exact executed ticks of a late-executed command against
+ * hardware, only against this fake (and on hardware, only that it is late).
  */
 #include <errno.h>
 #include <pthread.h>

@@ -32,9 +32,10 @@ int main(void)
 		CHECK(s == NULL);
 		CHECK(strstr(datax_context_get_last_error(&ctx), "no streaming support"));
 	}
+	/* The scheduler is implemented (P3a): without a Tick it is -ENOTSUP. */
 	CHECK(datax_sched_create(&dev, &sched) == -ENOTSUP);
-	CHECK(strstr(datax_context_get_last_error(&ctx), "arrives in P3"));
-	CHECK(strstr(datax_context_get_last_error(&ctx), "sched_create"));
+	CHECK(sched == NULL);
+	CHECK(strstr(datax_context_get_last_error(&ctx), "no Tick scheduler"));
 	CHECK(datax_device_stage_hop_table(&dev, &f, 1) == -ENOTSUP);
 	CHECK(strstr(datax_context_get_last_error(&ctx), "stage_hop_table: arrives in P3"));
 	CHECK(datax_device_set_time_next_pps(&dev, 0) == -ENOTSUP);

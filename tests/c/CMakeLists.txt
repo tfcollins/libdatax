@@ -272,4 +272,37 @@ if(DATAX_LIBIIO_BUILD)
       ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
       TIMEOUT 60)
   endforeach()
+
+  # Scheduler core and poller (Task 2): the fake bound to a device of a
+  # fixture without Tick. adrv9009 runs every test (GPIO bit 0 reserved);
+  # ad936x checks that its family reserves no line.
+  add_executable(test_sched test_sched.c)
+  target_link_libraries(test_sched PRIVATE datax datax_fake_tick Threads::Threads)
+  target_include_directories(test_sched PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(test_sched PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_sched PRIVATE _POSIX_C_SOURCE=200809L)
+  foreach(case "adrv9009-zu11eg|all" "ad936x|ad936x")
+    string(REPLACE "|" ";" f "${case}")
+    list(GET f 0 xml)
+    list(GET f 1 mode)
+    add_test(NAME test_sched_${mode}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/${xml}.xml $<TARGET_FILE:test_sched> ${mode})
+    set_tests_properties(test_sched_${mode} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      TIMEOUT 120)
+  endforeach()
+  # Destroying the scheduler or context while the poller is mid-I/O must join
+  # it before anything is freed: valgrind when it is on PATH.
+  if(VALGRIND)
+    add_test(NAME test_sched_destroy_valgrind
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml
+              ${VALGRIND} --error-exitcode=1 --leak-check=full
+              --errors-for-leak-kinds=definite $<TARGET_FILE:test_sched> destroy)
+    set_tests_properties(test_sched_destroy_valgrind PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      TIMEOUT 300)
+  endif()
 endif()

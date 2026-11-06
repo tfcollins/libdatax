@@ -6,7 +6,23 @@
 #include <datax/datax.h>
 
 #include "error.h"
+#include "scheduler.h"
 #include "tick_ops.h"
+
+/* API <-> hardware ticks. Identity until the soft offset (Task 3). */
+unsigned long long datax_devtime_to_hw(const struct datax_device *dev,
+				       unsigned long long api_ticks)
+{
+	(void)dev;
+	return api_ticks;
+}
+
+unsigned long long datax_devtime_from_hw(const struct datax_device *dev,
+					 unsigned long long hw_ticks)
+{
+	(void)dev;
+	return hw_ticks;
+}
 
 int datax_device_get_time(const struct datax_device *dev,
 			  unsigned long long *ticks, unsigned long long *tick_hz)
@@ -26,7 +42,7 @@ int datax_device_get_time(const struct datax_device *dev,
 	if (ret)
 		return datax_error_ret(dev->ctx, -ret, "time",
 				       "get_time: Tick read failed");
-	*ticks = t;
+	*ticks = datax_devtime_from_hw(dev, t);
 	*tick_hz = hz;
 	return 0;
 }

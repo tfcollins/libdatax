@@ -2,6 +2,7 @@
 """Context: owns the C handle and the devices derived from it."""
 import ctypes as C
 import errno
+import weakref
 
 from ._lib import EVENT_CB, get_lib
 from .device import Device
@@ -30,6 +31,7 @@ class Context:
         self._ptr = h
         self._closed = False
         self._devices = []
+        self._streams = weakref.WeakSet()  # live RxStream/TxStream
         for i in range(lib.datax_context_get_device_count(self._ptr)):
             d = C.c_void_p()
             rc = lib.datax_context_get_device(self._ptr, i, C.byref(d))
@@ -100,6 +102,11 @@ class Context:
     def close(self):
         if self._closed:
             return
+        # C stream handles die with the C context: destroy every live stream
+        # first, so none is ever touched (or finalized) afterwards.
+        for st in list(self._streams):
+            st._close_for_context()
+        self._streams.clear()
         for d in self._devices:
             d._invalidate()
         self._closed = True

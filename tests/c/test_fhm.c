@@ -1709,6 +1709,97 @@ static void test_reset_performs_pending_park(void)
 	printf("test_reset_performs_pending_park: ok\n");
 }
 
+/*
+ * tron run 5: after a hard PPS load the poller's cached device time (the
+ * snapshot behind queue_tune's "now", the feeder and the FHM hooks) was still
+ * in the old counter domain until its next read, so the first tune after
+ * the alignment was refused DATAX_ERR_LATE "inside the guard margin of now
+ * (1003 s)". Here the fake Tick runs at about 1001 s, far beyond guard +
+ * lead, and time is moved to 0 with the poller paused (nothing else
+ * refreshes the snapshot): by a hard PPS load, a soft alignment, and a
+ * late-edge adoption. The next tune must be accepted and complete OK.
+ */
+enum jump_mode { JUMP_HARD, JUMP_SOFT, JUMP_ADOPT };
+
+static void big_jump_then_tune(enum jump_mode mode)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	static const char *const name[] = { "hard", "soft", "adoption" };
+	struct fx x;
+	enum datax_time_source src;
+	unsigned long long t;
+	long sa, sb;
+
+	fx_open(&x, true);
+	fake_tick_advance(x.f, 1000ULL * HZ);       /* the board has been up ~1000 s */
+	poller_fresh(&x);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	sa = datax_sched_queue_tune(x.s, t, 0, F_A);     /* history in the old domain */
+	CHECK(sa > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	to_edge(&x, 2, 200 * MS);
+	CHECK(wait_done(&x, sa).status == DATAX_COMPLETION_OK);
+	fake_tick_advance(x.f, 11 * MS);            /* its fall ran: nothing queued */
+	poller_fresh(&x);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	if (mode == JUMP_HARD) {
+		struct align_arg a = { x.dev, 0, 1 };
+		unsigned long armed = fake_tick_access_count(x.f, "arm_time_next_pps", true);
+		pthread_t th;
+
+		fake_tick_pps_edge(x.f);                /* pps_present */
+		CHECK(pthread_create(&th, NULL, align_main, &a) == 0);
+		WAIT_FOR(fake_tick_access_count(x.f, "arm_time_next_pps", true) > armed);
+		fake_tick_pps_edge(x.f);                /* the edge: the counter loads 0 */
+		CHECK(pthread_join(th, NULL) == 0);
+		CHECK(a.ret == 0);
+		CHECK(datax_device_get_time_source(x.dev, &src) == 0 &&
+		      src == DATAX_TIME_PPS_ALIGNED);
+	} else if (mode == JUMP_SOFT) {
+		CHECK(datax_device_set_time_next_pps(x.dev, 0) == 0);   /* no PPS */
+		CHECK(datax_device_get_time_source(x.dev, &src) == 0 &&
+		      src == DATAX_TIME_SOFT_ALIGNED);
+	} else {
+		fake_tick_pps_edge(x.f);                /* PPS present, no edge in 2 s */
+		CHECK(datax_device_set_time_next_pps(x.dev, 0) == 0);   /* soft, armed */
+		fake_tick_pps_edge(x.f);                /* the late edge: counter to 0 */
+		(void)api_now(&x);                      /* get_time adopts it */
+		CHECK(datax_device_get_time_source(x.dev, &src) == 0 &&
+		      src == DATAX_TIME_PPS_ALIGNED);
+	}
+	t = api_now(&x);
+	CHECK(t < 1000 * MS);                       /* time moved back by ~1000 s */
+	sb = datax_sched_queue_tune(x.s, t + 200 * MS, 0, F_B);
+	if (sb <= 0)
+		fprintf(stderr, "big_jump_then_tune(%s): %s\n", name[mode], lasterr(&x));
+	CHECK(sb > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	rebase_counts(&x, 4);
+	to_edge(&x, 4, 300 * MS);                   /* a fresh priming edge, then B */
+	CHECK(wait_done(&x, sb).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);         /* staged and read back */
+	fx_close(&x);
+	printf("big_jump_then_tune(%s): ok\n", name[mode]);
+}
+
+static void test_tune_after_big_hard_jump(void)
+{
+	big_jump_then_tune(JUMP_HARD);
+}
+
+static void test_tune_after_big_soft_jump(void)
+{
+	big_jump_then_tune(JUMP_SOFT);
+}
+
+static void test_tune_after_big_adoption_jump(void)
+{
+	big_jump_then_tune(JUMP_ADOPT);
+}
+
 /* A consumed (timed set_frequency) tune flushed by teardown raises no event:
  * nobody asked, and its delivery would race the teardown. */
 static void test_teardown_flush_is_silent(void)
@@ -1922,6 +2013,9 @@ int main(int argc, char **argv)
 		{ "align_busy_with_live_tune", test_align_busy_with_live_tune },
 		{ "tune_refused_while_aligning", test_tune_refused_while_aligning },
 		{ "reset_performs_pending_park", test_reset_performs_pending_park },
+		{ "tune_after_big_hard_jump", test_tune_after_big_hard_jump },
+		{ "tune_after_big_soft_jump", test_tune_after_big_soft_jump },
+		{ "tune_after_big_adoption_jump", test_tune_after_big_adoption_jump },
 		{ "park_when_rise_unseen", test_park_when_rise_unseen },
 		{ "stage_busy_while_fall_pending", test_stage_busy_while_fall_pending },
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },

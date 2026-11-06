@@ -37,10 +37,13 @@ static void test_adrv9009_map(void)
 	CHECK(!strcmp(ops->rx_stream_dev, "axi-adrv9009-rx-hpc"));
 	CHECK(!strcmp(ops->tx_stream_dev, "axi-adrv9009-tx-hpc"));
 	CHECK(ops->stream_channel_ids(0, DATAX_TX, &i, &q) == 0);
-	CHECK(!strcmp(i, "voltage0_i") && !strcmp(q, "voltage0_q"));
+	CHECK(!strcmp(i, "voltage0") && !strcmp(q, "voltage1"));
+	CHECK(ops->stream_channel_ids(3, DATAX_TX, &i, &q) == 0);
+	CHECK(!strcmp(i, "voltage6") && !strcmp(q, "voltage7"));
 	CHECK(ops->stream_channel_ids(3, DATAX_RX, &i, &q) == 0);
 	CHECK(!strcmp(i, "voltage3_i") && !strcmp(q, "voltage3_q"));
 	CHECK(ops->stream_channel_ids(4, DATAX_RX, &i, &q) == -EINVAL);
+	CHECK(ops->stream_channel_ids(4, DATAX_TX, &i, &q) == -EINVAL);
 }
 
 static void test_fold_finds_stream_devs(const char *uri, const char *xml)

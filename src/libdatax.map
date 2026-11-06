@@ -56,6 +56,9 @@ LIBDATAX_0.1 {
     datax_internal_tick_bind_fake;
     datax_internal_sched_pause;
     datax_internal_fhm_bind_fake;
+    datax_internal_mcs_info;
+    datax_internal_mcs_force_phase_sync;
+    datax_internal_pps_present;
   local:
     *;
 };

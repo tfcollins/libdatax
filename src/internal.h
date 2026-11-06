@@ -25,6 +25,10 @@ struct datax_caps {
 	 * (REPORT_SPACING_US while a scheduler exists); unmeasured ones read
 	 * -ENOTSUP. */
 	unsigned int measured;
+	/* Inputs of the public flags, probed at build/bind time (caps.c): Tick
+	 * has the GPIO target and a usable queue; the phy has the FHM
+	 * attributes; both phys have jesd204_fsm_ctrl. */
+	bool tick_usable, fhm_attrs, mcs_attrs;
 };
 
 struct datax_context {
@@ -86,10 +90,20 @@ struct datax_device {
 	_Atomic unsigned long long time_off;
 	_Atomic int time_source;
 	_Atomic bool time_armed;
+	/* MCS (mcs.c), under ctx->lock. mcs_verified: the last run_mcs found
+	 * both phys complete. phase_sync: RF PLL phase sync is enabled on the
+	 * phys; always false on adrv9009 in P3a (mcs.c explains why). */
+	bool mcs_verified;
+	bool phase_sync;
 };
 
 /* caps.c: fill dev->caps after folding (public flags stay 0 in P1). */
 int datax_caps_build(struct datax_device *dev);
+/* caps.c: recompute the public flags from the stored inputs, the MCS state
+ * and single_chip_tuned. Takes ctx->lock. */
+void datax_caps_refresh_flags(struct datax_device *dev);
+/* caps.c: the FHM phy seam was rebound; re-probe its attributes and refresh. */
+void datax_caps_fhm_rebound(struct datax_device *dev);
 /* caps.c, diagnostic export (used by the Python package's caps.detected
  * and doctor): what the probe detected. */
 unsigned int datax_internal_probe_flags(const struct datax_device *dev);

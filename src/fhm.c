@@ -164,6 +164,7 @@ int datax_fhm_bind(struct datax_device *dev, const struct datax_tick_ops *ops, v
 		return -EBUSY;
 	dev->fhm_ops = ops;
 	dev->fhm_h = ops ? h : NULL;
+	datax_caps_fhm_rebound(dev);
 	return 0;
 }
 

@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include <datax/datax.h>
+#include <datax/datax_internal.h>
 
 #include "error.h"
 #include "scheduler.h"
@@ -307,4 +308,17 @@ void datax_devtime_poll(struct datax_sched *s)
 				 "PPS appeared: a hard alignment is now possible "
 				 "(time did not change)");
 	s->pps_seen_state = now_state;
+}
+
+/* Diagnostics (doctor): whether the Tick reports a fabric PPS (pps_present).
+ * 1, 0, or -errno (-ENODEV without a Tick). */
+int datax_internal_pps_present(const struct datax_device *dev)
+{
+	unsigned long long v;
+	int ret;
+
+	if (!dev)
+		return -EINVAL;
+	ret = datax_tick_read_u64(dev, "pps_present", &v);
+	return ret ? ret : v != 0;
 }

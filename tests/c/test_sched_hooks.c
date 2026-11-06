@@ -353,12 +353,58 @@ static void test_consumed_result_not_kept(void)
 	printf("test_consumed_result_not_kept: ok\n");
 }
 
+/* Events queued (not yet delivered) whose detail contains text. */
+static size_t queued_events(struct datax_sched *s, const char *text)
+{
+	size_t n = 0;
+
+	pthread_mutex_lock(&s->lock);
+	for (unsigned int i = 0; i < s->nevq; i++)
+		n += strstr(s->evq[i].detail, text) != NULL;
+	pthread_mutex_unlock(&s->lock);
+	return n;
+}
+
+/* A consumed command flushed by the user raises "seq N: FLUSHED: ..."
+ * (its result is never published); flushed while the scheduler is being
+ * destroyed (stop set) it raises nothing: nobody asked, and the delivery
+ * would race the teardown. */
+static void test_consumed_flush_events(void)
+{
+	struct datax_sched_cmd_spec spec = {
+		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
+		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
+		.args = { 0x2, 0x2, 0, 0 }, .report = true, .consume = true,
+	};
+	struct fx x;
+
+	fx_open(&x);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);   /* events stay queued */
+	spec.when = fake_tick_now(x.f) + 50 * MS;
+	CHECK(datax_sched_enqueue(x.s, &spec) > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	CHECK(datax_sched_flush(x.s) == 0);
+	CHECK(queued_events(x.s, "FLUSHED: flushed") == 1);
+	/* the same, as destroy sees it */
+	pthread_mutex_lock(&x.s->lock);
+	x.s->nevq = 0;
+	x.s->stop = true;
+	pthread_mutex_unlock(&x.s->lock);
+	spec.when = fake_tick_now(x.f) + 60 * MS;
+	CHECK(datax_sched_enqueue(x.s, &spec) > 0);
+	CHECK(datax_sched_flush(x.s) == 0);                  /* finishes the BUILD one */
+	CHECK(queued_events(x.s, "FLUSHED") == 0);
+	fx_close(&x);
+	printf("test_consumed_flush_events: ok\n");
+}
+
 int main(void)
 {
 	test_destroy_finishes_hooks();
 	test_hook_on_flush_refuses_blocking();
 	test_poll_hook_contract();
 	test_consumed_result_not_kept();
+	test_consumed_flush_events();
 	printf("test_sched_hooks: all ok\n");
 	return 0;
 }

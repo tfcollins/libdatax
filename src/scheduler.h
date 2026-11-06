@@ -111,6 +111,19 @@ struct datax_sched_cmd_spec {
  * last-error. */
 long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spec *spec);
 
+/*
+ * Drive the masked GPIO lines to value now, through a descriptor that
+ * cannot be dropped: timestamp 0 is always late on submit, and an
+ * unreported LATE_EXECUTE_NOW command late on submit is applied at the push
+ * (Tick RTL axi_timed_command_scheduler.v lines 778-846; fake_tick.c
+ * push): it is neither queued nor reported, so neither a full queue, a
+ * flush nor the completion slot can lose it. It raises late_count by one,
+ * which s (if any) re-baselines, so no late event fires. Hold s->io when s
+ * is not NULL. 0 or the Tick write error.
+ */
+int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
+			uint32_t value);
+
 /* Install the per-iteration hook (NULL fn removes it). 0 or -EINVAL. */
 int datax_sched_set_poll_hook(struct datax_sched *s, datax_sched_poll_fn fn, void *user);
 

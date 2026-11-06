@@ -140,8 +140,11 @@ void datax_sched_finish(struct datax_sched *s, struct sched_cmd *c,
 					seq, "seq %ld: %s", seq, res->detail);
 	/* A consumed result is never published, so any other non-OK outcome
 	 * (DROPPED, FLUSHED) would vanish: report it the same way (controller
-	 * ruling; there is no DROPPED event type). */
-	else if (c->consume && res->status != DATAX_COMPLETION_OK)
+	 * ruling; there is no DROPPED event type). Except FLUSHED by destroy:
+	 * nobody asked, and its delivery would race the teardown (the event
+	 * queue may or may not be delivered before the poller is joined). */
+	else if (c->consume && res->status != DATAX_COMPLETION_OK &&
+		 !(res->status == DATAX_COMPLETION_FLUSHED && s->stop))
 		datax_sched_emit_locked(s, DATAX_EVT_LATE_COMMAND,
 					datax_devtime_to_hw(s->dev, res->requested_ticks), seq,
 					"seq %ld: %s: %s", seq,
@@ -187,6 +190,24 @@ void datax_sched_map_status(uint32_t tick_status, struct datax_sched_result *r)
 	}
 }
 
+/* The driver's CSV: twelve 32-bit words, little-endian from the packer. */
+static void pack_csv(const struct datax_tick_descriptor *d, char *buf, size_t len)
+{
+	unsigned char b[DATAX_TICK_DESC_SIZE];
+	size_t n = 0;
+
+	datax_internal_tick_descriptor_pack(d, b);
+	for (unsigned int i = 0; i < DATAX_TICK_DESC_SIZE / 4 && n < len; i++) {
+		uint32_t w = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 |
+			     (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
+		int k = snprintf(buf + n, len - n, "%s%u", i ? "," : "", w);
+
+		if (k < 0)
+			break;
+		n += (size_t)k;
+	}
+}
+
 void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len)
 {
 	struct datax_tick_descriptor d = {
@@ -205,20 +226,8 @@ void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len)
 		.sequence_id = (uint32_t)c->seq,
 		.args = { c->args[0], c->args[1], c->args[2], c->args[3] },
 	};
-	unsigned char b[DATAX_TICK_DESC_SIZE];
-	size_t n = 0;
 
-	datax_internal_tick_descriptor_pack(&d, b);
-	/* The driver's CSV: twelve 32-bit words, little-endian from the packer. */
-	for (unsigned int i = 0; i < DATAX_TICK_DESC_SIZE / 4 && n < len; i++) {
-		uint32_t w = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 |
-			     (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
-		int k = snprintf(buf + n, len - n, "%s%u", i ? "," : "", w);
-
-		if (k < 0)
-			break;
-		n += (size_t)k;
-	}
+	pack_csv(&d, buf, len);
 }
 
 /* ---- create / destroy ---------------------------------------------------------- */
@@ -363,6 +372,42 @@ static void seed_seq(struct datax_device *dev)
 					(unsigned long long)b.tv_nsec ^
 					(unsigned long long)a.tv_sec * 2654435761ULL) %
 				       (SEQ_MAX / 2)) + 1u;
+}
+
+int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
+			uint32_t value)
+{
+	struct datax_tick_descriptor d = {
+		.version = DATAX_TICK_DESC_VERSION,
+		.size_bytes = DATAX_TICK_DESC_SIZE,
+		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
+		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
+		.timestamp_ticks = 0,                 /* always in the past */
+		.flags = DATAX_TICK_FLAG_LATE_EXECUTE_NOW,
+		.args = { mask, value & mask, 0, 0 },
+	};
+	char buf[160];
+	int ret;
+
+	/* A fresh seq, so no record could ever match a command. */
+	pthread_mutex_lock(&dev->ctx->lock);
+	seed_seq(dev);
+	pthread_mutex_unlock(&dev->ctx->lock);
+	if (s)
+		pthread_mutex_lock(&s->lock);
+	d.sequence_id = dev->next_seq;
+	dev->next_seq = dev->next_seq >= SEQ_MAX ? 1u : dev->next_seq + 1u;
+	if (s)
+		pthread_mutex_unlock(&s->lock);
+	pack_csv(&d, buf, sizeof(buf));
+	ret = datax_tick_write_str(dev, "command_descriptor", buf);
+	/* It raised late_count by one: not a late command of the caller's. */
+	if (!ret && s) {
+		pthread_mutex_lock(&s->lock);
+		s->late_seen++;
+		pthread_mutex_unlock(&s->lock);
+	}
+	return ret;
 }
 
 int datax_sched_create(struct datax_device *dev, struct datax_sched **out)

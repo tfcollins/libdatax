@@ -342,6 +342,37 @@ static void on_fired(struct datax_sched *s, struct fhm_edge *e)
 		set_late(s, e);
 }
 
+/* The fall ending e's pulse is still in the scheduler (it may yet execute:
+ * BUILD, PENDING or WRITTEN). s->lock not held. */
+static bool fall_alive(struct datax_sched *s, const struct fhm_edge *e)
+{
+	bool alive;
+
+	pthread_mutex_lock(&s->lock);
+	alive = e->fall_seq > 0 && datax_sched_find(s, e->fall_seq) != NULL;
+	pthread_mutex_unlock(&s->lock);
+	return alive;
+}
+
+/* e's rise did not fire: if its fall is not written yet, move it to the
+ * minimum pulse after the rise's time, so the line (low anyway) is not held
+ * against a later edge. A written fall cannot move; the gap rule then keeps
+ * later edges two full pulses away from it. */
+static void shorten_fall(struct datax_sched *s, struct fhm_edge *e)
+{
+	unsigned long long p = us_ticks(FHM_PULSE_MIN_US, s->tick_hz);
+	struct sched_cmd *c;
+
+	pthread_mutex_lock(&s->lock);
+	c = datax_sched_find(s, e->fall_seq);
+	if (c && c->state == CMD_PENDING && p < e->pulse) {
+		c->api_ts = e->api + p;
+		c->hw_ts = datax_devtime_to_hw(s->dev, c->api_ts);
+		e->pulse = p;
+	}
+	pthread_mutex_unlock(&s->lock);
+}
+
 /* Edge i did not fire for a host-known reason: the engine did not move, so
  * the next tune commits the frequency armed for this one (one behind). */
 static void mark_next_behind(struct datax_fhm *m, size_t i)
@@ -503,6 +534,41 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 		set_result(r, DATAX_COMPLETION_DROPPED, "PLL %llu Hz, expected %llu Hz", got, e->hz);
 }
 
+/*
+ * A fall's hook: only a flush or destroy matters. flush_queue dropped this
+ * fall; if its rise executed (or may have, by the time estimate) bit 0 is
+ * left high, and the next priming rise would write 1 onto a high line: no
+ * edge, reported EXECUTED, every later tune one behind. Park the line low
+ * through the undroppable immediate write (datax_tick_gpio_now): the
+ * scheduler's builder would need a commit a hook cannot make, and is lost
+ * on destroy. io held (flush's or destroy's caller); the queue is empty.
+ */
+static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_result *r,
+			void *user)
+{
+	struct datax_fhm *m = user;
+	unsigned long long now;
+	bool park = false;
+
+	if (r->discarded || r->status != DATAX_COMPLETION_FLUSHED)
+		return;
+	pthread_mutex_lock(&s->lock);
+	now = s->last_hw + ns_ticks(datax_mono_ns() - s->last_hw_mono, s->tick_hz);
+	pthread_mutex_unlock(&s->lock);
+	pthread_mutex_lock(&m->lock);
+	for (size_t i = 0; i < m->n && !park; i++) {
+		const struct fhm_edge *e = &m->e[i];
+
+		if (e->fall_seq == seq)
+			park = e->st == E_FIRED ||
+			       (e->st == E_LIVE &&
+				edge_hw(s, e) <= now + us_ticks(FHM_MARGIN_US, s->tick_hz));
+	}
+	pthread_mutex_unlock(&m->lock);
+	if (park)
+		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+}
+
 static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_result *r,
 			void *user)
 {
@@ -528,6 +594,7 @@ static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_resu
 			on_fired(s, e);
 		} else {
 			e->st = E_NOEDGE;     /* dropped, flushed, never written */
+			shorten_fall(s, e);
 			/* Host-known no-fire (host-late, write failure, late-PPS
 			 * drop, Tick drop record): the next tune lands one behind.
 			 * Not on flush/destroy (it goes too), nor a lost report
@@ -656,6 +723,15 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 				      "stage_hop_table: timed tunes are queued; flush them first");
 		goto out;
 	}
+	/* Park the trigger low first, as hopcap (TickSession.park_trigger_low)
+	 * and the Tick demo do before enabling FHM: the priming rise needs a
+	 * low line to make an edge. */
+	ret = datax_tick_gpio_now(dev, s, TRIGGER_MASK, 0);
+	if (ret) {
+		ret = datax_error_ret(dev->ctx, -ret, "fhm",
+				      "stage_hop_table: parking the FHM trigger low failed (%d)", ret);
+		goto out;
+	}
 	/* Enabling (re)primes the engine: the next edge lands on
 	 * fhmInitFrequency (fhm-pipeline.md). Chip A only (decision 7). */
 	ret = phy_write_u64(dev, ATTR_ENABLE, 1);
@@ -750,8 +826,8 @@ static long enqueue_edge(struct datax_sched *s, datax_time when, bool rise, bool
 		.args = { TRIGGER_MASK, rise ? TRIGGER_MASK : 0u, 0, 0 },
 		.report = report,
 		.consume = consume,
-		.on_complete = rise ? fhm_on_edge : NULL,
-		.user = rise ? m : NULL,
+		.on_complete = rise ? fhm_on_edge : fhm_on_fall,
+		.user = m,
 	};
 
 	return datax_sched_enqueue(s, &spec);
@@ -840,8 +916,11 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 	pthread_mutex_unlock(&s->lock);
 	if (m->n)
 		last = &m->e[m->n - 1];
+	/* The gap reference: the latest edge whose pulse can still be on the
+	 * line, i.e. any edge that is not NOEDGE, or a NOEDGE one whose fall is
+	 * still queued (it executes, and would cut a later pulse short). */
 	for (size_t i = m->n; i-- > 0 && !live;)
-		if (m->e[i].st != E_NOEDGE)
+		if (m->e[i].st != E_NOEDGE || fall_alive(s, &m->e[i]))
 			live = &m->e[i];
 	/* A priming edge when the engine was just enabled, or when the last
 	 * edge has fired (or is about to) so nothing is left to commit this

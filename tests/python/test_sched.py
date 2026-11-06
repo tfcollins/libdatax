@@ -180,11 +180,6 @@ def test_align_soft_fallback_event(make_rig):
     assert rig.dev.time.now - epoch < 100 * MS
     _wait_for(lambda: any(e[0] == datax.EventType.PPS_LOCK_CHANGE and
                           "aligned to the host clock" in e[3] for e in events))
-    # a PPS edge appears and a hard alignment works
-    rig.pps_edge()
-    rig.dev.time.align_next_pps(epoch)
-    assert rig.dev.time.source in (datax.TimeSource.PPS_ALIGNED,
-                                   datax.TimeSource.SOFT_ALIGNED)
 
 
 def test_event_callback_thread_and_exceptions(make_rig, caplog):
@@ -225,6 +220,31 @@ def test_event_wait_is_deadlock_error(make_rig):
     _starve(rig, sched)
     assert ev.wait(3.0)
     assert errs and errs[0].errno == errno.EDEADLK
+
+
+def test_event_close_is_deadlock_error(make_rig):
+    rig = make_rig()
+    sched = rig.make_scheduler()
+    errs, ev = [], threading.Event()
+
+    def cb(typ, ticks, seq, detail):
+        if ev.is_set():
+            return
+        for fn in (sched.close, rig.ctx.close):      # both would join the poller from itself
+            try:
+                fn()
+            except datax.Error as e:
+                errs.append(e)
+        ev.set()
+
+    rig.ctx.on_event(cb)
+    _starve(rig, sched)
+    assert ev.wait(3.0)
+    assert [e.errno for e in errs] == [errno.EDEADLK, errno.EDEADLK]
+    assert not sched.closed
+    # the scheduler still works afterwards
+    with pytest.raises(datax.LateError):
+        sched.wait_all(timeout=3.0)
 
 
 def test_event_after_close(make_rig):

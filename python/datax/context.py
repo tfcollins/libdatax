@@ -7,8 +7,8 @@ import weakref
 
 from ._lib import EVENT_CB, EventC, get_lib
 from .device import Device
-from .errors import Error, make_error
-from .sched import EventType
+from .errors import DeadlockError, Error, make_error
+from .sched import EventType, _in_callback, in_event_callback
 
 _log = logging.getLogger("datax")
 
@@ -105,6 +105,7 @@ class Context:
             return
 
         def tramp(evt, _user):
+            _in_callback.active = True
             try:
                 e = C.cast(evt, C.POINTER(EventC)).contents
                 try:
@@ -114,6 +115,8 @@ class Context:
                 fn(typ, e.ticks, e.seq, e.detail.decode(errors="replace") if e.detail else "")
             except BaseException:
                 _log.exception("datax event callback raised")
+            finally:
+                _in_callback.active = False
 
         cb = EVENT_CB(tramp)
         rc = lib.datax_context_set_event_callback(self._ptr, cb, None)
@@ -132,6 +135,9 @@ class Context:
     def close(self):
         if self._closed:
             return
+        if in_event_callback():
+            raise DeadlockError(errno.EDEADLK, "Context.close from an event callback "
+                                "(the poller thread) would join itself")
         # Schedulers first: destroying one joins its poller, so no event
         # callback is running or can start afterwards. Then the streams: C
         # handles die with the C context, so none is touched afterwards.
@@ -162,6 +168,7 @@ class Context:
 
     def __del__(self):
         try:
-            self.close()
+            if not in_event_callback():   # leak rather than join the poller from itself
+                self.close()
         except Exception:
             pass

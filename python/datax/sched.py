@@ -14,11 +14,21 @@ hops only every Nth tune does, so ``wait`` on the others raises an
 import ctypes as C
 import enum
 import errno
+import threading
 import time
 from dataclasses import dataclass
 
 from ._lib import CompletionC, get_lib
-from .errors import Error, LateError
+from .errors import DeadlockError, Error, LateError
+
+
+# Set while an event callback runs (on the poller thread): destroying a
+# scheduler or context there would join the thread from itself.
+_in_callback = threading.local()
+
+
+def in_event_callback():
+    return getattr(_in_callback, "active", False)
 
 
 class CompletionStatus(enum.IntEnum):
@@ -109,7 +119,10 @@ class Scheduler:
             get_lib().datax_sched_destroy(h)
 
     def close(self):
-        """Idempotent."""
+        """Idempotent. ``DeadlockError`` from an event callback."""
+        if self._h is not None and in_event_callback():
+            raise DeadlockError(errno.EDEADLK, "Scheduler.close from an event callback "
+                                "(the poller thread) would join itself")
         self._close_for_context()
 
     def __enter__(self):
@@ -120,7 +133,9 @@ class Scheduler:
 
     def __del__(self):
         try:
-            if self._h is not None and not self._ctx._closed:
+            # A finalizer that cyclic GC runs inside a callback leaks instead
+            # of joining the poller from itself.
+            if self._h is not None and not self._ctx._closed and not in_event_callback():
                 self._close_for_context()
         except Exception:
             pass

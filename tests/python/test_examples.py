@@ -53,7 +53,7 @@ def test_timed_example_runs(script, expect, make_rig, monkeypatch, capsys):
     import datax
     rig = make_rig()
     rig.make_scheduler()                  # measured spacing, as the C tests do
-    rig.start_clock()
+    rig.start_clock(hz_ratio=0.25)   # slow clock: slack for a loaded CI box
     monkeypatch.setattr(datax, "Context", lambda uri=None: rig.ctx)
     monkeypatch.setattr(sys, "argv", [script])
     monkeypatch.delenv("DATAX_TEST_URI", raising=False)

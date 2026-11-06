@@ -15,7 +15,8 @@ LIMIT_NAMES = ("tick_hz", "queue_depth", "hop_table_depth",
 
 
 class Capabilities:
-    """``"name" in dev.caps`` tests the public flags (all false in P1).
+    """``"name" in dev.caps`` tests the public flags (P3a: timed_commands, fhm_hop,
+    mcs, phase_coherent when the SDK can do them on this board).
 
     ``detected`` is the set the probe found (lowercase names), independent of
     the public flags; ``limits`` maps lowercase limit names to ints.

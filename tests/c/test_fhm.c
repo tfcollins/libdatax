@@ -131,6 +131,14 @@ struct tshim {
 	unsigned long long last_ns, max_gap_ns;
 	unsigned int stall_at;           /* before forwarding this one ... */
 	unsigned long long stall_to;     /* ... advance the clock to here */
+	/* once this many descriptors were written (1-based; 0 never),
+	 * queue_level reads depth - 1: the feeder thinks the queue is full */
+	unsigned int full_after, depth;
+	/* one-shot: at the next completion_ack, pause this scheduler (from the
+	 * poller thread) and fail the next late_count read, so that iteration
+	 * ends before its poll hook and no further iteration runs */
+	struct datax_sched *pause_on_ack;
+	bool fail_late_once;
 };
 
 static void tshim_gap(struct tshim *sh)
@@ -156,6 +164,25 @@ static int tshim_read(void *h, const char *attr, char *buf, size_t len)
 	tshim_gap(sh);
 	if (sh->sleep_us)
 		usleep_(sh->sleep_us);
+	if (!strcmp(attr, "late_count")) {
+		bool fail;
+
+		pthread_mutex_lock(&sh->mu);
+		fail = sh->fail_late_once;
+		sh->fail_late_once = false;
+		pthread_mutex_unlock(&sh->mu);
+		if (fail)
+			return -EIO;
+	}
+	if (!strcmp(attr, "queue_level")) {
+		bool full;
+
+		pthread_mutex_lock(&sh->mu);
+		full = sh->full_after && sh->ndesc >= sh->full_after;
+		pthread_mutex_unlock(&sh->mu);
+		if (full)
+			return snprintf(buf, len, "%u\n", sh->depth - 1);
+	}
 	return fake_tick_read(sh->f, attr, buf, len);
 }
 
@@ -168,6 +195,18 @@ static int tshim_write(void *h, const char *attr, const char *val)
 	tshim_gap(sh);
 	if (sh->sleep_us)
 		usleep_(sh->sleep_us);
+	if (!strcmp(attr, "completion_ack")) {
+		struct datax_sched *ps;
+
+		pthread_mutex_lock(&sh->mu);
+		ps = sh->pause_on_ack;
+		sh->pause_on_ack = NULL;
+		if (ps)
+			sh->fail_late_once = true;
+		pthread_mutex_unlock(&sh->mu);
+		if (ps)
+			(void)datax_internal_sched_pause(ps, true);   /* io held: sets the flag */
+	}
 	if (!strcmp(attr, "command_descriptor")) {
 		pthread_mutex_lock(&sh->mu);
 		fail = ++sh->ndesc == sh->fail_at;
@@ -283,10 +322,13 @@ static void msleep(unsigned int ms)
 		CHECK(cond);                                                 \
 	} while (0)
 
+/* Tick queue depth for the next fx_open (0: tron's 16). */
+static unsigned int g_depth;
+
 static void fx_open(struct fx *x, bool create)
 {
 	const char *uri = getenv("DATAX_TEST_URI");
-	struct fake_tick_config cfg = { .tick_hz = HZ };
+	struct fake_tick_config cfg = { .tick_hz = HZ, .queue_depth = g_depth };
 
 	memset(x, 0, sizeof(*x));
 	CHECK(uri != NULL);
@@ -300,6 +342,7 @@ static void fx_open(struct fx *x, bool create)
 	x->sh.m = x->m;
 	x->sh.f = x->f;
 	x->tsh.f = x->f;
+	x->tsh.depth = g_depth ? g_depth : 16;
 	CHECK(datax_context_create_from_uri(uri, &x->ctx) == 0);
 	CHECK(datax_context_get_device(x->ctx, 0, &x->dev) == 0);
 	CHECK(datax_internal_tick_bind_fake(x->dev, &tshim_ops, &x->tsh) == 0);
@@ -1330,6 +1373,342 @@ static void test_first_tune_minimum_lead(void)
 	printf("test_first_tune_minimum_lead: ok\n");
 }
 
+/* API device time (after an alignment it differs from the fake's counter). */
+static unsigned long long api_now(struct fx *x)
+{
+	unsigned long long t, hz;
+
+	CHECK(datax_device_get_time(x->dev, &t, &hz) == 0);
+	return t;
+}
+
+/* Wait until the poller has read the device time after this call. A long
+ * call (the 2 s PPS wait) holds it off; an idle poller re-reads only every
+ * ~100 periods; until then queue_tune's estimate (last read plus host time
+ * since) runs ahead of the fake clock, which only the test moves. */
+static void poller_fresh(struct fx *x)
+{
+	struct timespec ts;
+	unsigned long long since, seen = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	since = (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
+	for (int w = 0; w < 3000 && seen < since; w++) {
+		msleep(1);
+		pthread_mutex_lock(&x->s->lock);
+		seen = x->s->last_hw_mono;
+		pthread_mutex_unlock(&x->s->lock);
+	}
+	CHECK(seen >= since);
+}
+
+/* After stage(): rebase the exec-log / write counters for a new batch. */
+static void rebase_counts(struct fx *x, unsigned long ndesc)
+{
+	x->ebase = fake_tick_exec_log(x->f, 0, NULL, 0);
+	x->wbase = fake_tick_access_count(x->f, "command_descriptor", true);
+	x->ndesc = ndesc;
+}
+
+/*
+ * Final review I1: a fall that ends without executing (other than by flush)
+ * must not leave bit 0 high. (1) The fall's descriptor write fails: the park
+ * is deferred until the rise has fired, then bit 0 is low after the pulse
+ * and the next tune completes OK.
+ */
+static void test_fall_write_failure_parks(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+	long sa, sb;
+
+	size_t base;
+
+	fx_open(&x, true);
+	base = stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	sa = datax_sched_queue_tune(x.s, t, 0, F_A);
+	sb = datax_sched_queue_tune(x.s, t + 30 * MS, 0, F_B);
+	CHECK(sa > 0 && sb > 0);
+	pthread_mutex_lock(&x.tsh.mu);
+	x.tsh.fail_at = x.tsh.ndesc + 4;            /* prime rise, prime fall, A rise, A fall */
+	pthread_mutex_unlock(&x.tsh.mu);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 5;                                /* the failed write does not count */
+	to_edge(&x, 1, 200 * MS);                   /* the priming edge */
+	WAIT_FOR(stages(&x.sh) == base + 2);        /* B staged before A */
+	to_edge(&x, 2, 50 * MS);                    /* A's rise fired; its fall never will */
+	CHECK(wait_done(&x, sa).status == DATAX_COMPLETION_OK);
+	fake_tick_advance(x.f, 11 * MS);            /* past A's 10 ms pulse */
+	WAIT_FOR(!(fake_tick_gpio(x.f) & 0x1));
+	to_edge(&x, 3, 50 * MS);
+	CHECK(wait_done(&x, sb).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);
+	fx_close(&x);
+	printf("test_fall_write_failure_parks: ok\n");
+}
+
+/* (2) The fall completes host-late (the feeder saw the queue full until it
+ * was due): deferred park, bit 0 low, the next tune OK. */
+static void test_fall_host_late_parks(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+	long sa, sb;
+
+	size_t base;
+
+	g_depth = 4;                                /* one pass writes 3: P rise/fall, A rise */
+	fx_open(&x, true);
+	g_depth = 0;
+	base = stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	sa = datax_sched_queue_tune(x.s, t, 0, F_A);
+	sb = datax_sched_queue_tune(x.s, t + 30 * MS, 0, F_B);
+	CHECK(sa > 0 && sb > 0);
+	pthread_mutex_lock(&x.tsh.mu);
+	x.tsh.full_after = x.tsh.ndesc + 3;
+	pthread_mutex_unlock(&x.tsh.mu);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 3;
+	to_edge(&x, 1, 200 * MS);                   /* the priming edge */
+	WAIT_FOR(stages(&x.sh) == base + 2);        /* B staged before A */
+	to_edge(&x, 2, 50 * MS);                    /* A fired; its fall is now inside the guard */
+	WAIT_FOR(has_event(&x.ev, DATAX_EVT_LATE_COMMAND, -2, "host could not keep"));
+	CHECK(wait_done(&x, sa).status == DATAX_COMPLETION_OK);
+	WAIT_FOR(!(fake_tick_gpio(x.f) & 0x1));     /* parked (the 10 ms pulse is not over) */
+	pthread_mutex_lock(&x.tsh.mu);
+	x.tsh.full_after = 0;                       /* the queue drains again */
+	pthread_mutex_unlock(&x.tsh.mu);
+	x.ndesc = 5;
+	to_edge(&x, 3, 50 * MS);
+	CHECK(wait_done(&x, sb).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);
+	fx_close(&x);
+	printf("test_fall_host_late_parks: ok\n");
+}
+
+/* (3) A late PPS edge is adopted while A's pulse is high: the queue is
+ * emptied (A's fall dropped), bit 0 is parked at once, and (I2) the FHM
+ * history is reset, so a tune queued on the jumped-back clock primes and
+ * completes OK. */
+static void test_adoption_parks_and_reprimes(void)
+{
+	static const unsigned long long plan[3] = { F_A, F_B, F_C };
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t, e1 = 500 * MS;
+	enum datax_time_source src;
+	long sa, sb, sc;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 3);
+	fake_tick_pps_edge(x.f);                    /* PPS present, but no edge in 2 s */
+	CHECK(datax_device_set_time_next_pps(x.dev, e1) == 0);   /* soft, still armed */
+	poller_fresh(&x);                           /* the 2 s wait held the poller off */
+	t = api_now(&x) + 100 * MS;
+	sa = datax_sched_queue_tune(x.s, t, 0, F_A);
+	sb = datax_sched_queue_tune(x.s, t + 30 * MS, 0, F_B);
+	CHECK(sa > 0 && sb > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 6;
+	to_edge(&x, 2, 200 * MS);
+	CHECK(wait_done(&x, sa).status == DATAX_COMPLETION_OK);
+	CHECK(fake_tick_gpio(x.f) & 0x1);           /* A's pulse is on */
+	fake_tick_pps_edge(x.f);                    /* the late edge: the counter jumps back */
+	WAIT_FOR(!(fake_tick_gpio(x.f) & 0x1));
+	CHECK(datax_device_get_time_source(x.dev, &src) == 0 && src == DATAX_TIME_PPS_ALIGNED);
+	c = wait_done(&x, sb);
+	CHECK(c.status == DATAX_COMPLETION_DROPPED);
+	CHECK(strstr(lasterr(&x), "device time jumped") != NULL);
+	t = api_now(&x) + 200 * MS;
+	CHECK(t < 500 * MS + 300 * MS);             /* time did move back */
+	sc = datax_sched_queue_tune(x.s, t, 0, F_C);
+	CHECK(sc > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	rebase_counts(&x, 4);
+	to_edge(&x, 4, 300 * MS);                   /* a fresh priming edge, then C */
+	CHECK(wait_done(&x, sc).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_C);
+	fx_close(&x);
+	printf("test_adoption_parks_and_reprimes: ok\n");
+}
+
+/*
+ * Final review I2: stage, a tune OK, align (soft) to epoch 0 so device time
+ * moves back, then queue_tune(now + 200 ms) is accepted (the history was
+ * reset, so it primes) and completes OK.
+ */
+static void test_tune_after_time_moves_back(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+	enum datax_time_source src;
+	long sa, sb;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t = now(&x) + 100 * MS;
+	sa = datax_sched_queue_tune(x.s, t, 0, F_A);
+	CHECK(sa > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	to_edge(&x, 2, 200 * MS);
+	CHECK(wait_done(&x, sa).status == DATAX_COMPLETION_OK);
+	fake_tick_advance(x.f, 11 * MS);            /* its fall ran: nothing queued */
+	msleep(5);
+	CHECK(datax_device_set_time_next_pps(x.dev, 0) == 0);
+	CHECK(datax_device_get_time_source(x.dev, &src) == 0 && src == DATAX_TIME_SOFT_ALIGNED);
+	t = api_now(&x);
+	CHECK(t < 100 * MS);                        /* moved back to about 0 */
+	sb = datax_sched_queue_tune(x.s, t + 200 * MS, 0, F_B);
+	CHECK(sb > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	rebase_counts(&x, 4);
+	to_edge(&x, 4, 300 * MS);
+	CHECK(wait_done(&x, sb).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);
+	fx_close(&x);
+	printf("test_tune_after_time_moves_back: ok\n");
+}
+
+/* set_time_next_pps is -EBUSY while a tune is live, also one still in the
+ * builder (planned on the old mapping); after a flush it aligns. */
+static void test_align_busy_with_live_tune(void)
+{
+	static const unsigned long long plan[1] = { F_A };
+	struct fx x;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 1);
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 0, F_A) > 0);
+	CHECK(datax_device_set_time_next_pps(x.dev, 0) == -EBUSY);
+	CHECK(strstr(lasterr(&x), "timed tune") != NULL);
+	CHECK(datax_sched_commit(x.s) == 0);
+	CHECK(datax_device_set_time_next_pps(x.dev, 0) == -EBUSY);
+	CHECK(datax_sched_flush(x.s) == 0);
+	CHECK(datax_device_set_time_next_pps(x.dev, 0) == 0);
+	CHECK(datax_sched_queue_tune(x.s, api_now(&x) + 100 * MS, 0, F_A) > 0);
+	fx_close(&x);
+	printf("test_align_busy_with_live_tune: ok\n");
+}
+
+/* set_time_next_pps on its own thread (the hard path waits up to 2 s). */
+struct align_arg {
+	struct datax_device *dev;
+	unsigned long long epoch;
+	int ret;
+};
+
+static void *align_main(void *arg)
+{
+	struct align_arg *a = arg;
+
+	a->ret = datax_device_set_time_next_pps(a->dev, a->epoch);
+	return NULL;
+}
+
+/*
+ * Re-review N1: a tune queued on another thread while set_time_next_pps
+ * waits for a PPS edge (PPS present, no edge: the 2 s hard wait, then the
+ * soft fallback) would be erased by the history reset and later complete
+ * OK unverified. While time is being aligned, queue_tune and a timed
+ * set_frequency are -EBUSY "device time is being aligned"; afterwards a
+ * tune is accepted and verified by readback.
+ */
+static void test_tune_refused_while_aligning(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	struct align_arg a;
+	pthread_t th;
+	unsigned long armed;
+	unsigned long long t;
+	long sb;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	fake_tick_pps_edge(x.f);                    /* pps_present, and no edge to come */
+	armed = fake_tick_access_count(x.f, "arm_time_next_pps", true);
+	a.dev = x.dev;
+	a.epoch = 0;
+	a.ret = 1;
+	CHECK(pthread_create(&th, NULL, align_main, &a) == 0);
+	WAIT_FOR(fake_tick_access_count(x.f, "arm_time_next_pps", true) > armed);
+	msleep(300);                                /* well inside the 2 s wait */
+	t = now(&x) + 200 * MS;
+	CHECK(datax_sched_queue_tune(x.s, t, 0, F_B) == -EBUSY);
+	CHECK(strstr(lasterr(&x), "device time is being aligned") != NULL);
+	CHECK(datax_device_set_frequency(x.dev, 0, F_B, t) == -EBUSY);
+	CHECK(strstr(lasterr(&x), "device time is being aligned") != NULL);
+	CHECK(pthread_join(th, NULL) == 0);
+	CHECK(a.ret == 0);                          /* fell back to the host clock */
+	poller_fresh(&x);
+	sb = datax_sched_queue_tune(x.s, api_now(&x) + 200 * MS, 0, F_B);
+	CHECK(sb > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	rebase_counts(&x, 4);
+	to_edge(&x, 2, 300 * MS);
+	CHECK(wait_done(&x, sb).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);         /* staged and read back */
+	fx_close(&x);
+	printf("test_tune_refused_while_aligning: ok\n");
+}
+
+/*
+ * Re-review N2: a history reset with a deferred park still pending (the
+ * fall's write failed, the rise fired, and the iteration that would park
+ * ended early on a Tick error) parks bit 0 before forgetting the edges; the
+ * next tune's priming rise then makes a real edge and the tune is OK.
+ */
+static void test_reset_performs_pending_park(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	unsigned long long t;
+	size_t base;
+	long sa, sb;
+
+	fx_open(&x, true);
+	base = stage(&x, plan, 2);
+	(void)base;
+	t = now(&x) + 100 * MS;
+	sa = datax_sched_queue_tune(x.s, t, 0, F_A);
+	CHECK(sa > 0);
+	pthread_mutex_lock(&x.tsh.mu);
+	x.tsh.fail_at = x.tsh.ndesc + 4;            /* A's fall: the park is deferred */
+	pthread_mutex_unlock(&x.tsh.mu);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 3;
+	to_edge(&x, 1, 200 * MS);                   /* the priming edge */
+	while (now(&x) < t - 1 * MS)
+		fake_tick_advance(x.f, 100 * US);
+	msleep(5);                                  /* the priming pulse is over and pruned */
+	pthread_mutex_lock(&x.tsh.mu);
+	x.tsh.pause_on_ack = x.s;                   /* A's record: no poll hook, then paused */
+	pthread_mutex_unlock(&x.tsh.mu);
+	fake_tick_advance(x.f, 1 * MS + PAST);      /* A's rise fires */
+	CHECK(wait_done(&x, sa).status == DATAX_COMPLETION_OK);
+	msleep(5);
+	CHECK(fake_tick_gpio(x.f) & 0x1);           /* still high: the park is pending */
+	CHECK(datax_device_set_time_next_pps(x.dev, 0) == 0);
+	CHECK(!(fake_tick_gpio(x.f) & 0x1));        /* the reset parked it */
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	poller_fresh(&x);
+	sb = datax_sched_queue_tune(x.s, api_now(&x) + 200 * MS, 0, F_B);
+	CHECK(sb > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	rebase_counts(&x, 4);
+	to_edge(&x, 4, 300 * MS);                   /* the fake counts on: priming, then B */
+	CHECK(wait_done(&x, sb).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_B);
+	fx_close(&x);
+	printf("test_reset_performs_pending_park: ok\n");
+}
+
 /* A consumed (timed set_frequency) tune flushed by teardown raises no event:
  * nobody asked, and its delivery would race the teardown. */
 static void test_teardown_flush_is_silent(void)
@@ -1536,6 +1915,13 @@ int main(int argc, char **argv)
 		{ "trigger_parked_low", test_trigger_parked_low },
 		{ "teardown_flush_is_silent", test_teardown_flush_is_silent },
 		{ "first_tune_minimum_lead", test_first_tune_minimum_lead },
+		{ "fall_write_failure_parks", test_fall_write_failure_parks },
+		{ "fall_host_late_parks", test_fall_host_late_parks },
+		{ "adoption_parks_and_reprimes", test_adoption_parks_and_reprimes },
+		{ "tune_after_time_moves_back", test_tune_after_time_moves_back },
+		{ "align_busy_with_live_tune", test_align_busy_with_live_tune },
+		{ "tune_refused_while_aligning", test_tune_refused_while_aligning },
+		{ "reset_performs_pending_park", test_reset_performs_pending_park },
 		{ "park_when_rise_unseen", test_park_when_rise_unseen },
 		{ "stage_busy_while_fall_pending", test_stage_busy_while_fall_pending },
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },

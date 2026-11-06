@@ -60,6 +60,9 @@ struct datax_sched_result {
 	uint32_t tick_status;                /* Tick status code; UINT32_MAX: host-side */
 	bool discarded;                      /* a rejected commit discarded it (never
 					      * written; nothing is published) */
+	bool queue_emptied;                  /* finished because Tick's queue was
+					      * emptied (flush, destroy, late-PPS
+					      * adoption): nothing queued remains */
 	char detail[DATAX_SCHED_DETAIL_LEN]; /* "" for OK */
 };
 

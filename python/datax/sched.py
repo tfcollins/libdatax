@@ -186,14 +186,31 @@ class Scheduler:
         self._building = []
 
     def flush(self):
-        """Cancel everything outstanding (commands complete ``FLUSHED`` and can
-        still be ``wait``-ed for; ``wait_all`` stops tracking them). On a
-        failure (Tick access) nothing was flushed and tracking is kept."""
+        """Cancel everything outstanding and return the ``Completion`` list of
+        the reported commands it ended: those it cancelled (``FLUSHED``) and
+        any that had already finished but were not yet waited for. They are
+        consumed here (the C completion table keeps nothing for commands
+        Python no longer tracks), so ``wait`` on their seqs then raises
+        ``Error`` (EINVAL). On a failure (Tick access) nothing was flushed and
+        tracking is kept."""
         h = self._live()
-        rc = get_lib().datax_sched_flush(h)
+        lib = get_lib()
+        rc = lib.datax_sched_flush(h)
         if rc:
             raise self._ctx._error(rc)
         self._building, self._committed = [], []
+        done = []
+        buf = (CompletionC * 32)()
+        n = C.c_size_t(0)
+        while True:
+            rc = lib.datax_sched_get_completions(h, buf, len(buf), C.byref(n))
+            if rc:
+                raise self._ctx._error(rc)
+            done.extend(Completion(int(c.seq), CompletionStatus(c.status),
+                                   int(c.requested_ticks), int(c.executed_ticks))
+                        for c in buf[:n.value])
+            if n.value < len(buf):
+                return done
 
     # -- completions -------------------------------------------------------
 

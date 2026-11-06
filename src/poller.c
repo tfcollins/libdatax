@@ -77,16 +77,28 @@ int datax_poller_read_time(struct datax_sched *s)
  * command due just after the ack may be marked lagged too: a false LATE,
  * never a false OK.)
  */
-static int read_record(struct datax_sched *s, unsigned long long v[7], unsigned long long *t)
+static int read_record(struct datax_sched *s, unsigned long long v[7], unsigned long long *t,
+		       bool *estimated)
 {
 	int ret = 0;
 
+	*estimated = false;
 	for (int i = R_STATUS; i <= R_DETAIL && !ret; i++)
 		ret = rd(s, comp_attrs[i], &v[i]);
 	if (!ret)
 		ret = datax_tick_write_str(s->dev, "completion_ack", "1");
-	if (!ret)
-		ret = rd(s, "current_time_ticks", t);
+	if (ret)
+		return ret;
+	ret = rd(s, "current_time_ticks", t);
+	if (ret) {
+		/* Acked: the record has left the slot and must be processed
+		 * anyway (else its command ends DROPPED "no completion"). The
+		 * time is an estimate, so the command counts as lagged. */
+		pthread_mutex_lock(&s->lock);
+		*t = s->last_hw + ns_to_ticks(datax_mono_ns() - s->last_hw_mono, s->tick_hz);
+		pthread_mutex_unlock(&s->lock);
+		*estimated = true;
+	}
 	return ret;
 }
 
@@ -108,9 +120,11 @@ int datax_poller_measure(struct datax_sched *s)
 	 * is DRAIN_ACCESSES accesses after the previous one's, so each delta is
 	 * one drain's cost in device ticks. */
 	for (unsigned int i = 0; i <= DATAX_SCHED_DRAIN_SAMPLES; i++) {
+		bool est;
+
 		ret = rd(s, comp_attrs[R_SEQ], &v[R_SEQ]);
 		if (!ret)
-			ret = read_record(s, v, &t[i]);
+			ret = read_record(s, v, &t[i], &est);
 		if (ret)
 			return ret;
 	}
@@ -185,8 +199,11 @@ static int finish_lost(struct datax_sched *s)
 	return 0;
 }
 
-/* One drained record v, its drain read at hardware time t. s->lock held. */
-static void process(struct datax_sched *s, const unsigned long long v[7], unsigned long long t)
+/* One drained record v, its drain read at hardware time t (estimated: the
+ * time read failed after the ack; the command then counts as lagged).
+ * s->lock held. */
+static void process(struct datax_sched *s, const unsigned long long v[7], unsigned long long t,
+		    bool estimated)
 {
 	uint32_t rseq = (uint32_t)v[R_SEQ];
 	struct sched_cmd *c = NULL;
@@ -215,6 +232,8 @@ static void process(struct datax_sched *s, const unsigned long long v[7], unsign
 	 * drop, which late_count already reports. */
 	if (!c)
 		return;
+	if (estimated)
+		c->lagged = true;
 	memset(&res, 0, sizeof(res));
 	datax_sched_map_status((uint32_t)v[R_STATUS], &res);
 	res.requested_ticks = c->api_ts;
@@ -254,14 +273,20 @@ int datax_poller_drain(struct datax_sched *s)
 			/* Empty: seq 0 is never issued (no valid bit, tick#39). */
 			return finish_lost(s);
 		}
-		ret = read_record(s, v, &t);
-		if (ret)
+		bool est;
+
+		ret = read_record(s, v, &t, &est);
+		if (ret && !est)
 			return ret;
 		pthread_mutex_lock(&s->lock);
-		s->last_hw = t;
-		s->last_hw_mono = datax_mono_ns();
-		process(s, v, t);
+		if (!est) {
+			s->last_hw = t;
+			s->last_hw_mono = datax_mono_ns();
+		}
+		process(s, v, t, est);
 		pthread_mutex_unlock(&s->lock);
+		if (ret)
+			return ret;               /* processed; the read error ends the pass */
 	}
 	return 0;
 }

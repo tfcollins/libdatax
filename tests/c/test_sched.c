@@ -26,6 +26,7 @@
 
 #include "check.h"
 #include "fake_tick.h"
+#include "scheduler.h"        /* nwaiters: the waiter tests' synchronisation */
 #include "tick_descriptor.h"
 
 #define HZ        100000000ULL           /* fake (tron) tick rate */
@@ -55,6 +56,9 @@ struct shim {
 	uint64_t ack_delay;
 	/* stall_and_fill also pauses this scheduler (from the poller thread) */
 	struct datax_sched *pause_s;
+	/* one-shot: the current_time_ticks read right after the next
+	 * completion_ack fails (the record is acked, its drain time lost) */
+	bool fail_time_after_ack, ack_seen;
 };
 
 static uint32_t csv_word(const char *csv, int idx)
@@ -72,8 +76,15 @@ static uint32_t csv_word(const char *csv, int idx)
 static int shim_read(void *h, const char *attr, char *buf, size_t len)
 {
 	struct shim *sh = h;
+	bool fail = false;
 
-	return fake_tick_read(sh->f, attr, buf, len);
+	if (!strcmp(attr, "current_time_ticks")) {
+		pthread_mutex_lock(&sh->m);
+		fail = sh->ack_seen;
+		sh->ack_seen = false;
+		pthread_mutex_unlock(&sh->m);
+	}
+	return fail ? -EIO : fake_tick_read(sh->f, attr, buf, len);
 }
 
 static int shim_write(void *h, const char *attr, const char *val)
@@ -87,6 +98,10 @@ static int shim_write(void *h, const char *attr, const char *val)
 		pthread_mutex_lock(&sh->m);
 		d = sh->ack_delay;
 		sh->ack_delay = 0;
+		if (sh->fail_time_after_ack) {
+			sh->fail_time_after_ack = false;
+			sh->ack_seen = true;
+		}
 		pthread_mutex_unlock(&sh->m);
 		if (d)
 			fake_tick_advance(sh->f, d);
@@ -604,7 +619,15 @@ static void test_feeder_starved_marks_late(void)
 		WAIT_FOR(shim_count(&x.sh) == 3);
 		msleep(10);
 		CHECK(shim_count(&x.sh) == 3);
+		/* The fake clock jumps 25 ms in no host time. Mid-iteration (after
+		 * the poller's time read, before its queue_level read) that pairs
+		 * an emptied queue with a stale time, and the feeder writes an
+		 * overdue command as if 20 ms ahead: something real hardware,
+		 * whose clock moves with the host's, cannot do. Jump between
+		 * iterations: pause waits for the one in flight to end. */
+		CHECK(datax_internal_sched_pause(x.s, true) == 0);
 		fake_tick_advance(x.f, 25 * MS);
+		CHECK(datax_internal_sched_pause(x.s, false) == 0);
 		CHECK(datax_sched_wait(x.s, s[7], 3000, &c) == 0);
 		CHECK(c.status == DATAX_COMPLETION_LATE);
 		CHECK(strstr(lasterr(&x), "host could not keep the queue fed") != NULL);
@@ -988,6 +1011,35 @@ static void test_reserved_gpio_bit(bool adrv9009)
 	printf("test_reserved_gpio_bit(%s): ok\n", adrv9009 ? "adrv9009" : "ad936x");
 }
 
+/* Final review M1: the time read after an ack fails. The record has left
+ * the slot, so it is processed anyway with an estimated time, as lagged:
+ * LATE "poller lagged", never DROPPED "no completion". */
+static void test_acked_record_kept_on_time_read_failure(void)
+{
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t;
+	long seq;
+
+	fx_open(&x, 0, true);
+	t = fake_tick_now(x.f) + 50 * MS;
+	seq = gpio(&x, t, true);
+	CHECK(datax_sched_commit(x.s) == 0);
+	WAIT_FOR(shim_count(&x.sh) == 1);
+	pthread_mutex_lock(&x.sh.m);
+	x.sh.fail_time_after_ack = true;
+	pthread_mutex_unlock(&x.sh.m);
+	run_until(&x, t + MS, 1 * MS);
+	memset(&c, 0, sizeof(c));
+	CHECK(datax_sched_wait(x.s, seq, 3000, &c) == 0);
+	CHECK(c.status == DATAX_COMPLETION_LATE);
+	CHECK(strstr(lasterr(&x), "poller lagged") != NULL);
+	CHECK(c.executed_ticks == t);                /* Tick's own record, kept */
+	CHECK(!x.sh.fail_time_after_ack && !x.sh.ack_seen);   /* the failure was hit */
+	fx_close(&x);
+	printf("test_acked_record_kept_on_time_read_failure: ok\n");
+}
+
 static void test_flush_completes_flushed(void)
 {
 	struct fx x;
@@ -1051,6 +1103,24 @@ static void *waiter_main(void *arg)
 
 #define NWAITERS 16
 
+/* Every waiter thread is inside datax_sched_wait (counted, under s->lock,
+ * before it sleeps). The API requires a wait to have begun before destroy:
+ * a thread that has not reached wait() yet would touch the freed scheduler.
+ * A fixed sleep does not guarantee that under load. */
+static void waiters_blocked(struct datax_sched *s, unsigned int n)
+{
+	unsigned int in = 0;
+
+	for (int w = 0; w < 5000 && in < n; w++) {
+		pthread_mutex_lock(&s->lock);
+		in = s->nwaiters;
+		pthread_mutex_unlock(&s->lock);
+		if (in < n)
+			msleep(1);
+	}
+	CHECK(in == n);
+}
+
 static void test_destroy_cancels_waiters(void)
 {
 	for (int i = 0; i < 50; i++) {
@@ -1073,7 +1143,7 @@ static void test_destroy_cancels_waiters(void)
 			w[k].ret = 1;
 			CHECK(pthread_create(&th[k], NULL, waiter_main, &w[k]) == 0);
 		}
-		msleep(20);                       /* all blocked in wait() */
+		waiters_blocked(x.s, NWAITERS);   /* all blocked in wait() */
 		datax_sched_destroy(x.s);
 		x.s = NULL;
 		for (int k = 0; k < NWAITERS; k++) {
@@ -1107,7 +1177,7 @@ static void test_context_destroy_cancels_waiters(void)
 			w[k].ret = 1;
 			CHECK(pthread_create(&th[k], NULL, waiter_main, &w[k]) == 0);
 		}
-		msleep(10);
+		waiters_blocked(x.s, NWAITERS);
 		x.s = NULL;                      /* the context destroys it */
 		datax_context_destroy(x.ctx);
 		x.ctx = NULL;
@@ -1225,6 +1295,8 @@ int main(int argc, char **argv)
 			{ "destroy_cancels_waiters", test_destroy_cancels_waiters },
 			{ "get_time_races_destroy", test_get_time_races_destroy },
 			{ "context_destroy_cancels_waiters", test_context_destroy_cancels_waiters },
+			{ "acked_record_kept_on_time_read_failure",
+			  test_acked_record_kept_on_time_read_failure },
 		};
 
 		for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
@@ -1254,6 +1326,7 @@ int main(int argc, char **argv)
 	test_events_late_and_overflow();
 	test_reserved_gpio_bit(true);
 	test_flush_completes_flushed();
+	test_acked_record_kept_on_time_read_failure();
 	test_destroy_while_polling();
 	test_destroy_cancels_waiters();
 	test_context_destroy_cancels_waiters();

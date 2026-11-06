@@ -439,6 +439,27 @@ static void test_wake_target_spent(void)
 	printf("test_wake_target_spent: ok\n");
 }
 
+/* Final review M4: commit on a scheduler being destroyed (stop set: the
+ * poller has stopped) is -ECANCELED, not 0 with commands left PENDING. */
+static void test_commit_while_stopping_cancelled(void)
+{
+	struct fx x;
+
+	fx_open(&x);
+	(void)enq(&x, fake_tick_now(x.f) + 50 * MS, true);
+	pthread_mutex_lock(&x.s->lock);
+	x.s->stop = true;
+	pthread_mutex_unlock(&x.s->lock);
+	CHECK(datax_sched_commit(x.s) == -ECANCELED);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "being destroyed") != NULL);
+	pthread_mutex_lock(&x.s->lock);
+	for (size_t i = 0; i < x.s->ncmds; i++)
+		CHECK(x.s->cmds[i].state == CMD_BUILD);     /* nothing was committed */
+	pthread_mutex_unlock(&x.s->lock);
+	fx_close(&x);
+	printf("test_commit_while_stopping_cancelled: ok\n");
+}
+
 int main(void)
 {
 	test_destroy_finishes_hooks();
@@ -447,6 +468,7 @@ int main(void)
 	test_consumed_result_not_kept();
 	test_consumed_flush_events();
 	test_wake_target_spent();
+	test_commit_while_stopping_cancelled();
 	printf("test_sched_hooks: all ok\n");
 	return 0;
 }

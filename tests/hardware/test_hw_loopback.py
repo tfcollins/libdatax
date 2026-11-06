@@ -11,6 +11,7 @@ PERIOD = 1024
 CAPTURE = 8192  # at least 2x the period
 
 
+@pytest.mark.needs_tx
 def test_digital_loopback(dev, hw_ctx, family, ch, record):
     tx_c = lb.qpsk_block(PERIOD, seed=7)
     tx_raw = np.empty((PERIOD, 2), dtype=np.int16)

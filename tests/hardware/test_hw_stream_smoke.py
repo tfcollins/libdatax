@@ -38,8 +38,9 @@ def test_family_and_channels(dev, family, record):
 
 
 def test_caps_row(dev):
-    # P2 changes no capability flag: the public set is empty.
-    assert list(dev.caps) == []
+    # P3a flags may appear (Tick, FHM, MCS); the stream and net-offload flags
+    # of later phases and PHASE_COHERENT never do on this setup.
+    assert set(dev.caps) <= {"timed_commands", "fhm_hop", "mcs"}, list(dev.caps)
 
 
 def test_rx_block_nonconstant_per_channel(dev, record):
@@ -70,6 +71,7 @@ def test_recv_timeout_recovers(dev, record):
         assert data.shape == (1, RX_BLOCK)
 
 
+@pytest.mark.needs_tx
 def test_tx_oneshot_drains(dev, record):
     n = 16384
     with dev.tx_stream(channels=(0,), block_samples=n, block_count=4) as tx:
@@ -80,6 +82,7 @@ def test_tx_oneshot_drains(dev, record):
         record("drain_s", time.monotonic() - t0)
 
 
+@pytest.mark.needs_tx
 def test_tx_cyclic_start_stop(dev):
     for _ in range(2):
         tx = dev.tx_stream(channels=(0,), block_samples=1024, cyclic=True)

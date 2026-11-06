@@ -138,3 +138,78 @@ def test_set_digital_loopback_missing_device_names_it(emu_uri):
     with datax.Context(emu_uri) as ctx:
         with pytest.raises(lb.LoopbackError, match="adrv9009-phy"):
             lb.set_digital_loopback(ctx, "adrv9009", True)
+
+
+# ---- expected_loopback / exact match ------------------------------------------
+
+def _tx_raw(n=64, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.integers(-32768, 32768, size=(n, 2), dtype=np.int16)
+
+
+def test_expected_loopback_ad936x_shifts_arithmetically():
+    tx = np.array([[16, -32], [-17, 5]], dtype=np.int16)
+    assert np.array_equal(lb.expected_loopback("ad936x", tx), tx >> 4)
+    assert lb.expected_loopback("ad936x", tx).dtype == np.int16
+
+
+def test_expected_loopback_adrv9009_exchanges_iq():
+    tx = _tx_raw()
+    exp = lb.expected_loopback("adrv9009", tx)
+    assert exp.dtype == np.int16 and exp.shape == tx.shape
+    assert np.array_equal(exp[:, 0], tx[:, 1]) and np.array_equal(exp[:, 1], tx[:, 0])
+    exp[0, 0] ^= 1  # a copy: tx untouched
+    assert tx[0, 1] != exp[0, 0]
+
+
+def test_expected_loopback_unknown_family():
+    with pytest.raises(ValueError):
+        lb.expected_loopback("ad9081", _tx_raw())
+
+
+@pytest.mark.parametrize("family", ["ad936x", "adrv9009"])
+def test_mismatches_vs_expected_exact_and_detects_flip(family):
+    tx = _tx_raw(256, seed=4)
+    exp = lb.expected_loopback(family, tx)
+    rx = np.tile(np.roll(exp, 9, axis=0), (3, 1))
+    assert lb.mismatches_vs_expected(exp, rx, 9) == 0
+    assert lb.mismatches_vs_expected(exp, rx, 8) > 0
+    rx[3, 1] ^= 1
+    assert lb.mismatches_vs_expected(exp, rx, 9) == 1
+
+
+def test_adrv9009_unexchanged_rx_is_not_a_match():
+    tx = _tx_raw(128, seed=5)
+    assert lb.mismatches_vs_expected(lb.expected_loopback("adrv9009", tx), tx, 0) > 0
+
+
+# ---- adrv9009 set_digital_loopback against the emulator ------------------------
+
+@pytest.mark.parametrize("emu_uri", ["adrv9009-zu11eg"], indirect=True)
+def test_set_digital_loopback_adrv9009_writes_both_phys(emu_uri, monkeypatch):
+    # The emulator echoes debug writes, so the register read-back cannot show
+    # 0x1532 bit 7; fake only that read (the real helper stays strict).
+    state = {}
+    real_read = lb.read_debug_attr
+
+    def fake_read(ctx, dev, attr):
+        if attr == "direct_reg_access":
+            return "0x80" if state["on"] else "0x00"
+        return real_read(ctx, dev, attr)
+
+    monkeypatch.setattr(lb, "read_debug_attr", fake_read)
+    with datax.Context(emu_uri) as ctx:
+        for on in (True, False):
+            state["on"] = on
+            lb.set_digital_loopback(ctx, "adrv9009", on)
+            for phy in ("adrv9009-phy", "adrv9009-phy-b"):
+                assert real_read(ctx, phy, "bist_framer_a_loopback") == str(int(on))
+                assert real_read(ctx, phy, "direct_reg_access") == "0x1532"
+
+
+@pytest.mark.parametrize("emu_uri", ["adrv9009-zu11eg"], indirect=True)
+def test_set_digital_loopback_adrv9009_register_check_names_phy(emu_uri):
+    # Unpatched, the echoing emulator returns the address written: bit 7 clear.
+    with datax.Context(emu_uri) as ctx:
+        with pytest.raises(lb.LoopbackError, match="adrv9009-phy.*0x1532"):
+            lb.set_digital_loopback(ctx, "adrv9009", True)

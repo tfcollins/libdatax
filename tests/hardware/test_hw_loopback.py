@@ -44,13 +44,20 @@ def test_digital_loopback(dev, hw_ctx, family, ch, record):
             restore_err = None
 
     assert restore_err is None, f"loopback restore failed: {restore_err}"
+    # Expected waveform per family. adrv9009: I/Q exchanged by the stock framer
+    # loopback path (tron, 2026-11-05: rx_I == tx_Q, rx_Q == tx_I, gain 1.000).
+    # libdatax's convention matches pyadi-iio, so this is not a libdatax bug; an
+    # RF loopback (REQ-TEST-030 RF part) is what would confirm TX I/Q orientation.
+    exp_raw = lb.expected_loopback(family, tx_raw)
+    record("loopback_transform",
+           "tx>>4" if family == "ad936x" else "iq_exchange_no_shift")
+    exp_c = exp_raw[:, 0].astype(np.float64) + 1j * exp_raw[:, 1]
     rx_c = raw[:, 0].astype(np.float64) + 1j * raw[:, 1]
-    lag, gain, evm = lb.align_and_fit(tx_fs, rx_c)
+    lag, gain, evm = lb.align_and_fit(exp_c, rx_c)
     record("lag", lag)
     record("gain", [gain.real, gain.imag])
     record("evm_db", evm)
     assert evm <= -40.0, f"EVM {evm:.1f} dB (lag {lag}, gain {gain})"
-    if family == "ad936x":
-        bad = lb.mismatches_after_shift(tx_raw, raw, lag, 4)
-        record("mismatches_after_shift4", bad)
-        assert bad == 0, f"{bad} values differ from TX >> 4 (lag {lag})"
+    bad = lb.mismatches_vs_expected(exp_raw, raw, lag)
+    record("mismatches_vs_expected", bad)
+    assert bad == 0, f"{bad} values differ from the expected loopback (lag {lag})"

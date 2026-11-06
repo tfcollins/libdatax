@@ -117,6 +117,11 @@ struct datax_fhm {
 	unsigned long long stage_us;   /* DATAX_LIMIT_HOP_STAGE_US */
 	bool fresh;                    /* FHM (re)enabled: the next tune primes */
 	bool enabled;                  /* this context enabled FHM: disable at teardown */
+	/* device time is being aligned (re-review N1): set with the live-tune
+	 * check, cleared after the history reset, so no tune can be queued on
+	 * the old mapping and then erased. A count: an involuntary late-edge
+	 * adoption may overlap set_time_next_pps. */
+	unsigned int aligning;
 	struct fhm_edge *e;            /* edges in time order */
 	size_t n, cap;
 	unsigned int next_num;         /* trace: E0 is the first edge after enabling */
@@ -1115,6 +1120,12 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 		return ret;
 	m = fhm_get(dev, false);
 	pthread_mutex_lock(&m->lock);
+	if (m->aligning) {
+		ret = datax_error_ret(s->ctx, EBUSY, "fhm",
+				      "queue_tune: device time is being aligned; queue the tune "
+				      "after set_time_next_pps returns");
+		goto out;
+	}
 	pmax = us_ticks(FHM_PULSE_MAX_US, hzt);
 	/*
 	 * The priming lead is tune 2's whole staging window: its frequency is
@@ -1315,52 +1326,72 @@ int datax_fhm_timed_set_frequency(struct datax_device *dev, unsigned int ch,
 	return ret;
 }
 
-/* ---- device time changes (final review I2) ----------------------------------- */
+/* ---- device time changes (final review I2, re-review N1/N2) ------------------ */
 
-bool datax_fhm_live(struct datax_device *dev)
+/*
+ * Begin a change of the API <-> hardware time mapping. Under fhm->lock, in
+ * one critical section: refuse (-EBUSY) while any tune is live, unless
+ * forced (a late-edge adoption is involuntary), and mark the state
+ * aligning, so queue_tune returns -EBUSY until datax_fhm_align_end. Every
+ * successful begin must be paired with an end. 0, -EBUSY or -ENOMEM.
+ */
+int datax_fhm_align_begin(struct datax_device *dev, bool force)
 {
-	struct datax_fhm *m = fhm_get(dev, false);
-	bool live;
+	struct datax_fhm *m = fhm_get(dev, true);
 
 	if (!m)
-		return false;
+		return force ? 0 : -ENOMEM;
 	pthread_mutex_lock(&m->lock);
-	live = outstanding(m);
+	if (!force && outstanding(m)) {
+		pthread_mutex_unlock(&m->lock);
+		return -EBUSY;
+	}
+	m->aligning++;
 	pthread_mutex_unlock(&m->lock);
-	return live;
+	return 0;
 }
 
 /*
- * The API <-> hardware time mapping changed (a soft offset, a hard PPS load,
- * or a late edge's counter jump). The remembered edges carry API times from
- * the old mapping: their order and gap checks would refuse every new tune
- * after time moved back. Forget them (n = 0) and make the next tune prime
- * (fresh), under fhm->lock. set_time_next_pps refuses while any tune is live
- * (datax_fhm_live); a late-edge adoption is involuntary, so its caller
- * passes s: the FHM commands it did not already drop (those still in the
- * builder or unwritten) are finished DROPPED "device time jumped on a late
- * PPS edge" first, since their pipeline state is gone. io held when s.
+ * End it. changed: the mapping did change, so the remembered edges (API
+ * times on the old mapping) are forgotten and the next tune primes; a
+ * deferred park still pending is performed first (N2: forgetting it would
+ * leave bit 0 high). adopted (a late-edge adoption, s non-NULL, io held):
+ * the FHM commands it did not already drop (builder or unwritten) are
+ * finished DROPPED "device time jumped on a late PPS edge", their pipeline
+ * state being gone. Hold io when s is non-NULL.
  */
-void datax_fhm_time_changed(struct datax_device *dev, struct datax_sched *s)
+void datax_fhm_align_end(struct datax_device *dev, struct datax_sched *s, bool changed,
+			 bool adopted)
 {
 	struct datax_fhm *m = fhm_get(dev, false);
 	long *seqs = NULL;
+	bool park = false;
 	size_t n = 0;
 
 	if (!m)
 		return;
 	pthread_mutex_lock(&m->lock);
-	if (s && m->n)
-		seqs = malloc(2 * m->n * sizeof(*seqs));
-	for (size_t i = 0; seqs && i < m->n; i++) {
-		seqs[n++] = m->e[i].seq;
-		if (m->e[i].fall_seq > 0)
-			seqs[n++] = m->e[i].fall_seq;
+	if (changed) {
+		for (size_t i = 0; i < m->n; i++)
+			park = park || m->e[i].needs_park;
+		if (park)
+			(void)datax_tick_gpio_now(dev, s, TRIGGER_MASK, 0);
+		if (adopted && s && m->n)
+			seqs = malloc(2 * m->n * sizeof(*seqs));
+		for (size_t i = 0; seqs && i < m->n; i++) {
+			seqs[n++] = m->e[i].seq;
+			if (m->e[i].fall_seq > 0)
+				seqs[n++] = m->e[i].fall_seq;
+		}
+		m->n = 0;
+		m->fresh = true;
 	}
-	m->n = 0;
-	m->fresh = true;
+	if (m->aligning)
+		m->aligning--;
 	pthread_mutex_unlock(&m->lock);
-	trace("history reset: device time mapping changed (%zu commands to drop)", n);
+	if (changed)
+		trace("history reset: device time mapping changed (park %d, %zu commands to drop)",
+		      park, n);
 	if (!seqs)
 		return;
 	pthread_mutex_lock(&s->lock);

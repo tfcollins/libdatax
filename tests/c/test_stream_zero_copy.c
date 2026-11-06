@@ -292,6 +292,39 @@ static void test_zero_copy_tx_cyclic(void)
 	datax_context_destroy(ctx);
 }
 
+/*
+ * A block libiio no longer holds (-EPERM, the legacy path's consumed read)
+ * while other blocks are lent: get_block re-arms it, and the cursor must
+ * skip the lent blocks it then reaches instead of reporting "every block
+ * is lent". The emulator never consumes a block itself, so the test takes
+ * it from libiio behind the stream's back (as test_stream_rx does).
+ */
+static void test_zero_copy_rx_rearm_skips_lent(void)
+{
+	struct datax_device *dev = NULL;
+	struct datax_context *ctx = open_ctx(&dev);
+	struct datax_stream *s = NULL;
+	struct datax_stream_config c = cfg(DATAX_RX, 4096, 3, false);
+	void *a = NULL, *b = NULL, *d = NULL;
+
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_get_block(s, &a, NULL, 1000) == 0);
+	CHECK(datax_stream_get_block(s, &b, NULL, 1000) == 0);
+	CHECK(s->cur == 2 && s->queued[2]);
+	/* Consume block 2 (instants 8192..12287) outside the stream. */
+	CHECK(iio_block_dequeue(s->blocks[2], false) == 0);
+	/* Re-armed; the cursor passes lent blocks 0 and 1 back to block 2. */
+	CHECK(datax_stream_get_block(s, &d, NULL, 1000) == 0);
+	CHECK(d == iio_block_start(s->blocks[2]));
+	check_pattern(d, 4096, 12288);
+	CHECK(datax_stream_put_block(s, a) == 0);
+	CHECK(datax_stream_put_block(s, b) == 0);
+	CHECK(datax_stream_put_block(s, d) == 0);
+	datax_stream_destroy(s);
+	datax_context_destroy(ctx);
+}
+
 static void test_put_foreign_pointer(void)
 {
 	struct datax_device *dev = NULL;
@@ -331,6 +364,7 @@ int main(void)
 	test_copy_then_zero_copy_rejected();
 	test_zero_copy_tx();
 	test_zero_copy_tx_cyclic();
+	test_zero_copy_rx_rearm_skips_lent();
 	test_put_foreign_pointer();
 	return 0;
 }

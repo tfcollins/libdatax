@@ -72,8 +72,10 @@
  * block back: their pointers are invalid afterwards, and a lent TX block
  * is discarded. A stream is copying or zero-copy for its whole life:
  * mixing returns -EINVAL. If an RX block must be re-armed (-EPERM, above)
- * while others are lent, the re-armed block can come back one place out
- * of order; that only follows a failed legacy read, whose data is lost.
+ * while others are lent, the cursor moves past lent blocks to the oldest
+ * queued one (-EBUSY only when every block is lent), and the re-armed
+ * block can come back one place out of order; that only follows a failed
+ * legacy read, whose data is lost.
  */
 #include <errno.h>
 #include <limits.h>
@@ -512,7 +514,7 @@ static int tx_flush(struct datax_stream *s)
 int datax_stream_stop(struct datax_stream *s)
 {
 	bool tx_oneshot;
-	int ret = 0, dret = 0;
+	int ret = 0, dret = 0, fret = 0, cret = 0;
 
 	if (!s)
 		return -EINVAL;
@@ -521,23 +523,24 @@ int datax_stream_stop(struct datax_stream *s)
 	tx_oneshot = s->cfg.direction == DATAX_TX && !s->cfg.cyclic;
 	unlend_all(s); /* lent blocks are not queued: the drain skips them */
 	if (s->bs && tx_oneshot)
-		dret = tx_flush(s);
-	if (s->bs && !s->cfg.cyclic) {
-		int r = drain(s);
-
-		if (!dret)
-			dret = r;
-	}
+		fret = tx_flush(s);
+	if (s->bs && !s->cfg.cyclic)
+		dret = drain(s);
 	if (s->bs && s->cfg.cyclic && s->queued[0]) {
 		/* Cyclic: take the block back before disabling, so the buffer
 		 * closes without a cancel. It must come first: on the legacy
 		 * path the block's write runs on libiio's worker, which
 		 * iio_buffer_stream_stop parks, and a dequeue of a write the
 		 * worker had not yet run would then wait forever
-		 * (iio_task_sync(token, -1)). Binary iiod answers at once. */
+		 * (iio_task_sync(token, -1)). Binary iiod answers at once.
+		 * On the legacy path send()/put_block() only queued the write,
+		 * so this is where a failed cyclic write surfaces. -EPERM:
+		 * libiio no longer holds the block; nothing to report. */
 		bool waited;
 
-		dequeue(s, 0, -1, 0, false, &waited);
+		cret = dequeue(s, 0, -1, 0, false, &waited);
+		if (cret == -EPERM)
+			cret = 0;
 	}
 	if (s->bs && s->enabled) {
 		ret = iio_buffer_stream_stop(s->bs);
@@ -551,8 +554,12 @@ int datax_stream_stop(struct datax_stream *s)
 	/* A block that did not come back leaves the buffer in an unknown
 	 * state: free it; start() reopens. A cyclic stream always frees its
 	 * buffer: the next send sizes a new one. */
-	if (dret || ret || s->cfg.cyclic)
+	if (fret || dret || ret || s->cfg.cyclic)
 		hw_close(s);
+	if (cret)
+		return fail_iio(s, cret, "stream_stop: writing the cyclic block");
+	if (fret)
+		return fail_iio(s, fret, "stream_stop: enqueueing the held TX block");
 	if (tx_oneshot && dret) {
 		if (dret == -ETIMEDOUT)
 			return datax_error_ret(s->dev->ctx, ETIMEDOUT, SUB,
@@ -597,11 +604,15 @@ static int rx_take(struct datax_stream *s, int timeout_ms, long long deadline,
 		bool waited;
 		int ret;
 
-		if (s->lent[s->cur])
+		if (s->nlent == s->nblocks)
 			return quiet ? -EBUSY :
 				datax_error_ret(ctx, EBUSY, SUB,
 						"%s: every block of %s is lent; put_block one back first",
 						verb, iio_name(s));
+		/* After a re-arm the cursor can reach the lent blocks: they
+		 * are not queued, so move past them to the oldest queued one. */
+		while (s->lent[s->cur])
+			s->cur = (s->cur + 1) % s->nblocks;
 		ret = dequeue(s, s->cur, tmo, deadline, true, &waited);
 		if (ret == -EPERM) {
 			rearms = waited ? 0 : rearms + 1;
@@ -646,7 +657,8 @@ static int tx_take(struct datax_stream *s, int timeout_ms, long long deadline,
 	bool waited;
 	int ret;
 
-	if (s->lent[s->cur])
+	/* TX never re-arms, so the cursor's block is lent only when all are. */
+	if (s->nlent == s->nblocks || s->lent[s->cur])
 		return quiet ? -EBUSY :
 			datax_error_ret(s->dev->ctx, EBUSY, SUB,
 					"%s: every block of %s is lent; put_block one back first",

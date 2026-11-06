@@ -329,6 +329,75 @@ static void test_cyclic_enables_at_send(void)
 	free(src);
 }
 
+/*
+ * stop() cannot enqueue the held partial block: the error names that, not
+ * the drain. The test enqueues the block from behind the stream (marking
+ * it queued so the drain still takes it back), so the stream's own
+ * enqueue gets libiio's -EPERM.
+ */
+static void test_tx_stop_reports_failed_flush(void)
+{
+	struct datax_device *dev = NULL;
+	struct datax_context *ctx = open_ctx(&dev);
+	struct datax_stream *s = NULL;
+	struct datax_stream_config c = cfg(DATAX_TX, 0x1, 1024, 2, false);
+	int16_t *src = make_pattern(1500, 1, 0, 0);
+
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_send(s, src, 1500, 1000) == 1500);
+	CHECK(s->cur == 1 && s->cur_off == 476 * 4);
+	CHECK(iio_block_enqueue(s->blocks[1], 0, false) == 0);
+	s->queued[1] = true;
+	CHECK(datax_stream_stop(s) == -EPERM);
+	CHECK(strstr(err(ctx), "enqueueing the held TX block"));
+	CHECK(s->bs == NULL); /* freed; start() reopens */
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_send(s, src, 1024, 1000) == 1024);
+	CHECK(datax_stream_stop(s) == 0);
+	datax_stream_destroy(s);
+	datax_context_destroy(ctx);
+	free(src);
+}
+
+/*
+ * A cyclic write that failed surfaces at stop(). On the legacy path
+ * send() only queues the write and its result arrives through the dequeue
+ * that stop() makes. The test produces a failing result on the binary
+ * path instead: it takes the cyclic block back from libiio behind the
+ * stream's back and enqueues it again, which the emulator, still holding
+ * the block, refuses (-EBUSY); that error comes back through the dequeue.
+ */
+static void test_cyclic_stop_reports_failed_write(void)
+{
+	struct datax_device *dev = NULL;
+	struct datax_context *ctx = open_ctx(&dev);
+	struct datax_stream *s = NULL;
+	struct datax_stream_config c = cfg(DATAX_TX, 0x1, 256, 1, true);
+	struct datax_internal_stream_stats st;
+	int16_t *src = make_pattern(256, 1, 0, 0);
+	int ret;
+
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_send(s, src, 256, 1000) == 256);
+	CHECK(iio_block_dequeue(s->blocks[0], false) == 0);
+	CHECK(iio_block_enqueue(s->blocks[0], 0, true) == 0);
+	CHECK(s->queued[0]);
+	ret = datax_stream_stop(s);
+	CHECK(ret == -EBUSY);
+	CHECK(strstr(err(ctx), "writing the cyclic block on cf-ad9361-dds-core-lpc failed"));
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && !st.enabled);
+	CHECK(s->bs == NULL);
+	/* The stream is usable again. */
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_send(s, src, 256, 1000) == 256);
+	CHECK(datax_stream_stop(s) == 0);
+	datax_stream_destroy(s);
+	datax_context_destroy(ctx);
+	free(src);
+}
+
 int main(void)
 {
 	const char *dir = getenv("DATAX_TEST_XML_DIR");
@@ -342,5 +411,7 @@ int main(void)
 	test_tx_send_spans_and_reuses_blocks();
 	test_tx_arg_errors();
 	test_cyclic_enables_at_send();
+	test_tx_stop_reports_failed_flush();
+	test_cyclic_stop_reports_failed_write();
 	return 0;
 }

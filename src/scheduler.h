@@ -67,9 +67,14 @@ struct datax_sched_result {
  * with the I/O lock held and the state lock not held, on the thread doing
  * the Tick I/O (the poller, or flush's caller). It may change r->status and
  * r->detail, do Tick reads/writes through the seam (io is already held),
- * do non-Tick I/O (phy attributes) and datax_sched_emit. It must not call
- * commit, flush, pause or destroy (they take io), so anything it
- * datax_sched_enqueue()s waits in the builder for the caller's next commit.
+ * call datax_device_get_time, do non-Tick I/O (phy attributes) and
+ * datax_sched_emit, and datax_internal_sched_pause (it only sets the flag).
+ * It must not block, and must not call wait, commit or flush (each returns
+ * -EDEADLK while this thread holds io) or destroy (a no-op while this
+ * thread holds io or is the poller; never call it from a hook), so
+ * anything it datax_sched_enqueue()s waits in the builder for the caller's
+ * next commit. Destroy also finishes every outstanding command FLUSHED
+ * through this hook, on the destroying thread.
  * For an unreported command it fires only on host-late, write failure or
  * flush (r is then informational; nothing is published).
  */
@@ -77,7 +82,8 @@ typedef void (*datax_sched_complete_fn)(struct datax_sched *s, long seq,
 					struct datax_sched_result *r, void *user);
 
 /* Per-iteration hook: after the drain and the feed, with the latest
- * hardware time observed. Same rules as datax_sched_complete_fn. */
+ * hardware time observed. Same rules as datax_sched_complete_fn (must not
+ * block; no wait, commit, flush or destroy). */
 typedef void (*datax_sched_poll_fn)(struct datax_sched *s, unsigned long long hw_now,
 				    void *user);
 
@@ -108,8 +114,27 @@ void datax_sched_emit(struct datax_sched *s, enum datax_event_type type,
 /* Deliver one event through the context callback now, on this thread. */
 void datax_event_fire(struct datax_context *ctx, const struct datax_event *evt);
 
-/* The device's scheduler, or NULL. */
+/* The device's scheduler, or NULL. Only valid while the caller knows no
+ * other thread can destroy it; to use it across blocking (taking its io
+ * lock), hold a reference: _get returns it with a reference (or NULL),
+ * _put drops it. Destroy waits for every reference before freeing. */
 struct datax_sched *datax_device_sched(const struct datax_device *dev);
+struct datax_sched *datax_device_sched_get(const struct datax_device *dev);
+void datax_sched_put(struct datax_sched *s);
+
+/*
+ * The io lock, with per-thread ownership tracking. Every holder pushes a
+ * stack node (h) so the library can tell whether the calling thread already
+ * holds s->io: then wait/commit/flush/pause return -EDEADLK instead of
+ * deadlocking, and get_time skips the lock. Unlock in LIFO order.
+ */
+struct datax_io_hold {
+	const struct datax_sched *s;
+	struct datax_io_hold *prev;
+};
+void datax_sched_io_lock(struct datax_sched *s, struct datax_io_hold *h);
+void datax_sched_io_unlock(struct datax_sched *s, struct datax_io_hold *h);
+bool datax_sched_holds_io(const struct datax_sched *s);
 
 /* ---- internals shared by sched.c and poller.c ---- */
 
@@ -147,7 +172,11 @@ struct datax_sched {
 	pthread_mutex_t io;
 	pthread_mutex_t lock;
 	pthread_cond_t wake;               /* poller: commit, unpause, stop, emit */
-	pthread_cond_t done;               /* waiters: a result was published */
+	pthread_cond_t done;               /* waiters: a result was published;
+					    * destroy: the last waiter left */
+	pthread_cond_t unref;              /* with ctx->lock: refs reached 0 */
+	unsigned int nwaiters;             /* threads inside wait() (s->lock) */
+	unsigned int refs;                 /* datax_device_sched_get refs (ctx->lock) */
 	pthread_t thread;
 	bool thread_started;
 	bool stop, paused, kick;

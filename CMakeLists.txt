@@ -31,7 +31,7 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_library(datax SHARED
+set(DATAX_SOURCES
   src/error.c
   src/version.c
   src/stubs.c
@@ -51,6 +51,9 @@ add_library(datax SHARED
   src/stream_status.c
   src/sched.c
   src/poller.c)
+# Tests that reach unexported internals compile DATAX_SOURCES themselves.
+list(TRANSFORM DATAX_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
+add_library(datax SHARED ${DATAX_SOURCES})
 target_include_directories(datax
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>

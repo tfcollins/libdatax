@@ -15,6 +15,7 @@
  */
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1023,6 +1024,108 @@ static void test_flush_completes_flushed(void)
 	printf("test_flush_completes_flushed: ok\n");
 }
 
+/* A thread blocked in wait() while another destroys the scheduler: the
+ * waiter returns -ECANCELED and destroy frees only after it has left
+ * (ASan/TSan). Looped to shake out the race. */
+struct waiter {
+	struct datax_sched *s;
+	long seq;
+	int timeout_ms;
+	int ret;
+};
+
+static void *waiter_main(void *arg)
+{
+	struct waiter *w = arg;
+	struct datax_completion c;
+
+	w->ret = datax_sched_wait(w->s, w->seq, w->timeout_ms, &c);
+	return NULL;
+}
+
+#define NWAITERS 16
+
+static void test_destroy_cancels_waiters(void)
+{
+	for (int i = 0; i < 50; i++) {
+		struct fx x;
+		struct waiter w[NWAITERS];
+		pthread_t th[NWAITERS];
+		unsigned long long t;
+		long r;
+
+		fx_open(&x, 0, true);
+		t = fake_tick_now(x.f);
+		r = gpio(&x, t + 1000 * MS, true);
+		CHECK(datax_sched_commit(x.s) == 0);
+		/* many waiters (one seq may have several), finite and infinite, so
+		 * some re-take the lock only after destroy would have freed it */
+		for (int k = 0; k < NWAITERS; k++) {
+			w[k].s = x.s;
+			w[k].seq = r;
+			w[k].timeout_ms = k % 4 == 0 ? 10000 : -1;
+			w[k].ret = 1;
+			CHECK(pthread_create(&th[k], NULL, waiter_main, &w[k]) == 0);
+		}
+		msleep(20);                       /* all blocked in wait() */
+		datax_sched_destroy(x.s);
+		x.s = NULL;
+		for (int k = 0; k < NWAITERS; k++) {
+			CHECK(pthread_join(th[k], NULL) == 0);
+			CHECK(w[k].ret == -ECANCELED);
+		}
+		fx_close(&x);
+	}
+	printf("test_destroy_cancels_waiters: ok\n");
+}
+
+/* get_time racing scheduler create/destroy: it holds a reference while it
+ * takes the scheduler's io lock, so destroy cannot free it underneath. */
+struct timer_arg {
+	struct datax_device *dev;
+	atomic_bool stop;
+	unsigned long n;
+};
+
+static void *timer_main(void *arg)
+{
+	struct timer_arg *a = arg;
+
+	while (!atomic_load(&a->stop)) {
+		unsigned long long ticks, hz;
+
+		CHECK(datax_device_get_time(a->dev, &ticks, &hz) == 0);
+		a->n++;
+	}
+	return NULL;
+}
+
+static void test_get_time_races_destroy(void)
+{
+	struct fx x;
+	struct timer_arg a;
+	pthread_t th;
+
+	fx_open(&x, 0, false);
+	a.dev = x.dev;
+	atomic_init(&a.stop, false);
+	a.n = 0;
+	CHECK(pthread_create(&th, NULL, timer_main, &a) == 0);
+	for (int i = 0; i < 50; i++) {
+		CHECK(datax_sched_create(x.dev, &x.s) == 0);
+		(void)gpio(&x, fake_tick_now(x.f) + 100 * MS, i % 2);
+		CHECK(datax_sched_commit(x.s) == 0);
+		usleep_((unsigned)(i % 5) * 300);
+		datax_sched_destroy(x.s);
+		x.s = NULL;
+	}
+	atomic_store(&a.stop, true);
+	CHECK(pthread_join(th, NULL) == 0);
+	CHECK(a.n > 0);
+	fx_close(&x);
+	printf("test_get_time_races_destroy: ok\n");
+}
+
 /* Destroying the scheduler or the whole context while the poller is mid-feed
  * or mid-drain joins the thread before anything is freed (ASan/valgrind). */
 static void test_destroy_while_polling(void)
@@ -1060,6 +1163,8 @@ int main(int argc, char **argv)
 
 	if (!strcmp(mode, "destroy")) {
 		test_destroy_while_polling();
+		test_destroy_cancels_waiters();
+		test_get_time_races_destroy();
 		return 0;
 	}
 	if (!strcmp(mode, "ad936x")) {
@@ -1073,6 +1178,8 @@ int main(int argc, char **argv)
 			{ "lost_report_dropped", test_lost_report_dropped },
 			{ "wait_in_callback_refused", test_wait_in_callback_refused },
 			{ "event_overflow_summarised", test_event_overflow_summarised },
+			{ "destroy_cancels_waiters", test_destroy_cancels_waiters },
+			{ "get_time_races_destroy", test_get_time_races_destroy },
 		};
 
 		for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
@@ -1103,6 +1210,8 @@ int main(int argc, char **argv)
 	test_reserved_gpio_bit(true);
 	test_flush_completes_flushed();
 	test_destroy_while_polling();
+	test_destroy_cancels_waiters();
+	test_get_time_races_destroy();
 	printf("test_sched: all ok\n");
 	return 0;
 }

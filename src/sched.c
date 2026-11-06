@@ -21,6 +21,8 @@
 #include "tick_ops.h"
 
 #define SEQ_MAX 0x7fffffffu      /* seqs are positive longs, never 0 */
+
+static int flush_outstanding(struct datax_sched *s, const char *detail);
 #define MARKER_LINES 8u          /* RTL parameter MARKER_COUNT default */
 
 /* ---- events ----------------------------------------------------------------- */
@@ -182,7 +184,11 @@ void datax_sched_format_desc(const struct sched_cmd *c, char *buf, size_t len)
 		.command_id = c->command_id,
 		.target_id = c->target_id,
 		.timestamp_ticks = c->hw_ts,
-		/* drop-on-late always; a completion only when reported */
+		/* Drop-on-late always; a completion only when reported. Never
+		 * REPEAT (later occurrences report another requested timestamp)
+		 * nor LATE_EXECUTE_NOW: poller.c process() matches a record to its
+		 * command by seq, command and requested == hw_ts, which holds only
+		 * for these one-shot, drop-on-late descriptors. */
 		.flags = DATAX_TICK_FLAG_LATE_DROP |
 			 (c->report ? DATAX_TICK_FLAG_REPORT_COMPLETION : 0),
 		.sequence_id = (uint32_t)c->seq,
@@ -218,6 +224,62 @@ struct datax_sched *datax_device_sched(const struct datax_device *dev)
 	return s;
 }
 
+struct datax_sched *datax_device_sched_get(const struct datax_device *dev)
+{
+	struct datax_sched *s;
+
+	if (!dev)
+		return NULL;
+	pthread_mutex_lock(&dev->ctx->lock);
+	s = dev->sched;
+	if (s)
+		s->refs++;
+	pthread_mutex_unlock(&dev->ctx->lock);
+	return s;
+}
+
+void datax_sched_put(struct datax_sched *s)
+{
+	if (!s)
+		return;
+	pthread_mutex_lock(&s->ctx->lock);
+	if (!--s->refs)
+		pthread_cond_broadcast(&s->unref);
+	pthread_mutex_unlock(&s->ctx->lock);
+}
+
+/* Per-thread stack of held io locks (C11 _Thread_local). */
+static _Thread_local struct datax_io_hold *io_held;
+
+void datax_sched_io_lock(struct datax_sched *s, struct datax_io_hold *h)
+{
+	pthread_mutex_lock(&s->io);
+	h->s = s;
+	h->prev = io_held;
+	io_held = h;
+}
+
+void datax_sched_io_unlock(struct datax_sched *s, struct datax_io_hold *h)
+{
+	io_held = h->prev;
+	pthread_mutex_unlock(&s->io);
+}
+
+bool datax_sched_holds_io(const struct datax_sched *s)
+{
+	for (const struct datax_io_hold *h = io_held; h; h = h->prev)
+		if (h->s == s)
+			return true;
+	return false;
+}
+
+static int io_busy(struct datax_sched *s, const char *verb)
+{
+	return datax_error_ret(s->ctx, EDEADLK, "sched",
+			       "%s from a scheduler hook (this thread holds the Tick I/O "
+			       "lock) would deadlock", verb);
+}
+
 static int init_sync(struct datax_sched *s)
 {
 	pthread_condattr_t ca;
@@ -240,6 +302,12 @@ static int init_sync(struct datax_sched *s)
 		pthread_mutex_destroy(&s->lock);
 		pthread_mutex_destroy(&s->io);
 	}
+	if (!ret && (ret = pthread_cond_init(&s->unref, NULL))) {
+		pthread_cond_destroy(&s->done);
+		pthread_cond_destroy(&s->wake);
+		pthread_mutex_destroy(&s->lock);
+		pthread_mutex_destroy(&s->io);
+	}
 	pthread_condattr_destroy(&ca);
 	return -ret;
 }
@@ -247,6 +315,7 @@ static int init_sync(struct datax_sched *s)
 static void free_sched(struct datax_sched *s, bool sync)
 {
 	if (sync) {
+		pthread_cond_destroy(&s->unref);
 		pthread_cond_destroy(&s->done);
 		pthread_cond_destroy(&s->wake);
 		pthread_mutex_destroy(&s->lock);
@@ -256,10 +325,14 @@ static void free_sched(struct datax_sched *s, bool sync)
 	free(s);
 }
 
-static void release_device(struct datax_device *dev)
+/* Unpublish s from dev, then wait until no datax_device_sched_get
+ * reference remains (s NULL: create failed before anyone could see it). */
+static void release_device(struct datax_device *dev, struct datax_sched *s)
 {
 	pthread_mutex_lock(&dev->ctx->lock);
 	dev->sched = NULL;
+	while (s && s->refs)
+		pthread_cond_wait(&s->unref, &dev->ctx->lock);
 	dev->caps.measured &= ~(1u << DATAX_LIMIT_REPORT_SPACING_US);
 	dev->caps.limits[DATAX_LIMIT_REPORT_SPACING_US] = 0;
 	pthread_mutex_unlock(&dev->ctx->lock);
@@ -302,16 +375,6 @@ int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
 	s = calloc(1, sizeof(*s));
 	if (!s)
 		return datax_error_ret(ctx, ENOMEM, "sched", "out of memory");
-	pthread_mutex_lock(&ctx->lock);
-	if (dev->sched) {
-		pthread_mutex_unlock(&ctx->lock);
-		free(s);
-		return datax_error_ret(ctx, EBUSY, "sched",
-				       "a scheduler already exists on this device");
-	}
-	dev->sched = s;   /* reserved: a concurrent create gets -EBUSY */
-	pthread_mutex_unlock(&ctx->lock);
-
 	s->dev = dev;
 	s->ctx = ctx;
 	s->poll_us = DATAX_SCHED_DEFAULT_POLL_US;
@@ -320,13 +383,23 @@ int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
 	s->reserved_mask = dev->family == DATAX_FAMILY_ADRV9009 ? 0x1u : 0u;
 	s->next_order = 1;
 	s->next_done = 1;
-
+	/* Locks first: once published, get_time may take a reference and io. */
 	ret = init_sync(s);
 	if (ret) {
-		datax_error_set(ctx, "sched", "sched_create: cannot initialise locks");
-		goto fail;
+		free(s);
+		return datax_error_ret(ctx, -ret, "sched", "sched_create: cannot initialise locks");
 	}
 	sync = true;
+	pthread_mutex_lock(&ctx->lock);
+	if (dev->sched) {
+		pthread_mutex_unlock(&ctx->lock);
+		free_sched(s, sync);
+		return datax_error_ret(ctx, EBUSY, "sched",
+				       "a scheduler already exists on this device");
+	}
+	dev->sched = s;   /* reserved: a concurrent create gets -EBUSY */
+	pthread_mutex_unlock(&ctx->lock);
+
 	ret = datax_tick_read_limits(dev, &s->tick_hz, &s->depth, NULL);
 	if (ret) {
 		datax_error_set(ctx, "sched", "sched_create: cannot read the Tick limits (%d)", ret);
@@ -376,17 +449,20 @@ int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
 	*out = s;
 	return 0;
 fail:
-	release_device(dev);
+	release_device(dev, s);
 	free_sched(s, sync);
 	return ret;
 }
 
 void datax_sched_destroy(struct datax_sched *s)
 {
+	struct datax_io_hold h;
+
 	if (!s)
 		return;
-	/* From an event callback (the poller thread): it cannot join itself. */
-	if (datax_poller_is_self(s))
+	/* From an event callback (the poller thread) it cannot join itself;
+	 * from a hook (io held) it would deadlock. */
+	if (datax_poller_is_self(s) || datax_sched_holds_io(s))
 		return;
 	/*
 	 * Leave Tick empty (it is exclusive, ruling 3). Descriptors left queued
@@ -396,15 +472,26 @@ void datax_sched_destroy(struct datax_sched *s)
 	 * Under io, after the current iteration; stop first so the poller does
 	 * no further I/O. Best effort: destroy cannot fail.
 	 */
-	pthread_mutex_lock(&s->io);
+	datax_sched_io_lock(s, &h);
 	pthread_mutex_lock(&s->lock);
 	s->stop = true;
+	pthread_cond_broadcast(&s->done);   /* waiters return -ECANCELED */
 	pthread_mutex_unlock(&s->lock);
 	(void)datax_tick_write_str(s->dev, "flush_queue", "1");
 	(void)datax_poller_clear_slot(s);
-	pthread_mutex_unlock(&s->io);
+	/* Every outstanding command ends FLUSHED through its hook (Task 4's
+	 * tune hooks keep state); on -ENOMEM they are dropped unfinished. */
+	pthread_mutex_lock(&s->lock);
+	(void)flush_outstanding(s, "flushed: scheduler destroyed");
+	pthread_mutex_unlock(&s->lock);
+	datax_sched_io_unlock(s, &h);
 	datax_poller_stop(s);
-	release_device(s->dev);
+	/* Woken waiters still hold s->lock briefly: let the last one leave. */
+	pthread_mutex_lock(&s->lock);
+	while (s->nwaiters)
+		pthread_cond_wait(&s->done, &s->lock);
+	pthread_mutex_unlock(&s->lock);
+	release_device(s->dev, s);
 	free_sched(s, true);
 }
 
@@ -561,12 +648,15 @@ int datax_sched_commit(struct datax_sched *s)
 {
 	unsigned long long now;
 	struct rep_ts *r = NULL;
+	struct datax_io_hold h;
 	size_t nb = 0, nr = 0;
 	int ret;
 
 	if (!s)
 		return -EINVAL;
-	pthread_mutex_lock(&s->io);
+	if (datax_sched_holds_io(s))
+		return io_busy(s, "commit");
+	datax_sched_io_lock(s, &h);
 	ret = datax_tick_read_u64(s->dev, "current_time_ticks", &now);
 	pthread_mutex_lock(&s->lock);
 	for (size_t i = 0; i < s->ncmds; i++)
@@ -627,45 +717,25 @@ int datax_sched_commit(struct datax_sched *s)
 	pthread_cond_signal(&s->wake);
 out:
 	pthread_mutex_unlock(&s->lock);
-	pthread_mutex_unlock(&s->io);
+	datax_sched_io_unlock(s, &h);
 	free(r);
 	return nb ? ret : 0;
 }
 
 /* ---- flush -------------------------------------------------------------------- */
 
-int datax_sched_flush(struct datax_sched *s)
+/* Finish every command not yet complete, as of now, FLUSHED through the
+ * normal path (hooks run, waiters wake). A hook may enqueue more: those
+ * stay queued. io and s->lock held. 0 or -ENOMEM. */
+static int flush_outstanding(struct datax_sched *s, const char *detail)
 {
 	struct sched_cmd *c;
 	long *seqs;
 	size_t n = 0;
-	int ret;
 
-	if (!s)
-		return -EINVAL;
-	pthread_mutex_lock(&s->io);
-	/* Keep what already ran, empty the queue, then keep what ran between
-	 * the drain and the flush. */
-	ret = datax_poller_read_time(s);
-	if (!ret)
-		ret = datax_poller_drain(s);
-	if (!ret)
-		ret = datax_tick_write_str(s->dev, "flush_queue", "1");
-	if (!ret)
-		ret = datax_poller_drain(s);
-	if (ret) {
-		pthread_mutex_unlock(&s->io);
-		return datax_error_ret(s->ctx, -ret, "sched", "flush: Tick access failed (%d)", ret);
-	}
-	pthread_mutex_lock(&s->lock);
-	/* Everything not yet complete, as of now (a hook may enqueue more:
-	 * those stay queued). */
 	seqs = malloc((s->ncmds ? s->ncmds : 1) * sizeof(*seqs));
-	if (!seqs) {
-		pthread_mutex_unlock(&s->lock);
-		pthread_mutex_unlock(&s->io);
-		return datax_error_ret(s->ctx, ENOMEM, "sched", "out of memory");
-	}
+	if (!seqs)
+		return -ENOMEM;
 	for (size_t i = 0; i < s->ncmds; i++)
 		if (s->cmds[i].state != CMD_DONE)
 			seqs[n++] = s->cmds[i].seq;
@@ -679,15 +749,43 @@ int datax_sched_flush(struct datax_sched *s)
 		if (!c || c->state == CMD_DONE)
 			continue;
 		res.requested_ticks = c->api_ts;
-		snprintf(res.detail, sizeof(res.detail), "flushed");
+		snprintf(res.detail, sizeof(res.detail), "%s", detail);
 		datax_sched_finish(s, c, &res);
 	}
 	free(seqs);
+	return 0;
+}
+
+int datax_sched_flush(struct datax_sched *s)
+{
+	struct datax_io_hold h;
+	int ret;
+
+	if (!s)
+		return -EINVAL;
+	if (datax_sched_holds_io(s))
+		return io_busy(s, "flush");
+	datax_sched_io_lock(s, &h);
+	/* Keep what already ran, empty the queue, then keep what ran between
+	 * the drain and the flush. */
+	ret = datax_poller_read_time(s);
+	if (!ret)
+		ret = datax_poller_drain(s);
+	if (!ret)
+		ret = datax_tick_write_str(s->dev, "flush_queue", "1");
+	if (!ret)
+		ret = datax_poller_drain(s);
+	if (ret) {
+		datax_sched_io_unlock(s, &h);
+		return datax_error_ret(s->ctx, -ret, "sched", "flush: Tick access failed (%d)", ret);
+	}
+	pthread_mutex_lock(&s->lock);
+	ret = flush_outstanding(s, "flushed");
 	s->kick = true;            /* deliver what the drains queued */
 	pthread_cond_signal(&s->wake);
 	pthread_mutex_unlock(&s->lock);
-	pthread_mutex_unlock(&s->io);
-	return 0;
+	datax_sched_io_unlock(s, &h);
+	return ret ? datax_error_ret(s->ctx, -ret, "sched", "out of memory") : 0;
 }
 
 /* ---- results ------------------------------------------------------------------ */
@@ -719,9 +817,19 @@ static bool passed(const struct timespec *dl)
 	return now.tv_sec > dl->tv_sec || (now.tv_sec == dl->tv_sec && now.tv_nsec >= dl->tv_nsec);
 }
 
+/* Leave wait(): the last waiter out of a stopping scheduler lets destroy
+ * free it. s->lock held; s must not be touched after the unlock. */
+static void wait_leave(struct datax_sched *s)
+{
+	if (!--s->nwaiters && s->stop)
+		pthread_cond_broadcast(&s->done);
+	pthread_mutex_unlock(&s->lock);
+}
+
 int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 		     struct datax_completion *out)
 {
+	struct datax_context *ctx;
 	struct sched_cmd *c;
 	struct timespec dl;
 	char detail[DATAX_SCHED_DETAIL_LEN];
@@ -729,48 +837,62 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 
 	if (!s)
 		return -EINVAL;
+	/* After wait_leave, s may already be freed by a concurrent destroy:
+	 * only the context (which outlives its schedulers) is used. */
+	ctx = s->ctx;
 	if (!out)
-		return datax_error_ret(s->ctx, EINVAL, "sched", "wait: NULL output");
+		return datax_error_ret(ctx, EINVAL, "sched", "wait: NULL output");
 	/* On the poller thread (an event callback) a wait would stall or
-	 * deadlock the thread that produces completions. */
+	 * deadlock the thread that produces completions; from a hook (this
+	 * thread holds io) the poller could never drain. */
 	if (datax_poller_is_self(s))
-		return datax_error_ret(s->ctx, EDEADLK, "sched",
+		return datax_error_ret(ctx, EDEADLK, "sched",
 				       "wait from an event callback (the poller thread) would "
 				       "block it; use get_completions");
+	if (datax_sched_holds_io(s))
+		return io_busy(s, "wait");
 	if (timeout_ms >= 0)
 		deadline_after(&dl, timeout_ms);
 	pthread_mutex_lock(&s->lock);
+	if (s->stop) {
+		pthread_mutex_unlock(&s->lock);
+		return datax_error_ret(ctx, ECANCELED, "sched",
+				       "wait: the scheduler is being destroyed");
+	}
 	c = datax_sched_find(s, seq);
 	if (!c) {
 		pthread_mutex_unlock(&s->lock);
-		return datax_error_ret(s->ctx, EINVAL, "sched",
+		return datax_error_ret(ctx, EINVAL, "sched",
 				       "wait: seq %ld is unknown or already consumed", seq);
 	}
 	if (!c->report) {
 		pthread_mutex_unlock(&s->lock);
-		return datax_error_ret(s->ctx, EINVAL, "sched",
+		return datax_error_ret(ctx, EINVAL, "sched",
 				       "wait: seq %ld was not reported (datax_sched_report)", seq);
 	}
+	s->nwaiters++;
 	for (;;) {
+		/* destroy first: it also finishes outstanding commands FLUSHED,
+		 * but a waiter it interrupts reports the cancellation */
+		if (s->stop) {
+			wait_leave(s);
+			return datax_error_ret(ctx, ECANCELED, "sched",
+					       "wait: the scheduler is being destroyed");
+		}
 		c = datax_sched_find(s, seq);
 		if (!c) {           /* consumed by get_completions meanwhile */
-			pthread_mutex_unlock(&s->lock);
-			return datax_error_ret(s->ctx, EINVAL, "sched",
+			wait_leave(s);
+			return datax_error_ret(ctx, EINVAL, "sched",
 					       "wait: seq %ld was consumed", seq);
 		}
 		if (c->state == CMD_DONE)
 			break;
-		if (s->stop) {      /* destroy is joining the poller */
-			pthread_mutex_unlock(&s->lock);
-			return datax_error_ret(s->ctx, ECANCELED, "sched",
-					       "wait: the scheduler is being destroyed");
-		}
 		/* A proven loss is already DONE (DROPPED, poller.c finish_lost);
 		 * anything else at the deadline is not yet known (ruling). */
 		if (timeout_ms >= 0 && passed(&dl)) {
 			st = c->state;
-			pthread_mutex_unlock(&s->lock);
-			return datax_error_ret(s->ctx, ETIMEDOUT, "sched",
+			wait_leave(s);
+			return datax_error_ret(ctx, ETIMEDOUT, "sched",
 					       "wait: seq %ld has not completed in %d ms (%s)", seq,
 					       timeout_ms, st == CMD_BUILD ? "not committed" :
 					       st == CMD_PENDING ? "not yet written" :
@@ -784,10 +906,10 @@ int datax_sched_wait(struct datax_sched *s, long seq, int timeout_ms,
 	fill(out, c);
 	snprintf(detail, sizeof(detail), "%s", c->res.detail);
 	datax_sched_remove(s, c);
-	pthread_mutex_unlock(&s->lock);
+	wait_leave(s);
 	/* Ruling 4: a non-OK completion's detail travels in the last error. */
 	if (out->status != DATAX_COMPLETION_OK)
-		datax_error_set(s->ctx, "sched", "seq %ld: %s", seq, detail);
+		datax_error_set(ctx, "sched", "seq %ld: %s", seq, detail);
 	return 0;
 }
 
@@ -822,14 +944,18 @@ int datax_sched_get_completions(struct datax_sched *s, struct datax_completion *
 
 int datax_internal_sched_pause(struct datax_sched *s, bool pause)
 {
+	struct datax_io_hold h;
 	bool self;
 
 	if (!s)
 		return -EINVAL;
-	/* From a callback the poller holds no lock, and it is between I/O. */
-	self = datax_poller_is_self(s);
+	/* This thread holds io (a hook, or a seam access inside an iteration):
+	 * no iteration of another thread is in progress, so just set the flag.
+	 * The same from an event callback: the poller holds no lock and is
+	 * between I/O. Otherwise wait for the current iteration to end. */
+	self = datax_poller_is_self(s) || datax_sched_holds_io(s);
 	if (!self)
-		pthread_mutex_lock(&s->io);
+		datax_sched_io_lock(s, &h);
 	pthread_mutex_lock(&s->lock);
 	s->paused = pause;
 	if (!pause) {
@@ -838,7 +964,7 @@ int datax_internal_sched_pause(struct datax_sched *s, bool pause)
 	}
 	pthread_mutex_unlock(&s->lock);
 	if (!self)
-		pthread_mutex_unlock(&s->io);
+		datax_sched_io_unlock(s, &h);
 	return 0;
 }
 

@@ -293,6 +293,21 @@ if(DATAX_LIBIIO_BUILD)
       ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
       TIMEOUT 120)
   endforeach()
+  # The internal hook contract (src/scheduler.h) for Task 4: compiled from
+  # the library sources, since the hooks and datax_sched_enqueue are not
+  # exported.
+  add_executable(test_sched_hooks test_sched_hooks.c ${DATAX_SOURCES})
+  target_link_libraries(test_sched_hooks PRIVATE iio_dep datax_fake_tick Threads::Threads)
+  target_include_directories(test_sched_hooks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
+  target_compile_options(test_sched_hooks PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_sched_hooks PRIVATE _POSIX_C_SOURCE=200809L)
+  add_test(NAME test_sched_hooks
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_sched_hooks>)
+  set_tests_properties(test_sched_hooks PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 120)
   # Destroying the scheduler or context while the poller is mid-I/O must join
   # it before anything is freed: valgrind when it is on PATH.
   if(VALGRIND)

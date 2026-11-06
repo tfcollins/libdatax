@@ -465,12 +465,13 @@ static void iterate(struct datax_sched *s)
 	void *user = NULL;
 	unsigned long long now = 0;
 	bool active, counters;
+	struct datax_io_hold h;
 
-	pthread_mutex_lock(&s->io);
+	datax_sched_io_lock(s, &h);
 	pthread_mutex_lock(&s->lock);
 	if (s->paused || s->stop) {
 		pthread_mutex_unlock(&s->lock);
-		pthread_mutex_unlock(&s->io);
+		datax_sched_io_unlock(s, &h);
 		datax_poller_deliver(s);
 		return;
 	}
@@ -491,7 +492,7 @@ static void iterate(struct datax_sched *s)
 		if (fn)
 			fn(s, now, user);
 	}
-	pthread_mutex_unlock(&s->io);
+	datax_sched_io_unlock(s, &h);
 	datax_poller_deliver(s);
 }
 

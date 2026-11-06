@@ -81,6 +81,35 @@ def _git_head():
         return "unknown"
 
 
+def _loaded_library():
+    """Resolved path of the libdatax.so this process loaded."""
+    try:
+        for line in Path("/proc/self/maps").read_text().splitlines():
+            path = line.split(None, 5)[-1] if len(line.split(None, 5)) == 6 else ""
+            if Path(path).name.startswith("libdatax.so"):
+                return str(Path(path).resolve())
+    except Exception:
+        pass
+    try:
+        from datax._lib import get_lib
+        return str(Path(get_lib()._name).resolve())
+    except Exception:
+        return "unknown"
+
+
+def _provenance(ev, ctx=None):
+    try:
+        import datax
+        ev["datax_module"] = str(Path(datax.__file__).resolve())
+    except Exception:
+        ev["datax_module"] = "unknown"
+    ev["libdatax_library"] = _loaded_library()
+    try:
+        ev["libdatax_version"] = "%d.%d" % ctx.version if ctx is not None else "unknown"
+    except Exception:
+        ev["libdatax_version"] = "unknown"
+
+
 @pytest.fixture(scope="session")
 def evidence():
     """Session dict written as JSON at the end of the run."""
@@ -105,6 +134,7 @@ def hw_ctx(evidence):
     import datax
     ctx = datax.Context(uri)
     evidence["uri"] = lb.redact_uri(uri)
+    _provenance(evidence, ctx)
     try:
         evidence["iio_context"] = lb.context_info(ctx)
     except Exception as e:  # evidence only: never block the run on it

@@ -1,0 +1,101 @@
+# Hardware suite (tests/hardware) on real boards. workflow_dispatch only.
+#
+# No self-hosted runners are registered for this public repository yet
+# (deliberate: a public repo must not run untrusted code on lab machines), so
+# this workflow has not run in CI. The P2 evidence in docs/evidence/p2 came
+# from controller-run sessions with the same suite.
+#
+# Runner labels: hw-bq (ADRV9361-Z7035), hw-nemo (ADRV9009-ZU11EG).
+# Repository variables: DATAX_HW_URI_LABLP, DATAX_HW_URI_TRON (libiio URIs).
+name: hw-test
+on:
+  workflow_dispatch:
+    inputs:
+      place:
+        description: Board to test
+        type: choice
+        options: [lablp, tron, both]
+        default: both
+permissions:
+  contents: read
+
+jobs:
+  lablp:
+    if: inputs.place == 'lablp' || inputs.place == 'both'
+    runs-on: [self-hosted, hw-bq]
+    timeout-minutes: 30
+    env:
+      DATAX_HW_URI: ${{ vars.DATAX_HW_URI_LABLP }}
+      DATAX_HW_REQUIRE: "1"
+      DATAX_HW_EVIDENCE: ${{ github.workspace }}/evidence-lablp.json
+      DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
+    steps:
+      - uses: actions/checkout@v4
+      # Prerequisite, not implemented here: boot/reserve via labgrid on the runner host; see docs/hardware.md
+      - name: Build the pinned libiio v1
+        run: |
+          rev=$(jq -r .libiio.revision pins.json)
+          git clone --filter=blob:none https://github.com/tfcollins/libiio libiio
+          git -C libiio checkout "$rev"
+          cmake -S libiio -B libiio/build -DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON \
+            -DWITH_TESTS=OFF -DWITH_DOC=OFF -DWITH_USB_BACKEND=OFF \
+            -DWITH_SERIAL_BACKEND=OFF -DHAVE_DNS_SD=OFF -DWITH_EXAMPLES=OFF
+          cmake --build libiio/build -j"$(nproc)"
+      - name: Build libdatax
+        run: |
+          cmake -S . -B build -DDATAX_LIBIIO_SOURCE=libiio -DDATAX_LIBIIO_BUILD=libiio/build
+          cmake --build build -j"$(nproc)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python package
+        run: pip install -e . numpy pytest
+      - name: Hardware suite
+        run: python -m pytest tests/hardware -v --junitxml=junit-lablp.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hw-lablp
+          path: |
+            junit-lablp.xml
+            evidence-lablp.json
+
+  tron:
+    if: inputs.place == 'tron' || inputs.place == 'both'
+    runs-on: [self-hosted, hw-nemo]
+    timeout-minutes: 30
+    env:
+      DATAX_HW_URI: ${{ vars.DATAX_HW_URI_TRON }}
+      DATAX_HW_REQUIRE: "1"
+      DATAX_HW_EVIDENCE: ${{ github.workspace }}/evidence-tron.json
+      DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
+    steps:
+      - uses: actions/checkout@v4
+      # Prerequisite, not implemented here: boot/reserve via labgrid on the runner host; see docs/hardware.md
+      - name: Build the pinned libiio v1
+        run: |
+          rev=$(jq -r .libiio.revision pins.json)
+          git clone --filter=blob:none https://github.com/tfcollins/libiio libiio
+          git -C libiio checkout "$rev"
+          cmake -S libiio -B libiio/build -DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON \
+            -DWITH_TESTS=OFF -DWITH_DOC=OFF -DWITH_USB_BACKEND=OFF \
+            -DWITH_SERIAL_BACKEND=OFF -DHAVE_DNS_SD=OFF -DWITH_EXAMPLES=OFF
+          cmake --build libiio/build -j"$(nproc)"
+      - name: Build libdatax
+        run: |
+          cmake -S . -B build -DDATAX_LIBIIO_SOURCE=libiio -DDATAX_LIBIIO_BUILD=libiio/build
+          cmake --build build -j"$(nproc)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python package
+        run: pip install -e . numpy pytest
+      - name: Hardware suite
+        run: python -m pytest tests/hardware -v --junitxml=junit-tron.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hw-tron
+          path: |
+            junit-tron.xml
+            evidence-tron.json

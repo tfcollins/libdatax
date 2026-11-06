@@ -7,8 +7,32 @@ DataX SDR SDK core: a small, timed-SDR C API with Python bindings over
 libiio v1, Tick and vrt49. Specification and roadmap:
 <https://tfcollins.github.io/datax_sdk_sdr/>.
 
-Status: P1 skeleton in progress (context, device, capabilities, Tick time,
-Python package). Streams and the scheduler arrive in P2/P3.
+Status: P1 (context, device, capabilities, Tick time, Python package) and
+P2 (immediate RX/TX streaming, validated on two boards) are done. Timed
+streams and the scheduler arrive in P3.
+
+## Streaming quick start
+
+C (error handling omitted):
+
+    struct datax_stream *rx;
+    struct datax_stream_config c = { .direction = DATAX_RX, .channel_mask = 0x3,
+                                     .block_samples = 4096, .block_count = 4 };
+    struct datax_block_info info;
+    int16_t buf[2 * 2 * 4096];              /* I/Q int16, per enabled channel */
+    datax_stream_create(dev, &c, &rx);
+    datax_stream_start(rx);
+    datax_stream_recv(rx, buf, 4096, &info, 1000 /* ms */);
+    datax_stream_stop(rx);
+    datax_stream_destroy(rx);
+
+Python:
+
+    with dev.rx_stream(channels=(0,)) as rx:
+        samples, info = rx.recv()
+
+Running the suite on a board: [docs/hardware.md](docs/hardware.md). Recorded
+P2 hardware evidence: [docs/evidence/p2](docs/evidence/p2/README.md).
 
 ## Build
 

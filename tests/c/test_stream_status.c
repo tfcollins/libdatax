@@ -197,6 +197,28 @@ static void test_discontinuous_flag(void)
 	datax_context_destroy(ctx);
 }
 
+/* A flag left pending when the stream stops does not mark the first block
+ * after a restart. */
+static void test_restart_clears_pending_discontinuity(void)
+{
+	struct datax_device *dev = NULL;
+	struct datax_context *ctx = open_ctx(&dev);
+	struct datax_stream *s = NULL;
+	struct datax_stream_config c = cfg(DATAX_RX);
+	struct datax_block_info info;
+	static int16_t buf[2 * 1024];
+
+	CHECK(datax_stream_create(dev, &c, &s) == 0);
+	CHECK(datax_stream_start(s) == 0);
+	s->disc_pending = true;
+	CHECK(datax_stream_stop(s) == 0);
+	CHECK(datax_stream_start(s) == 0);
+	CHECK(datax_stream_recv(s, buf, 1024, &info, 1000) == 1024);
+	CHECK(!info.discontinuous);
+	datax_stream_destroy(s);
+	datax_context_destroy(ctx);
+}
+
 /* A poll that saw the overflow but failed to clear it still counts it. The
  * emulator cannot fail a write or raise a flag, so the poll's outcome is fed
  * to the fold step directly. */
@@ -285,6 +307,7 @@ int main(void)
 		test_poll_sequence();
 		test_poll_rate_limited();
 		test_discontinuous_flag();
+		test_restart_clears_pending_discontinuity();
 		test_seen_overflow_survives_failed_clear();
 		test_stream_info();
 	} else if (!strcmp(mode, "noattr")) {

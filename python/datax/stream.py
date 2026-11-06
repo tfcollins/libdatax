@@ -107,7 +107,11 @@ class _Stream:
 
     def close(self):
         """Stop and destroy. Idempotent; a drain failure is raised after the
-        stream has been destroyed."""
+        stream has been destroyed.
+
+        Draining can block up to one context timeout per stalled operation;
+        ``__del__`` (which destroys without reporting a drain result) has the
+        same bound."""
         if self._h is None:
             return
         err = None

@@ -15,10 +15,16 @@
       }
     },
     "adrv9361-z7035": {
-      "features": {"streaming-rx": {"status": "planned", "note": "P2"}}
+      "features": {
+        "streaming-rx": {"status": "validated", "tier": 2, "workflow": "hw-test.yml", "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md", "note": "stock Kuiper 2023_R2; digital loopback bit-exact (TX>>4)"},
+        "streaming-tx": {"status": "validated", "tier": 2, "workflow": "hw-test.yml", "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md", "note": "stock Kuiper 2023_R2; digital loopback bit-exact (TX>>4)"}
+      }
     },
     "adrv9009-zu11eg": {
-      "features": {"streaming-rx": {"status": "planned", "note": "P2"}}
+      "features": {
+        "streaming-rx": {"status": "validated", "tier": 2, "workflow": "hw-test.yml", "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md", "note": "PL: HDL main 085a6ed7 build with stock 2023_R2 kernel/DTB; digital loopback bit-exact (I/Q exchanged)"},
+        "streaming-tx": {"status": "validated", "tier": 2, "workflow": "hw-test.yml", "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md", "note": "PL: HDL main 085a6ed7 build with stock 2023_R2 kernel/DTB; digital loopback bit-exact (I/Q exchanged)"}
+      }
     }
   }
 }

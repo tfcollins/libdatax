@@ -319,6 +319,15 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_fhm PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # The opt-in FHM trace: off by default, one line per event with
+  # DATAX_TRACE=fhm (hardware diagnosis of stage-late tunes).
+  add_test(NAME test_fhm_trace
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml
+            ${CMAKE_CURRENT_SOURCE_DIR}/trace_fhm.sh $<TARGET_FILE:test_fhm>)
+  set_tests_properties(test_fhm_trace PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 120)
   # The internal hook contract (src/scheduler.h) for Task 4: compiled from
   # the library sources, since the hooks and datax_sched_enqueue are not
   # exported.

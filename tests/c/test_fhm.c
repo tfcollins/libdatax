@@ -16,6 +16,7 @@
  */
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,13 @@
 #include "fake_tick.h"
 #include "internal.h"      /* dev->single_chip_tuned (Task 5 reads it) */
 #include "tick_descriptor.h"
+
+static void usleep_(unsigned int us)
+{
+	struct timespec ts = { us / 1000000, (long)(us % 1000000) * 1000L };
+
+	nanosleep(&ts, NULL);
+}
 
 #define HZ        100000000ULL
 #define MS        (HZ / 1000)
@@ -58,6 +66,7 @@ struct fshim {
 	unsigned long long stall_hz;    /* one-shot: stall the write staging this */
 	unsigned long long stall_ticks;
 	bool enable_reads_zero;         /* the driver swallowed the enable */
+	unsigned int sleep_us;          /* real latency per access (repro mode) */
 	unsigned int enable_writes[2];  /* writes of 0 and 1 */
 };
 
@@ -65,6 +74,8 @@ static int fshim_read(void *h, const char *attr, char *buf, size_t len)
 {
 	struct fshim *sh = h;
 
+	if (sh->sleep_us)
+		usleep_(sh->sleep_us);
 	if (sh->enable_reads_zero && !strcmp(attr, "frequency_hopping_mode_enable"))
 		return snprintf(buf, len, "0\n");
 	return fake_fhm_read(sh->m, attr, buf, len);
@@ -76,6 +87,8 @@ static int fshim_write(void *h, const char *attr, const char *val)
 	unsigned long long v = strtoull(val, NULL, 10), stall = 0;
 	int ret;
 
+	if (sh->sleep_us)
+		usleep_(sh->sleep_us);
 	if (!strcmp(attr, "frequency_hopping_mode_enable")) {
 		pthread_mutex_lock(&sh->mu);
 		sh->enable_writes[v ? 1 : 0]++;
@@ -111,13 +124,18 @@ struct tshim {
 	struct fake_tick *f;
 	pthread_mutex_t mu;
 	unsigned int ndesc, fail_at;     /* 1-based; 0 never */
+	unsigned int sleep_us;           /* real latency per access (repro mode) */
 	unsigned int stall_at;           /* before forwarding this one ... */
 	unsigned long long stall_to;     /* ... advance the clock to here */
 };
 
 static int tshim_read(void *h, const char *attr, char *buf, size_t len)
 {
-	return fake_tick_read(((struct tshim *)h)->f, attr, buf, len);
+	struct tshim *sh = h;
+
+	if (sh->sleep_us)
+		usleep_(sh->sleep_us);
+	return fake_tick_read(sh->f, attr, buf, len);
 }
 
 static int tshim_write(void *h, const char *attr, const char *val)
@@ -126,6 +144,8 @@ static int tshim_write(void *h, const char *attr, const char *val)
 	bool fail = false;
 	unsigned long long to = 0;
 
+	if (sh->sleep_us)
+		usleep_(sh->sleep_us);
 	if (!strcmp(attr, "command_descriptor")) {
 		pthread_mutex_lock(&sh->mu);
 		fail = ++sh->ndesc == sh->fail_at;
@@ -1251,6 +1271,104 @@ static void test_teardown_flush_is_silent(void)
 	printf("test_teardown_flush_is_silent: ok\n");
 }
 
+/* ---- repro mode: tron-like timing (not part of the default run) -------------- */
+
+/*
+ * The fake clock normally moves only when a test advances it, so the poller
+ * always has time between edges. Here a thread advances it at wall-clock
+ * rate, and both shims sleep per access (the tron round trips: about 0.2 ms
+ * per Tick attribute, about 0.46 ms per FHM staging write), so the poller's
+ * real latency decides whether a staging write lands before its edge.
+ */
+struct rtclock {
+	struct fake_tick *f;
+	atomic_bool stop;
+	pthread_t th;
+};
+
+static void *rtclock_main(void *arg)
+{
+	struct rtclock *c = arg;
+	unsigned long long t0 = 0, last;
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	last = (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
+	(void)t0;
+	while (!atomic_load(&c->stop)) {
+		unsigned long long now;
+
+		usleep_(20);
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		now = (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
+		fake_tick_advance(c->f, (now - last) * HZ / 1000000000ULL);
+		last = now;
+	}
+	return NULL;
+}
+
+/* n reported tunes `apart` ticks apart, the first `lead` ahead; returns the
+ * number completing LATE "stage late" and prints each outcome. */
+static unsigned int repro_run(unsigned int n, unsigned long long first, unsigned long long apart)
+{
+	static const unsigned long long plan[4] = { 2420000000ULL, 2440000000ULL,
+						    2460000000ULL, 2480000000ULL };
+	struct fx x;
+	struct rtclock clk;
+	unsigned long long t, v = 0;
+	unsigned int late = 0;
+	long seq[16];
+
+	CHECK(n <= 16);
+	fx_open(&x, false);
+	x.tsh.sleep_us = 200;
+	x.sh.sleep_us = 460;
+	clk.f = x.f;
+	atomic_init(&clk.stop, false);
+	CHECK(pthread_create(&clk.th, NULL, rtclock_main, &clk) == 0);
+	CHECK(datax_sched_create(x.dev, &x.s) == 0);
+	CHECK(datax_device_stage_hop_table(x.dev, plan, 4) == 0);
+	CHECK(datax_caps_get_limit(datax_device_get_caps(x.dev), DATAX_LIMIT_HOP_STAGE_US, &v) == 0);
+	printf("repro: hop_stage_us %llu", v);
+	CHECK(datax_caps_get_limit(datax_device_get_caps(x.dev), DATAX_LIMIT_REPORT_SPACING_US,
+				   &v) == 0);
+	printf(", report_spacing_us %llu\n", v);
+	t = now(&x) + first;
+	for (unsigned int i = 0; i < n; i++) {
+		seq[i] = datax_sched_queue_tune(x.s, t + i * apart, 0, plan[i % 4]);
+		CHECK(seq[i] > 0);
+	}
+	CHECK(datax_sched_commit(x.s) == 0);
+	for (unsigned int i = 0; i < n; i++) {
+		struct datax_completion c;
+		int ret = datax_sched_wait(x.s, seq[i], 5000, &c);
+
+		printf("repro: tune %u seq %ld: ret %d status %d %s\n", i + 1, seq[i], ret,
+		       ret ? -1 : (int)c.status,
+		       ret || c.status == DATAX_COMPLETION_OK ? "" : lasterr(&x));
+		late += !ret && c.status == DATAX_COMPLETION_LATE && strstr(lasterr(&x), "stage late");
+	}
+	atomic_store(&clk.stop, true);
+	pthread_join(clk.th, NULL);
+	fx_close(&x);
+	return late;
+}
+
+static void test_repro_hop_schedule(void)
+{
+	unsigned int late = repro_run(4, 200 * MS, 200 * MS);
+
+	printf("repro_hop_schedule: %u of 4 stage late\n", late);
+}
+
+static void test_repro_dense(void)
+{
+	/* 2 x the measured report spacing (about 5.4 ms here) */
+	unsigned int late = repro_run(12, 200 * MS, 11 * MS);
+
+	printf("repro_dense: %u of 12 stage late\n", late);
+}
+
 int main(int argc, char **argv)
 {
 	static const struct { const char *name; void (*fn)(void); } t[] = {
@@ -1278,6 +1396,13 @@ int main(int argc, char **argv)
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },
 	};
 
+	/* Repro mode (not in the default run): tron-like timing with a
+	 * wall-clock fake and per-access latency. Reports, does not assert. */
+	if (argc > 1 && !strcmp(argv[1], "repro")) {
+		test_repro_hop_schedule();
+		test_repro_dense();
+		return 0;
+	}
 	for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
 		if (argc > 2 && !strcmp(argv[1], "one") && strcmp(argv[2], t[i].name))
 			continue;

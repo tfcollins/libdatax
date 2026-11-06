@@ -48,6 +48,7 @@
  */
 #include <errno.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,8 @@ struct fhm_edge {
 	int stage_err;             /* the staging write failed */
 	long fall_seq;             /* the fall ending this pulse */
 	unsigned long long pulse;  /* rise to fall, API ticks */
+	unsigned int num;          /* edge number since FHM was (re)enabled (trace) */
+	bool hold_traced;          /* trace: its first staging hold was logged */
 };
 
 struct datax_fhm {
@@ -111,7 +114,55 @@ struct datax_fhm {
 	bool enabled;                  /* this context enabled FHM: disable at teardown */
 	struct fhm_edge *e;            /* edges in time order */
 	size_t n, cap;
+	unsigned int next_num;         /* trace: E0 is the first edge after enabling */
 };
+
+/* ---- opt-in trace (DATAX_TRACE=fhm, a comma list) ------------------------------ */
+
+/*
+ * One stderr line per pipeline event, prefixed "datax-fhm:", for hardware
+ * diagnosis. Off unless DATAX_TRACE names "fhm" (read once). Times are
+ * hardware ticks; "mono" is host CLOCK_MONOTONIC in microseconds. The trace
+ * does no extra Tick or phy I/O: "start" is the device-time estimate (last
+ * read plus host time since), "end" the read that follows the write anyway.
+ */
+static _Atomic int trace_state = -1;   /* first callers may race: same answer */
+
+static bool tracing(void)
+{
+	if (atomic_load(&trace_state) < 0) {
+		const char *v = getenv("DATAX_TRACE");
+		int on = 0;
+
+		if (v) {
+			const char *p = strstr(v, "fhm");
+
+			on = p && (p == v || p[-1] == ',') && (p[3] == '\0' || p[3] == ',');
+		}
+		atomic_store(&trace_state, on);
+	}
+	return atomic_load(&trace_state) == 1;
+}
+
+static void __attribute__((format(printf, 1, 2))) trace(const char *fmt, ...)
+{
+	char line[512];
+	va_list ap;
+	int n;
+
+	if (!tracing())
+		return;
+	n = snprintf(line, sizeof(line), "datax-fhm: mono=%llu ", datax_mono_ns() / 1000ULL);
+	va_start(ap, fmt);
+	vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "%s\n", line);
+}
+
+static const char *st_name(int st)
+{
+	return st == 0 ? "live" : st == 1 ? "fired" : "noedge";
+}
 
 /* ---- the phy seam ------------------------------------------------------------- */
 
@@ -307,6 +358,7 @@ static unsigned long long last_hw(struct datax_sched *s)
 static void set_late(struct datax_sched *s, struct fhm_edge *e)
 {
 	e->late = true;
+	trace("late E%u seq=%ld hw=%llu reported=%d", e->num, e->seq, edge_hw(s, e), e->reported);
 	/* A reported tune's LATE result raises the event in datax_sched_finish;
 	 * an unreported one never reaches it. */
 	if (!e->reported)
@@ -322,12 +374,14 @@ static void emit_unreported(struct datax_sched *s, const struct fhm_edge *e, con
 				 "seq %ld: %s", e->seq, what);
 }
 
-static void on_fired(struct datax_sched *s, struct fhm_edge *e)
+static void on_fired(struct datax_sched *s, struct fhm_edge *e, const char *via)
 {
 	struct datax_device *dev = s->dev;
 
 	e->st = E_FIRED;
 	e->fire_pending = false;
+	trace("fired E%u seq=%ld hw=%llu last_hw=%llu via=%s staged=%d", e->num, e->seq,
+	      edge_hw(s, e), last_hw(s), via, e->staged);
 	if (!e->hz)
 		return;
 	/* Decision 7: only chip A moved, so the chips' LO phases no longer
@@ -396,7 +450,7 @@ static void mark_next_behind(struct datax_fhm *m, size_t i)
  * not. The device time read after the write decides on time vs late (a
  * false LATE is possible, a false OK is not).
  */
-static void advance(struct datax_fhm *m, struct datax_sched *s)
+static void advance(struct datax_fhm *m, struct datax_sched *s, const char *via)
 {
 	unsigned long long margin = us_ticks(FHM_MARGIN_US, s->tick_hz);
 
@@ -411,22 +465,49 @@ static void advance(struct datax_fhm *m, struct datax_sched *s)
 			continue;
 		if (prev && prev->st != E_NOEDGE &&
 		    (prev->st == E_FIRED || now + margin >= edge_hw(s, prev))) {
+			trace("stage-skip E%u seq=%ld hz=%llu via=%s now=%llu prev=E%u prev_st=%s "
+			      "prev_hw=%llu", e->num, e->seq, e->hz, via, now, prev->num,
+			      st_name(prev->st), edge_hw(s, prev));
 			set_late(s, e);             /* already too late: do not write */
 			continue;
 		}
 		if (pp && (pp->st == E_LIVE ||
-			   (pp->st == E_FIRED && now < edge_hw(s, pp) + margin)))
+			   (pp->st == E_FIRED && now < edge_hw(s, pp) + margin))) {
+			if (!e->hold_traced)
+				trace("stage-hold E%u seq=%ld via=%s now=%llu pp=E%u pp_st=%s pp_hw=%llu "
+				      "prev_hw=%llu window_us=%llu", e->num, e->seq, via, now, pp->num,
+				      st_name(pp->st), edge_hw(s, pp), prev ? edge_hw(s, prev) : 0,
+				      prev ? (edge_hw(s, prev) - edge_hw(s, pp)) * 1000000ULL /
+					     s->tick_hz : 0);
+			e->hold_traced = true;
 			break;                      /* E(j-2) still arms what it should */
-		ret = phy_write_u64(s->dev, ATTR_HOP, e->hz);
-		if (ret) {
-			e->stage_err = ret;
-			continue;
 		}
-		if (datax_poller_read_time(s) ||
-		    (prev && prev->st != E_NOEDGE && last_hw(s) + margin >= edge_hw(s, prev)))
-			set_late(s, e);
-		else
-			e->staged = true;
+		{
+			unsigned long long t0 = now, h0, mono0 = datax_mono_ns();
+
+			pthread_mutex_lock(&s->lock);
+			h0 = s->last_hw_mono;
+			pthread_mutex_unlock(&s->lock);
+			t0 = now + ns_ticks(mono0 > h0 ? mono0 - h0 : 0, s->tick_hz);
+			ret = phy_write_u64(s->dev, ATTR_HOP, e->hz);
+			if (ret) {
+				trace("stage E%u seq=%ld hz=%llu via=%s start~%llu err=%d", e->num,
+				      e->seq, e->hz, via, t0, ret);
+				e->stage_err = ret;
+				continue;
+			}
+			ret = datax_poller_read_time(s);
+			if (ret ||
+			    (prev && prev->st != E_NOEDGE && last_hw(s) + margin >= edge_hw(s, prev)))
+				set_late(s, e);
+			else
+				e->staged = true;
+			trace("stage E%u seq=%ld hz=%llu via=%s start~%llu end=%llu write_us=%llu "
+			      "prev=E%u prev_hw=%llu pp_hw=%llu margin=%llu result=%s", e->num, e->seq,
+			      e->hz, via, t0, last_hw(s), (datax_mono_ns() - mono0) / 1000ULL,
+			      prev ? prev->num : 0, prev ? edge_hw(s, prev) : 0,
+			      pp ? edge_hw(s, pp) : 0, margin, e->staged ? "ok" : "late");
+		}
 	}
 }
 
@@ -457,7 +538,7 @@ static void reconcile(struct datax_fhm *m, struct datax_sched *s)
 	pthread_mutex_unlock(&s->lock);
 	for (size_t i = 0; any && i < m->n; i++)
 		if (m->e[i].fire_pending)
-			on_fired(s, &m->e[i]);
+			on_fired(s, &m->e[i], "poll");
 }
 
 static bool settled(const struct fhm_edge *e)
@@ -485,7 +566,7 @@ static void fhm_poll(struct datax_sched *s, unsigned long long hw_now, void *use
 	(void)hw_now;   /* s->last_hw is re-read as staging writes take time */
 	pthread_mutex_lock(&m->lock);
 	reconcile(m, s);
-	advance(m, s);
+	advance(m, s, "poll");
 	trim(m, s);
 	pthread_mutex_unlock(&m->lock);
 }
@@ -524,23 +605,27 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 	unsigned long long got = 0;
 	int ret;
 
+	int in = (int)r->status;
+
 	if (e->behind) {
 		set_result(r, DATAX_COMPLETION_DROPPED, "previous edge did not fire; lands one behind");
-		return;
-	}
-	if (e->late) {
+	} else if (e->late) {
 		set_result(r, DATAX_COMPLETION_LATE, "stage late");
-		return;
-	}
-	if (e->stage_err) {
+	} else if (e->stage_err) {
 		set_result(r, DATAX_COMPLETION_DROPPED, "stage write failed (%d)", e->stage_err);
-		return;
+	} else {
+		ret = phy_read_u64(s->dev, ATTR_HOP, &got);
+		if (ret)
+			set_result(r, DATAX_COMPLETION_DROPPED, "PLL readback failed (%d)", ret);
+		else if (got != e->hz)
+			set_result(r, DATAX_COMPLETION_DROPPED, "PLL %llu Hz, expected %llu Hz", got,
+				   e->hz);
 	}
-	ret = phy_read_u64(s->dev, ATTR_HOP, &got);
-	if (ret)
-		set_result(r, DATAX_COMPLETION_DROPPED, "PLL readback failed (%d)", ret);
-	else if (got != e->hz)
-		set_result(r, DATAX_COMPLETION_DROPPED, "PLL %llu Hz, expected %llu Hz", got, e->hz);
+	trace("verdict E%u seq=%ld hw=%llu exec=%llu last_hw=%llu behind=%d late=%d staged=%d "
+	      "stage_err=%d readback=%llu want=%llu status_in=%d status_out=%d detail=\"%s\"",
+	      e->num, e->seq, edge_hw(s, e), datax_devtime_to_hw(s->dev, r->executed_ticks),
+	      last_hw(s), e->behind, e->late, e->staged, e->stage_err, got, e->hz, in,
+	      (int)r->status, r->detail);
 }
 
 /*
@@ -555,10 +640,10 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_result *r,
 			void *user)
 {
-	(void)seq;
 	(void)user;
 	if (r->discarded || r->status != DATAX_COMPLETION_FLUSHED)
 		return;
+	trace("park after flushed fall seq=%ld", seq);
 	/* Always (round 3 ruling): the queue is empty, so whatever pulse is on
 	 * the line is orphaned. Deciding from the rise's state misses a rise
 	 * that executed before the poller saw it (record undrained, or not yet
@@ -588,9 +673,11 @@ static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_resu
 	if (e->st == E_LIVE) {
 		if (record && (r->tick_status == DATAX_TICK_STATUS_EXECUTED ||
 			       r->tick_status == DATAX_TICK_STATUS_LATE_EXECUTED)) {
-			on_fired(s, e);
+			on_fired(s, e, "record");
 		} else {
 			e->st = E_NOEDGE;     /* dropped, flushed, never written */
+			trace("noedge E%u seq=%ld hw=%llu status=%d tick_status=%u detail=\"%s\"",
+			      e->num, e->seq, edge_hw(s, e), (int)r->status, r->tick_status, r->detail);
 			shorten_fall(s, e);
 			/* Host-known no-fire (host-late, write failure, late-PPS
 			 * drop, Tick drop record): the next tune lands one behind.
@@ -607,7 +694,7 @@ static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_resu
 		 * see the next frequency. That costs the staging one round trip. */
 		if (e->hz && r->status != DATAX_COMPLETION_DROPPED)
 			verdict(s, e, r);
-		advance(m, s);
+		advance(m, s, "record");
 	}
 	pthread_mutex_unlock(&m->lock);
 }
@@ -771,6 +858,8 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 	m->ntable = n;
 	m->stage_us = us;
 	m->fresh = true;
+	m->next_num = 0;
+	trace("staged table n=%zu stage_us=%llu (enable, park and measure done)", n, us);
 	m->n = 0;                          /* nothing outstanding: forget the past */
 	pthread_mutex_lock(&dev->ctx->lock);
 	dev->caps.limits[DATAX_LIMIT_HOP_STAGE_US] = us;
@@ -1011,10 +1100,17 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 	}
 	if (live)
 		fit_pulse(s, live, first);
-	if (prime)
+	if (prime) {
+		trace("queue E%u prime seq=%ld fall=%ld hw=%llu pulse=%llu lead_us=%llu window_us=%llu "
+		      "now~%llu", m->next_num, seqs[0], seqs[1], datax_devtime_to_hw(dev, first),
+		      ppulse, lead * 1000000ULL / hzt, window * 1000000ULL / hzt, now);
 		m->e[m->n++] = (struct fhm_edge){ .seq = seqs[0], .api = first,
-						  .fall_seq = seqs[1], .pulse = ppulse };
-	m->e[m->n++] = (struct fhm_edge){ .seq = seqs[2], .api = when, .hz = hz,
+						  .fall_seq = seqs[1], .pulse = ppulse,
+						  .num = m->next_num++ };
+	}
+	trace("queue E%u tune seq=%ld fall=%ld hw=%llu hz=%llu reported=%d consume=%d now~%llu",
+	      m->next_num, seqs[2], seqs[3], when_hw, hz, report, consume, now);
+	m->e[m->n++] = (struct fhm_edge){ .num = m->next_num++, .seq = seqs[2], .api = when, .hz = hz,
 					  .reported = report, .fall_seq = seqs[3],
 					  .pulse = pmax };
 	m->fresh = false;

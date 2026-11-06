@@ -190,6 +190,9 @@ long datax_sched_queue_gpio(struct datax_sched *sched, datax_time when,
 			    unsigned int mask, unsigned int value);
 long datax_sched_queue_marker(struct datax_sched *sched, datax_time when,
 			      unsigned int line, unsigned int width_ticks);
+/* A tune that needs a priming edge (the first after stage_hop_table, after
+ * the hops drained, or a timed set_frequency starting a new one) needs
+ * when >= now + guard + lead, lead >= the guard margin: 20 ms on tron. */
 long datax_sched_queue_tune(struct datax_sched *sched, datax_time when,
 			    unsigned int ch, unsigned long long hz);
 long datax_sched_queue_stream_gate(struct datax_sched *sched, datax_time when,

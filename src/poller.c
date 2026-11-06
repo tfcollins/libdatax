@@ -508,6 +508,10 @@ static void iterate(struct datax_sched *s)
 	    (!active || !feed(s))) {
 		pthread_mutex_lock(&s->lock);
 		prune(s);
+		/* A wake target this iteration has reached is spent: clear it
+		 * before the hook, so the hook can ask for a later one. */
+		if (s->wake_hw && s->wake_hw <= s->last_hw)
+			s->wake_hw = 0;
 		fn = s->poll_fn;
 		user = s->poll_user;
 		now = s->last_hw;
@@ -596,7 +600,8 @@ void datax_sched_wake_at(struct datax_sched *s, unsigned long long hw_ticks)
 	if (!s || !hw_ticks)
 		return;
 	pthread_mutex_lock(&s->lock);
-	if (!s->wake_hw || hw_ticks < s->wake_hw) {
+	/* an earlier target already reached (spent) never blocks a later one */
+	if (!s->wake_hw || hw_ticks < s->wake_hw || s->wake_hw <= s->last_hw) {
 		s->wake_hw = hw_ticks;
 		if (!datax_poller_is_self(s))
 			pthread_cond_signal(&s->wake);   /* re-plan its sleep */

@@ -84,6 +84,10 @@
  * dispatch and the engine's latch). */
 #define FHM_MARGIN_US 100ULL
 #define FHM_MIN_LEAD_US 1000ULL
+/* Tick round trips in one poller iteration before its poll hook runs: the
+ * device time, the completion sequence id, late_count, overflow_count,
+ * queue_level and one descriptor write (poller.c iterate). */
+#define FHM_ITER_ROUND_TRIPS 6u
 #define TRIGGER_MASK 0x1u          /* GPIO bit 0 -> TAL_GPIO_0 */
 
 enum edge_state { E_LIVE, E_FIRED, E_NOEDGE };
@@ -134,24 +138,34 @@ static bool tracing(void)
 		const char *v = getenv("DATAX_TRACE");
 		int on = 0;
 
-		if (v) {
-			const char *p = strstr(v, "fhm");
+		/* a comma list: any item exactly "fhm" ("fhmx,fhm" enables it) */
+		while (v && *v && !on) {
+			size_t n = strcspn(v, ",");
 
-			on = p && (p == v || p[-1] == ',') && (p[3] == '\0' || p[3] == ',');
+			on = n == 3 && !strncmp(v, "fhm", 3);
+			v += n;
+			if (*v == ',')
+				v++;
 		}
 		atomic_store(&trace_state, on);
 	}
 	return atomic_load(&trace_state) == 1;
 }
 
-static void __attribute__((format(printf, 1, 2))) trace(const char *fmt, ...)
+/* Callers use trace(...): when tracing is off its arguments (some take
+ * s->lock or read the clock) are not evaluated at all. */
+#define trace(...)                               \
+	do {                                     \
+		if (tracing())                   \
+			trace_line(__VA_ARGS__); \
+	} while (0)
+
+static void __attribute__((format(printf, 1, 2))) trace_line(const char *fmt, ...)
 {
 	char line[512];
 	va_list ap;
 	int n;
 
-	if (!tracing())
-		return;
 	n = snprintf(line, sizeof(line), "datax-fhm: mono=%llu ", datax_mono_ns() / 1000ULL);
 	va_start(ap, fmt);
 	vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, ap);
@@ -483,12 +497,16 @@ static void advance(struct datax_fhm *m, struct datax_sched *s, const char *via)
 			break;                      /* E(j-2) still arms what it should */
 		}
 		{
-			unsigned long long t0 = now, h0, mono0 = datax_mono_ns();
+			/* trace only: the write's start (estimate) and duration */
+			unsigned long long t0 = now, h0, mono0 = 0;
 
-			pthread_mutex_lock(&s->lock);
-			h0 = s->last_hw_mono;
-			pthread_mutex_unlock(&s->lock);
-			t0 = now + ns_ticks(mono0 > h0 ? mono0 - h0 : 0, s->tick_hz);
+			if (tracing()) {
+				mono0 = datax_mono_ns();
+				pthread_mutex_lock(&s->lock);
+				h0 = s->last_hw_mono;
+				pthread_mutex_unlock(&s->lock);
+				t0 = now + ns_ticks(mono0 > h0 ? mono0 - h0 : 0, s->tick_hz);
+			}
 			ret = phy_write_u64(s->dev, ATTR_HOP, e->hz);
 			if (ret) {
 				trace("stage E%u seq=%ld hz=%llu via=%s start~%llu err=%d", e->num,
@@ -1023,17 +1041,18 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 	 *   window: a poll period (the poller is also woken at the edge's time
 	 *           plus the margin, datax_sched_wake_at), the staging round
 	 *           trip twice (it varies under load) and the margin;
-	 *   + one poller iteration before the hook runs: six Tick round trips
-	 *     (time, completion seq, late_count, overflow_count, queue_level,
-	 *     one descriptor write) at the access cost measured at create;
+	 *   + one poller iteration before the hook runs: FHM_ITER_ROUND_TRIPS
+	 *     Tick round trips at the access cost measured at create;
 	 *   + two minimum pulses;
 	 * and never less than the guard margin (DATAX_LIMIT_GUARD_MARGIN_MS,
-	 * 10 ms), which dominates on tron (the sum is about 3.5 ms there).
+	 * 10 ms), which dominates on tron (the sum is about 3.5 ms there). On
+	 * a link slower than about 1.5 ms per attribute access (with tron's
+	 * ~0.5 ms staging write) the formula exceeds the guard and sets the lead.
 	 * The first tune after staging or after the hops drained therefore needs
 	 * when >= now + guard + lead (20 ms on tron).
 	 */
 	window = us_ticks(2 * m->stage_us + s->poll_us + FHM_MARGIN_US, hzt);
-	lead = window + 6 * s->access_ticks + 2 * us_ticks(FHM_PULSE_MIN_US, hzt);
+	lead = window + FHM_ITER_ROUND_TRIPS * s->access_ticks + 2 * us_ticks(FHM_PULSE_MIN_US, hzt);
 	if (lead < s->guard_ticks)
 		lead = s->guard_ticks;
 	if (lead < us_ticks(FHM_MIN_LEAD_US, hzt))

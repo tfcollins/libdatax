@@ -48,3 +48,21 @@ in `finally`, and compares RX to the expected transform of TX:
 - ad936x: `loopback` on `ad9361-phy`; RX = TX >> 4.
 - adrv9009: `bist_framer_a_loopback` on each phy; I and Q are exchanged
   (RX I = TX Q, RX Q = TX I), gain 1, no shift.
+
+## Troubleshooting timed tunes
+
+`DATAX_TRACE=fhm` (a comma list; other names are ignored) makes libdatax print
+one `datax-fhm:` line per FHM pipeline event to stderr. Events are queue
+(edge number since FHM was enabled, seq, hardware time, priming lead), stage
+(how it was triggered: `via=poll` or `via=record`, start estimate, end time,
+the neighbouring edges, `result=ok|late`), stage-hold, stage-skip, fired, late,
+noedge, verdict (every input of a tune's final status), park and staged table.
+It adds no I/O and is off by default. Capture it with pytest's `-s`:
+
+    DATAX_TRACE=fhm python -m pytest tests/hardware/test_hw_timed.py -k "hop_schedule or dense_hops" -s -v 2> fhm-trace.log
+    grep -E "queue E|stage(-hold|-skip)? E|fired E|verdict E" fhm-trace.log
+
+A tune completing LATE "stage late" shows a `stage E<n> ... result=late` whose
+`end` is past `prev_hw`, or a `stage-skip E<n>`. The first tune that needs a
+priming edge must be at least now + guard + lead (20 ms on tron) ahead;
+earlier, `queue_tune` returns `DATAX_ERR_LATE`.

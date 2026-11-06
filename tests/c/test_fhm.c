@@ -28,6 +28,7 @@
 #include "check.h"
 #include "fake_tick.h"
 #include "internal.h"      /* dev->single_chip_tuned (Task 5 reads it) */
+#include "scheduler.h"     /* last_hw: queue_tune's notion of now */
 #include "tick_descriptor.h"
 
 static void usleep_(unsigned int us)
@@ -828,9 +829,10 @@ static void test_rejected_batch_reprimes(void)
 
 	fx_open(&x, true);
 	(void)stage(&x, plan, 2);
-	/* A priming edge that would land inside the guard margin is refused by
-	 * queue_tune itself, naming the tune (not by commit under its seq). */
-	CHECK(datax_sched_queue_tune(x.s, now(&x) + 5 * MS, 0, F_A) == DATAX_ERR_LATE);
+	/* A tune outside the guard margin whose priming edge (one lead, 10 ms,
+	 * before it) would land inside it is refused by queue_tune itself,
+	 * naming the tune (not by commit under the priming edge's seq). */
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 15 * MS, 0, F_A) == DATAX_ERR_LATE);
 	CHECK(strstr(lasterr(&x), "needs a priming edge") != NULL);
 	CHECK(strstr(lasterr(&x), "guard") != NULL);
 	/* A batch rejected at commit (a reported GPIO 1 ms from the tune breaks
@@ -1275,6 +1277,59 @@ static void test_shortened_fall_inside_guard_quiet(void)
 	printf("test_shortened_fall_inside_guard_quiet: ok\n");
 }
 
+/* queue_tune's notion of device time: the poller's last read plus host time
+ * since (it can only grow between this read and queue_tune's). */
+static unsigned long long sched_now_est(struct fx *x)
+{
+	struct timespec ts;
+	unsigned long long mono, est;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	mono = (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
+	pthread_mutex_lock(&x->s->lock);
+	est = x->s->last_hw + (mono - x->s->last_hw_mono) * HZ / 1000000000ULL;
+	pthread_mutex_unlock(&x->s->lock);
+	return est;
+}
+
+/*
+ * The first tune after staging needs when >= now + guard + lead: its priming
+ * edge sits one lead (here the 10 ms guard; the fake's formula is about
+ * 1.9 ms) before it and must itself clear the guard. One tick below that
+ * (against queue_tune's own estimate of now) is DATAX_ERR_LATE from
+ * queue_tune; 1 ms above (against the later of that estimate and the fake's
+ * clock, which commit reads) is accepted and completes OK.
+ */
+static void test_first_tune_minimum_lead(void)
+{
+	static const unsigned long long plan[1] = { F_A };
+	struct fx x;
+	unsigned long long t;
+	long s1;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 1);
+	CHECK(datax_sched_queue_tune(x.s, sched_now_est(&x) + 20 * MS - 1, 0, F_A) ==
+	      DATAX_ERR_LATE);
+	CHECK(strstr(lasterr(&x), "needs a priming edge 10000 us before it") != NULL);
+	CHECK(strstr(lasterr(&x), "guard") != NULL);
+	t = sched_now_est(&x);
+	if (now(&x) > t)
+		t = now(&x);
+	t += 20 * MS + 1 * MS;
+	s1 = datax_sched_queue_tune(x.s, t, 0, F_A);
+	CHECK(s1 > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	to_edge(&x, 1, 50 * MS);
+	CHECK(now(&x) < t);
+	to_edge(&x, 2, 50 * MS);
+	CHECK(wait_done(&x, s1).status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.m) == F_A);
+	fx_close(&x);
+	printf("test_first_tune_minimum_lead: ok\n");
+}
+
 /* A consumed (timed set_frequency) tune flushed by teardown raises no event:
  * nobody asked, and its delivery would race the teardown. */
 static void test_teardown_flush_is_silent(void)
@@ -1449,7 +1504,12 @@ static void test_realtime_no_stage_late(void)
 	printf("realtime: %u tunes not OK in %u + %u judged runs of %d each (%u retries: host "
 	       "starved)\n", bad, judged[0], judged[1], REALTIME_RUNS, retries);
 	CHECK(bad == 0);
-	CHECK(judged[0] > 0 && judged[1] > 0);   /* not vacuous */
+	/* a mostly starved host proves nothing: a majority must be judged */
+	if (judged[0] < REALTIME_RUNS / 2 || judged[1] < REALTIME_RUNS / 2)
+		fprintf(stderr, "test_realtime_no_stage_late: only %u + %u of %d runs per schedule "
+			"ran unstarved (need %d each): host too loaded to judge\n", judged[0],
+			judged[1], REALTIME_RUNS, REALTIME_RUNS / 2);
+	CHECK(judged[0] >= REALTIME_RUNS / 2 && judged[1] >= REALTIME_RUNS / 2);
 	printf("test_realtime_no_stage_late: ok\n");
 }
 
@@ -1475,6 +1535,7 @@ int main(int argc, char **argv)
 		{ "noedge_fall_still_counts", test_noedge_fall_still_counts },
 		{ "trigger_parked_low", test_trigger_parked_low },
 		{ "teardown_flush_is_silent", test_teardown_flush_is_silent },
+		{ "first_tune_minimum_lead", test_first_tune_minimum_lead },
 		{ "park_when_rise_unseen", test_park_when_rise_unseen },
 		{ "stage_busy_while_fall_pending", test_stage_busy_while_fall_pending },
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },

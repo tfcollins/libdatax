@@ -12,6 +12,11 @@ echo "$out" | grep -q "datax-fhm:" && fail "trace on by default"
 out=$(DATAX_TRACE=fhmx,sched "$t" one $case_ 2>&1 >/dev/null) || fail "test failed (fhmx)"
 echo "$out" | grep -q "datax-fhm:" && fail "trace on for DATAX_TRACE=fhmx,sched"
 
+out=$(DATAX_TRACE=xfhm "$t" one $case_ 2>&1 >/dev/null) || fail "test failed (xfhm)"
+echo "$out" | grep -q "datax-fhm:" && fail "trace on for DATAX_TRACE=xfhm"
+out=$(DATAX_TRACE=fhmx,fhm "$t" one $case_ 2>&1 >/dev/null) || fail "test failed (fhmx,fhm)"
+echo "$out" | grep -q "datax-fhm:" || fail "trace off for DATAX_TRACE=fhmx,fhm"
+
 out=$(DATAX_TRACE=sched,fhm "$t" one $case_ 2>&1 >/dev/null) || fail "test failed traced"
 for k in "staged table n=3" "queue E0 prime seq=" "queue E1 tune seq=" \
          "stage E1 seq=[0-9]* hz=2410000000 via=poll start~[0-9]* end=[0-9]*" \

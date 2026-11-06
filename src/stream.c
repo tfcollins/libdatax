@@ -60,8 +60,9 @@
  * the samples sent (block_samples for zero-copy), enqueues it cyclic and
  * only then enables the buffer: over the v0 iiod protocol cyclic is fixed
  * when the buffer opens, which libiio derives from the first enqueue.
- * stop() disables at once, takes the block back and frees the buffer, so
- * the next send sizes a new one.
+ * stop() takes the block back (at once on binary iiod; on the legacy path
+ * after its one write), disables and frees the buffer, so the next send
+ * sizes a new one.
  *
  * Zero-copy. get_block lends the block at cur (RX: once filled; TX: once
  * free) and advances cur; put_block takes the oldest lent block back (RX:
@@ -527,17 +528,21 @@ int datax_stream_stop(struct datax_stream *s)
 		if (!dret)
 			dret = r;
 	}
+	if (s->bs && s->cfg.cyclic && s->queued[0]) {
+		/* Cyclic: take the block back before disabling, so the buffer
+		 * closes without a cancel. It must come first: on the legacy
+		 * path the block's write runs on libiio's worker, which
+		 * iio_buffer_stream_stop parks, and a dequeue of a write the
+		 * worker had not yet run would then wait forever
+		 * (iio_task_sync(token, -1)). Binary iiod answers at once. */
+		bool waited;
+
+		dequeue(s, 0, -1, 0, false, &waited);
+	}
 	if (s->bs && s->enabled) {
 		ret = iio_buffer_stream_stop(s->bs);
 		if (ret)
 			ret = fail_iio(s, ret, "stream_stop: disabling the buffer");
-	}
-	if (s->bs && s->cfg.cyclic && s->queued[0]) {
-		/* Cyclic: disabled at once; take the block back so the buffer
-		 * closes without a cancel. */
-		bool waited;
-
-		dequeue(s, 0, -1, 0, false, &waited);
 	}
 	s->enabled = false;
 	s->started = false;

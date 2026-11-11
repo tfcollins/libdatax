@@ -1095,6 +1095,51 @@ int datax_internal_sched_pause(struct datax_sched *s, bool pause)
 	return 0;
 }
 
+static unsigned long long us_to_ticks(unsigned long long us, unsigned long long hz)
+{
+	return us * (hz / 1000000ULL) + us * (hz % 1000000ULL) / 1000000ULL;
+}
+
+int datax_internal_sched_catch_up(struct datax_sched *s, unsigned long long hw_now)
+{
+	const struct timespec step = { 0, 100000L };
+	unsigned long long want;
+	int ret = 1;
+
+	if (!s)
+		return -EINVAL;
+	if (datax_poller_is_self(s) || datax_sched_holds_io(s))
+		return -EDEADLK;
+	pthread_mutex_lock(&s->lock);
+	/* Due: a wake target, or a periodic pass (the FHM's held staging
+	 * relies on one within poll_us; fhm.c budgets it in its windows). */
+	if (s->paused || s->stop || !s->thread_started ||
+	    !((s->wake_hw && s->wake_hw <= hw_now) ||
+	      hw_now >= s->last_hw + us_to_ticks(s->poll_us, s->tick_hz))) {
+		pthread_mutex_unlock(&s->lock);
+		return 0;
+	}
+	/* The one running now may have read the time before hw_now. */
+	want = s->iters + (s->in_iter ? 2 : 1);
+	for (unsigned int n = 0; s->iters < want; n++) {
+		if (s->paused || s->stop) {
+			ret = 0;
+			break;
+		}
+		if (n >= 30000) {
+			ret = -ETIMEDOUT;
+			break;
+		}
+		s->kick = true;
+		pthread_cond_signal(&s->wake);
+		pthread_mutex_unlock(&s->lock);
+		nanosleep(&step, NULL);
+		pthread_mutex_lock(&s->lock);
+	}
+	pthread_mutex_unlock(&s->lock);
+	return ret;
+}
+
 int datax_sched_set_poll_hook(struct datax_sched *s, datax_sched_poll_fn fn, void *user)
 {
 	if (!s)

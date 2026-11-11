@@ -388,7 +388,10 @@ static size_t stage(struct fx *x, const unsigned long long *freqs, size_t n)
  * (one queue entry spare) and drained the completion slot, so the test never
  * moves time past a command the feeder has not had a chance to write (it
  * would complete host-late) or past a reported command Tick holds behind an
- * unacked record (tick#38; the real clock does not wait for the poller). */
+ * unacked record (tick#38; the real clock does not wait for the poller).
+ * Then let the poller run anything due by now: it sleeps in host time, so
+ * without this the fake clock can step past a short window (an FHM staging
+ * write held until just after an edge, before the next) before it wakes. */
 static void fed(struct fx *x)
 {
 	unsigned long want;
@@ -400,8 +403,11 @@ static void fed(struct fx *x)
 		want = done + 15 < x->ndesc ? (unsigned long)done + 15 : x->ndesc;
 		(void)fake_tick_read(x->f, "completion_sequence_id", b, sizeof(b));
 		if (fake_tick_access_count(x->f, "command_descriptor", true) - x->wbase >= want &&
-		    !strtoull(b, NULL, 0))
+		    !strtoull(b, NULL, 0)) {
+			if (x->s)
+				CHECK(datax_internal_sched_catch_up(x->s, fake_tick_now(x->f)) >= 0);
 			return;
+		}
 		msleep(1);
 	}
 	CHECK(!"the poller did not feed the queue");

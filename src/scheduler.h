@@ -238,6 +238,11 @@ struct datax_sched {
 	unsigned long long last_hw_mono;   /* host monotonic ns of that read */
 	unsigned long long wake_hw;        /* run an iteration at this hardware time
 					    * (0: none; datax_sched_wake_at) */
+	/* datax_internal_sched_catch_up: poller iterations finished, and
+	 * whether one is running (set, with a due wake_hw cleared, in one
+	 * hold of lock). */
+	unsigned long long iters;
+	bool in_iter;
 	unsigned long long late_seen, overflow_seen;
 	int pps_seen_state;                /* devtime.c watch: 0 unknown, 1 absent, 2 present */
 	unsigned long host_late;           /* commands the feeder could not write in time */

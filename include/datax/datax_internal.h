@@ -57,6 +57,17 @@ int datax_internal_fhm_bind_fake(struct datax_device *dev,
  * 0, or -EINVAL for a NULL scheduler. */
 int datax_internal_sched_pause(struct datax_sched *s, bool pause);
 
+/* For tests that drive a fake device clock ahead of the poller: if the
+ * poller has a wake target at or before hw_now (hardware ticks), or hw_now
+ * is a poll period or more past its last time read, kick it and wait until
+ * an iteration that started after this call has finished. A real clock
+ * gives the poller that pass (an FHM staging write held until just after
+ * an edge relies on it); a fake one can step past it in no host time.
+ * 1 if it waited, 0 if nothing was due or the poller is paused or stopping,
+ * -ETIMEDOUT after 3 s, -EDEADLK on the poller thread or with the io lock
+ * held, -EINVAL for a NULL scheduler. */
+int datax_internal_sched_catch_up(struct datax_sched *s, unsigned long long hw_now);
+
 /* MCS diagnostics (doctor). Writes the live JESD204 FSM state of the phys
  * to state and the PHASE_COHERENT reason to reason. 1 when PHASE_COHERENT
  * holds, 0 when not, -ENOTSUP on a device without MCS. */

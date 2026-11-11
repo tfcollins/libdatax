@@ -556,9 +556,12 @@ static void *poller_main(void *arg)
 
 	pthread_mutex_lock(&s->lock);   /* waits for create to finish starting us */
 	while (!s->stop) {
+		s->in_iter = true;
 		pthread_mutex_unlock(&s->lock);
 		iterate(s);
 		pthread_mutex_lock(&s->lock);
+		s->in_iter = false;
+		s->iters++;
 		if (s->stop)
 			break;
 		if (!s->kick) {

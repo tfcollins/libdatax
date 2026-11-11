@@ -1,0 +1,99 @@
+{
+  "datax_module": "python/datax/__init__.py",
+  "iio_context": {
+    "attributes": {
+      "hdl_system_id": "[(null)] on [adrv9009zu11eg] git branch [main] git [085a6ed747a5f2fc4b0bae87a96218859c088d2e] clean [2026-06-09 11:41:55] UTC",
+      "hw_carrier": "Analog Devices ADRV9009-ZU11EG Rev.B",
+      "ip,ip-addr": "<ip>",
+      "local,kernel": "6.1.70-284114-g2e8908932dfd",
+      "unique_id": "10400014ac040013100027006dbb9c09f2",
+      "uri": "ip:host"
+    },
+    "description": "Linux host 6.1.70-284114-g2e8908932dfd #1061 SMP Tue Mar 18 16:40:12 EET 2025 aarch64 <ip>",
+    "version": "0.26-5e1e9cb"
+  },
+  "image": "stock",
+  "image_hashes": "bit=a22f4cf639743cd163feaf8e4f480d1a5cf2b56c730842caf6d0bebf93a460e1 Image=84a4d04cd580fca5dbdc5fad897dde3994f012a14f1c348bf36c75b4786217c8 dtb=83977222b78e160f24ebb2731254892b26f313279c7938bbb5c4873ae077e3a4",
+  "libdatax_commit": "d054231558c486647909fa2fae3a397e1e7b0287",
+  "libdatax_library": "build/libdatax.so.0.1.0",
+  "libdatax_version": "0.1",
+  "libiio_pin": "6534f14215f4738cec224bf50f13f475fe5264a6",
+  "pps_source": "none",
+  "tests": {
+    "test_digital_loopback[ch0]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 94,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch1]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 421,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch2]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 659,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch3]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 194,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_family_and_channels": {
+      "channels": 4,
+      "device": "adrv9009",
+      "family": "adrv9009"
+    },
+    "test_recv_timeout_recovers": {
+      "first_recv": "data arrived within 1 ms"
+    },
+    "test_rx_block_nonconstant_per_channel": {
+      "std_by_channel": {
+        "0": 30361.046875,
+        "1": 33.07353210449219,
+        "2": 81.79219818115234,
+        "3": 23.348773956298828
+      }
+    },
+    "test_rx_throughput_recorded": {
+      "direct_reg_access": true,
+      "mb_per_s": 52.06492374521312,
+      "rx_device": "axi-adrv9009-rx-hpc",
+      "samples": 130220032,
+      "seconds": 10.004434666014276,
+      "stats": {
+        "blocks_done": 1987,
+        "enabled": false,
+        "overflow_detect": true,
+        "overflows": 92,
+        "status_polls": 99,
+        "underflows": 0
+      }
+    },
+    "test_tx_oneshot_drains": {
+      "drain_s": 0.001789161004126072
+    }
+  },
+  "uri": "ip:host"
+}

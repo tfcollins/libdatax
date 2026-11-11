@@ -18,6 +18,8 @@
 #              loopback) and hopcap-sfp (P3a timed control).
 #   hw-bq   -> place lablp (ADRV9361-Z7035). No runner is registered for it yet,
 #              and the job has no boot step yet; dispatch place=tron until it does.
+#
+# First green run on main: 43033512607 (2026-11-11), evidence in docs/evidence/ci/.
 name: hw-test
 on:
   workflow_dispatch:

@@ -88,7 +88,7 @@ raw="$out/session-tron-$image.raw.log"
 rc=$?
 
 "$venv/bin/python" "$root/scripts/hw/redact.py" "$out" && rm -f "$raw"
-echo "----- session log (redacted): $out/session-tron-$image.log -----"
+echo "----- session log (redacted): session-tron-$image.log -----"
 cat "$out/session-tron-$image.log"
 echo "tron-run: $image exit $rc"
 exit "$rc"

@@ -3,8 +3,24 @@
 `tests/hardware` exercises immediate streaming, digital loopback and (P3a)
 timed control on a real board. It is not part of Tier 1: CI only proves it collects
 (`pytest tests/hardware --collect-only -q`). The `hw-test.yml` workflow runs it
-on self-hosted runners (none registered yet); recorded results are in
-[evidence/p2](evidence/p2/README.md).
+on the lab's self-hosted runners, dispatched and weekly; recorded results are in
+[evidence/p2](evidence/p2/README.md), [evidence/p3a](evidence/p3a/README.md)
+and [evidence/ci](evidence/ci/2026-11-11-tron/README.md).
+
+## In CI (hw-test.yml)
+
+- **tron** (ADRV9009-ZU11EG, runner label `hw-nemo`): `scripts/hw/tron-run.sh`
+  JTAG-boots each image pinned by hash in `tests/hardware/images.json` (`stock`
+  for P2 streaming including TX and loopback, `hopcap-sfp` for P3a) through
+  labgrid, runs this suite, then restores and powers the board off. Lab facts
+  (coordinator, addresses, artifact directory) come from the runner's `.env`,
+  never from this repository. Logs and artifacts pass through
+  `scripts/hw/redact.py` before they are printed or uploaded.
+- **lablp** (ADRV9361-Z7035, label `hw-bq`): no runner registered yet, and the
+  job has no boot step yet.
+- The repository is public, so the lab runners accept only this workflow on
+  `main`, dispatched or scheduled by the owner (a job-started hook on the runner
+  enforces it), and fork pull requests need approval.
 
 ## Run it
 

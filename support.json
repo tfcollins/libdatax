@@ -33,40 +33,46 @@
     "adrv9009-zu11eg": {
       "features": {
         "streaming-rx": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md",
-          "note": "PL: HDL main 085a6ed7 build with stock 2023_R2 kernel/DTB; digital loopback bit-exact (I/Q exchanged); controller-run hardware sessions 2026-11-05 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-11-tron/README.md",
+          "note": "PL: HDL main 085a6ed7 build with stock 2023_R2 kernel/DTB; digital loopback bit-exact (I/Q exchanged); hw-test.yml on tron (stock image)",
+          "workflow": "hw-test.yml"
         },
         "streaming-tx": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md",
-          "note": "PL: HDL main 085a6ed7 build with stock 2023_R2 kernel/DTB; digital loopback bit-exact (I/Q exchanged); controller-run hardware sessions 2026-11-05 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-11-tron/README.md",
+          "note": "PL: HDL main 085a6ed7 build with stock 2023_R2 kernel/DTB; digital loopback bit-exact (I/Q exchanged); hw-test.yml on tron (stock image)",
+          "workflow": "hw-test.yml"
         },
         "timed-gpio": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p3a/README.md",
-          "note": "libdatax scheduler over Tick: GPIO staircase on exact ticks (completion skew 0), late command dropped unexecuted, trigger low after flush. PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); controller-run tron session 2026-11-06 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-11-tron/README.md",
+          "note": "libdatax scheduler over Tick: GPIO staircase on exact ticks (completion skew 0), late command dropped unexecuted, trigger low after flush. PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); hw-test.yml on tron (hopcap-sfp image)",
+          "workflow": "hw-test.yml"
         },
         "fhm-hop": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p3a/README.md",
-          "note": "datax timed tunes through Talise FHM on chip A: hop schedule with priming edge, dense hops (1.2x report spacing held), exact PLL readback 2.4-2.5 GHz; chip B returns -ENOTSUP (no trigger wired); no RF settle measurement (REQ-TEST-031). PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); controller-run tron session 2026-11-06 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-11-tron/README.md",
+          "note": "datax timed tunes through Talise FHM on chip A: hop schedule with priming edge, dense hops (1.2x report spacing held), exact PLL readback 2.4-2.5 GHz; chip B returns -ENOTSUP (no trigger wired); no RF settle measurement (REQ-TEST-031). PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); hw-test.yml on tron (hopcap-sfp image)",
+          "workflow": "hw-test.yml"
         },
         "sdk-timed": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p3a/README.md",
-          "note": "C and Python scheduler (commit/flush, completions, events), device time with PPS-aligned and soft-aligned fallback, first tune >= now + 20 ms; Tier 1 on the emulator and a fake Tick, hardware on tron. PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); controller-run tron session 2026-11-06 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-11-tron/README.md",
+          "note": "C and Python scheduler (commit/flush, completions, events), device time with PPS-aligned and soft-aligned fallback, first tune >= now + 20 ms; Tier 1 on the emulator and a fake Tick, hardware on tron. PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); hw-test.yml on tron (hopcap-sfp image)",
+          "workflow": "hw-test.yml"
         },
         "mcs": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p3a/README.md",
-          "note": "run_mcs verifies the JESD/MCS state only; PHASE_COHERENT stays false (no RF PLL phase sync in the device tree), so coherence is unreachable on this image; REQ-TEST-032 phase measurement open (needs RF cabling). PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); controller-run tron session 2026-11-06 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-11-tron/README.md",
+          "note": "run_mcs verifies the JESD/MCS state only; PHASE_COHERENT stays false (no RF PLL phase sync in the device tree), so coherence is unreachable on this image; REQ-TEST-032 phase measurement open (needs RF cabling). PL: hopcap SFP image with the Tick PPS selector (XSA 6292e762); hw-test.yml on tron (hopcap-sfp image)",
+          "workflow": "hw-test.yml"
         }
       }
     }

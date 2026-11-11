@@ -1,12 +1,23 @@
-# Hardware suite (tests/hardware) on real boards. workflow_dispatch only.
+# Hardware suite (tests/hardware) on real boards: dispatched, plus weekly so the
+# support-matrix rows that cite this workflow never go stale (30 days).
 #
-# No self-hosted runners are registered for this public repository yet
-# (deliberate: a public repo must not run untrusted code on lab machines), so
-# this workflow has not run in CI. The P2 evidence in docs/evidence/p2 came
-# from controller-run sessions with the same suite.
+# This is a public repository, so the self-hosted lab runners are locked down:
+# - Fork pull requests need approval for every external contributor.
+# - Each runner has a job-started hook (outside this repository) that refuses any
+#   job other than this workflow on refs/heads/main, triggered by
+#   workflow_dispatch or schedule, by the owner.
+# - No pull_request or push trigger may be added here.
 #
-# Runner labels: hw-bq (ADRV9361-Z7035), hw-nemo (ADRV9009-ZU11EG).
-# Repository variables: DATAX_HW_URI_LABLP, DATAX_HW_URI_TRON (libiio URIs).
+# Host facts (coordinator, addresses, artifact paths) live in the runner's .env,
+# never in this file. Session logs and artifacts are redacted (scripts/hw/redact.py)
+# before they are printed or uploaded.
+#
+# Runners:
+#   hw-nemo -> place tron (ADRV9009-ZU11EG). Two boots, one per pinned image in
+#              tests/hardware/images.json: stock (P2 streaming incl. TX and
+#              loopback) and hopcap-sfp (P3a timed control).
+#   hw-bq   -> place lablp (ADRV9361-Z7035). No runner is registered for it yet,
+#              and the job has no boot step yet; dispatch place=tron until it does.
 name: hw-test
 on:
   workflow_dispatch:
@@ -14,24 +25,84 @@ on:
       place:
         description: Board to test
         type: choice
-        options: [lablp, tron, both]
+        options: [tron, lablp, both]
+        default: tron
+      image:
+        description: tron image(s) to boot
+        type: choice
+        options: [both, stock, hopcap-sfp]
         default: both
+  schedule:
+    - cron: "0 13 * * 0"   # Sundays; offset from the hopcap and vrt49 nightlies that share tron
 permissions:
   contents: read
 
 jobs:
+  tron:
+    if: github.event_name == 'schedule' || inputs.place == 'tron' || inputs.place == 'both'
+    runs-on: [self-hosted, hw-nemo]
+    timeout-minutes: 150
+    concurrency:
+      group: libdatax-hw-tron
+      cancel-in-progress: false
+    env:
+      IMAGE: ${{ inputs.image || 'both' }}
+      OUT: ${{ github.workspace }}/hw-out
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the pinned libiio v1
+        run: |
+          rev=$(jq -r .libiio.revision pins.json)
+          rm -rf libiio
+          git clone --filter=blob:none https://github.com/tfcollins/libiio libiio
+          git -C libiio checkout "$rev"
+          cmake -S libiio -B libiio/build -DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON \
+            -DWITH_TESTS=OFF -DWITH_DOC=OFF -DWITH_USB_BACKEND=OFF \
+            -DWITH_SERIAL_BACKEND=OFF -DHAVE_DNS_SD=OFF -DWITH_EXAMPLES=OFF
+          cmake --build libiio/build -j"$(nproc)"
+      - name: Build libdatax
+        run: |
+          cmake -S . -B build -DDATAX_LIBIIO_SOURCE=libiio -DDATAX_LIBIIO_BUILD=libiio/build
+          cmake --build build -j"$(nproc)"
+      - name: Lab venv (libdatax, hopcap lab boot, labgrid-plugins at pins.json)
+        run: |
+          pin() { echo "git+https://github.com/$(jq -r ".$1.repository" pins.json)@$(jq -r ".$1.revision" pins.json)"; }
+          rm -rf .venv-hw
+          uv venv .venv-hw
+          uv pip install --python .venv-hw/bin/python -e . numpy pytest \
+            "hopcap[lab] @ $(pin hopcap)" "labgrid-plugins @ $(pin labgrid_plugins)"
+      - name: tron, stock image
+        if: env.IMAGE != 'hopcap-sfp'
+        run: scripts/hw/tron-run.sh stock "$OUT"
+      - name: tron, hopcap-sfp image
+        if: (success() || failure()) && env.IMAGE != 'stock'
+        run: scripts/hw/tron-run.sh hopcap-sfp "$OUT"
+      - name: Redact outputs
+        if: always()
+        run: test -d "$OUT" && python3 scripts/hw/redact.py "$OUT" && rm -f "$OUT"/*.raw.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hw-tron
+          path: |
+            hw-out/*.json
+            hw-out/*.xml
+            hw-out/*.log
+          if-no-files-found: ignore
+
   lablp:
-    if: inputs.place == 'lablp' || inputs.place == 'both'
+    if: github.event_name == 'workflow_dispatch' && (inputs.place == 'lablp' || inputs.place == 'both')
     runs-on: [self-hosted, hw-bq]
     timeout-minutes: 30
     env:
       DATAX_HW_URI: ${{ vars.DATAX_HW_URI_LABLP }}
       DATAX_HW_REQUIRE: "1"
+      DATAX_HW_IMAGE: stock
       DATAX_HW_EVIDENCE: ${{ github.workspace }}/evidence-lablp.json
       DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
     steps:
       - uses: actions/checkout@v4
-      # Prerequisite, not implemented here: boot/reserve via labgrid on the runner host; see docs/hardware.md
+      # Prerequisite, not implemented yet: power and boot lablp through labgrid on the runner host
       - name: Build the pinned libiio v1
         run: |
           rev=$(jq -r .libiio.revision pins.json)
@@ -52,6 +123,9 @@ jobs:
         run: pip install -e . numpy pytest
       - name: Hardware suite
         run: python -m pytest tests/hardware -v --junitxml=junit-lablp.xml
+      - name: Redact outputs
+        if: always()
+        run: python3 scripts/hw/redact.py junit-lablp.xml evidence-lablp.json || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -59,43 +133,4 @@ jobs:
           path: |
             junit-lablp.xml
             evidence-lablp.json
-
-  tron:
-    if: inputs.place == 'tron' || inputs.place == 'both'
-    runs-on: [self-hosted, hw-nemo]
-    timeout-minutes: 30
-    env:
-      DATAX_HW_URI: ${{ vars.DATAX_HW_URI_TRON }}
-      DATAX_HW_REQUIRE: "1"
-      DATAX_HW_EVIDENCE: ${{ github.workspace }}/evidence-tron.json
-      DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
-    steps:
-      - uses: actions/checkout@v4
-      # Prerequisite, not implemented here: boot/reserve via labgrid on the runner host; see docs/hardware.md
-      - name: Build the pinned libiio v1
-        run: |
-          rev=$(jq -r .libiio.revision pins.json)
-          git clone --filter=blob:none https://github.com/tfcollins/libiio libiio
-          git -C libiio checkout "$rev"
-          cmake -S libiio -B libiio/build -DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON \
-            -DWITH_TESTS=OFF -DWITH_DOC=OFF -DWITH_USB_BACKEND=OFF \
-            -DWITH_SERIAL_BACKEND=OFF -DHAVE_DNS_SD=OFF -DWITH_EXAMPLES=OFF
-          cmake --build libiio/build -j"$(nproc)"
-      - name: Build libdatax
-        run: |
-          cmake -S . -B build -DDATAX_LIBIIO_SOURCE=libiio -DDATAX_LIBIIO_BUILD=libiio/build
-          cmake --build build -j"$(nproc)"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install Python package
-        run: pip install -e . numpy pytest
-      - name: Hardware suite
-        run: python -m pytest tests/hardware -v --junitxml=junit-tron.xml
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: hw-tron
-          path: |
-            junit-tron.xml
-            evidence-tron.json
+          if-no-files-found: ignore

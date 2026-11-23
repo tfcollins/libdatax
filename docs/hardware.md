@@ -65,8 +65,8 @@ known-bad.
 ### ADRV9009 on ZC706 (`nemo`)
 
 - **Image.** Kuiper 2023_R2_P1 on the ZC706's SD card, with the boot partition
-  set up from `zynq-zc706-adv7511-adrv9009` (BOOT.BIN, uImage,
-  devicetree.dtb). This is the stock ADI reference design, and it needs no extra
+  set up from it: `BOOT.BIN` and `devicetree.dtb` from
+  `zynq-zc706-adv7511-adrv9009`, `uImage` from `zynq-common`. This is the stock ADI reference design, and it needs no extra
   setup.
 - **Run.** In the lab, dispatch `hw-test.yml` with `place=zc706`, or from a host
   with labgrid-plugins at the `pins.json` revision:
@@ -85,7 +85,8 @@ known-bad.
 ### ADRV9361-Z7035 on ADRV1CRR-FMC (`lablp`)
 
 - **Image.** Kuiper 2023_R2_P1 on the SOM's SD card, with the boot partition set
-  up from `zynq-adrv9361-z7035-fmc`. This is the stock ADI reference design
+  up from it: `BOOT.BIN` and `devicetree.dtb` from `zynq-adrv9361-z7035-fmc`,
+  `uImage` from `zynq-common`. This is the stock ADI reference design
   (`adrv9361z7035_ccfmc`, LVDS).
 - **Run.** In the lab, dispatch `hw-test.yml` with `place=lablp`, or:
 
@@ -99,6 +100,24 @@ known-bad.
   so it appears only a few seconds after power-on. labgrid-plugins `ec8bf30`
   and later reconnect a console that drops then; older pins fail the first boot
   with "Broken pipe".
+
+### When a kuiper leg fails
+
+`kuiper-run.sh` passes through `adi-lg request`'s exit code: 10 = no catalog
+entry for the part (or no place with it), 11 = the board stayed busy past
+`--wait`, 12 = the boot failed. Failures seen while bringing these legs up,
+and their fixes:
+
+- `unknown part` (10): the part was missing from the coordinator's board
+  catalog (labgrid-plugins `coordinator/api/board_catalog.yaml`). Add it and
+  redeploy the coordinator API.
+- Boot failed with rsync code 255 (12): the exporter host did not trust the
+  runner host's SSH key, and labgrid stages files over SSH.
+- Boot failed with "Broken pipe" (12): the board-powered console on the
+  Z7035 carrier. Use labgrid-plugins `ec8bf30` or later.
+- The retry failed with "Address already in use" (12): the TFTP server's
+  fixed port was still bound from the first attempt. labgrid-plugins #193
+  (included in that pin) takes the port from the OS instead.
 
 ### Throughput and overflows (all boards)
 

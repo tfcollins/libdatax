@@ -7,9 +7,14 @@ DataX SDR SDK core: a small, timed-SDR C API with Python bindings over
 libiio v1, Tick and vrt49. Specification and roadmap:
 <https://tfcollins.github.io/datax_sdk_sdr/>.
 
-Status: P1 (context, device, capabilities, Tick time, Python package) and
-P2 (immediate RX/TX streaming, validated on two boards) are done. Timed
-streams and the scheduler arrive in P3.
+Status: P1 (context, device, capabilities, Tick time, Python package), P2
+(immediate RX/TX streaming) and P3a (Tick scheduler, timed FHM tunes, device
+time and PPS alignment, MCS verification) are done. Timed streams are P3b.
+
+Supported boards: ADRV9009-ZU11EG (streaming and timed control), ADRV9009 on
+ZC706 and ADRV9361-Z7035 (streaming), each validated in `hw-test.yml`. Per-board
+images, known-good versions and how to run the suite are in
+[docs/hardware.md](docs/hardware.md#supported-boards).
 
 ## Streaming quick start
 
@@ -32,7 +37,7 @@ Python:
         samples, info = rx.recv()
 
 Running the suite on a board: [docs/hardware.md](docs/hardware.md). Recorded
-P2 hardware evidence: [docs/evidence/p2](docs/evidence/p2/README.md).
+hardware evidence: [docs/evidence](docs/evidence/).
 
 ## Build
 

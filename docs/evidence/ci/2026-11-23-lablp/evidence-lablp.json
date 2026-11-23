@@ -1,0 +1,77 @@
+{
+  "datax_module": "python/datax/__init__.py",
+  "iio_context": {
+    "attributes": {
+      "hdl_system_id": "[adrv9361z7035_ccfmc] on [lvds] git branch [hdl_2023_r2] git [2156ac7e874a1dc321d9f64a325009fafe563419] clean [2024-11-01 20:49:06] UTC",
+      "hw_carrier": "Analog Devices ADRV9361-Z7035 (Z7035/AD9361)",
+      "ip,ip-addr": "<ip>",
+      "local,kernel": "6.1.70-284114-g2e8908932dfd",
+      "unique_id": "100000236142782000350027280516ec59",
+      "uri": "ip:host"
+    },
+    "description": "Linux host 6.1.70-284114-g2e8908932dfd #1060 SMP PREEMPT Tue Mar 18 16:11:24 EET 2025 armv7l <ip>",
+    "version": "0.26-5e1e9cb"
+  },
+  "image": "stock",
+  "image_hashes": "kuiper=labgrid catalog default for adrv9361z7035/adrv1crr-fmc",
+  "libdatax_commit": "e303884776bda162de5d708c8a26997e122b627e",
+  "libdatax_library": "build/libdatax.so.0.1.0",
+  "libdatax_version": "0.1",
+  "libiio_pin": "6534f14215f4738cec224bf50f13f475fe5264a6",
+  "pps_source": "internal",
+  "tests": {
+    "test_digital_loopback[ch0]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 760,
+      "loopback_transform": "tx>>4",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch1]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 259,
+      "loopback_transform": "tx>>4",
+      "mismatches_vs_expected": 0
+    },
+    "test_family_and_channels": {
+      "channels": 2,
+      "device": "ad9361-phy",
+      "family": "ad936x"
+    },
+    "test_recv_timeout_recovers": {
+      "first_recv": "data arrived within 1 ms"
+    },
+    "test_rx_block_nonconstant_per_channel": {
+      "std_by_channel": {
+        "0": 87.41783142089844,
+        "1": 35.390830993652344
+      }
+    },
+    "test_rx_throughput_recorded": {
+      "direct_reg_access": true,
+      "mb_per_s": 34.471700717414,
+      "rx_device": "cf-ad9361-lpc",
+      "samples": 86179840,
+      "seconds": 10.000068253837526,
+      "stats": {
+        "blocks_done": 1315,
+        "enabled": false,
+        "overflow_detect": true,
+        "overflows": 68,
+        "status_polls": 95,
+        "underflows": 0
+      }
+    },
+    "test_tx_oneshot_drains": {
+      "drain_s": 0.005167267983779311
+    }
+  },
+  "uri": "ip:host"
+}

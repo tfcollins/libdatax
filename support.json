@@ -17,16 +17,18 @@
     "adrv9361-z7035": {
       "features": {
         "streaming-rx": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md",
-          "note": "stock Kuiper 2023_R2; digital loopback bit-exact (TX>>4); controller-run hardware sessions 2026-11-05 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-23-lablp/README.md",
+          "note": "stock Kuiper 2023_R2_P1 (labgrid catalog), HDL hdl_2023_r2; digital loopback bit-exact (TX>>4); hw-test.yml kuiper leg (lablp)",
+          "workflow": "hw-test.yml"
         },
         "streaming-tx": {
-          "status": "integration-artifacts",
+          "status": "validated",
           "tier": 2,
-          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/p2/README.md",
-          "note": "stock Kuiper 2023_R2; digital loopback bit-exact (TX>>4); controller-run hardware sessions 2026-11-05 — validated after the first green hw-test.yml run (needs self-hosted runners)"
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-23-lablp/README.md",
+          "note": "stock Kuiper 2023_R2_P1 (labgrid catalog), HDL hdl_2023_r2; digital loopback bit-exact (TX>>4); hw-test.yml kuiper leg (lablp)",
+          "workflow": "hw-test.yml"
         }
       }
     },

@@ -12,12 +12,16 @@
 # never in this file. Session logs and artifacts are redacted (scripts/hw/redact.py)
 # before they are printed or uploaded.
 #
-# Runners:
-#   hw-nemo -> place tron (ADRV9009-ZU11EG). Two boots, one per pinned image in
-#              tests/hardware/images.json: stock (P2 streaming incl. TX and
-#              loopback) and hopcap-sfp (P3a timed control).
-#   hw-bq   -> place lablp (ADRV9361-Z7035). No runner is registered for it yet,
-#              and the job has no boot step yet; dispatch place=tron until it does.
+# Every job runs on the hw-nemo runner and reaches the boards through labgrid:
+#   tron   ADRV9009-ZU11EG. Two boots, one per pinned image in
+#          tests/hardware/images.json: stock (P2 streaming incl. TX and loopback)
+#          and hopcap-sfp (P3a timed control). scripts/hw/tron-run.sh.
+#   kuiper The other lab boards libdatax drives, on the labgrid catalog's Kuiper
+#          image (adi-lg request --mode uri). scripts/hw/kuiper-run.sh.
+#            zc706  ADRV9009 on ZC706 (place nemo)
+#            lablp  ADRV9361-Z7035 on ADRV1CRR-FMC (place lablp)
+#   Lab boards libdatax has no device family for (AD9081, ADRV9371, DAQ3) are
+#   not tested here; see docs/hardware.md.
 #
 # First green run on main: 43033512607 (2026-11-11), evidence in docs/evidence/ci/.
 name: hw-test
@@ -27,21 +31,23 @@ on:
       place:
         description: Board to test
         type: choice
-        options: [tron, lablp, both]
-        default: tron
+        options: [all, tron, zc706, lablp]
+        default: all
       image:
         description: tron image(s) to boot
         type: choice
         options: [both, stock, hopcap-sfp]
         default: both
   schedule:
-    - cron: "0 13 * * 0"   # Sundays; offset from the hopcap and vrt49 nightlies that share tron
+    # Sundays and Wednesdays (one busy board must not cost a whole week); offset
+    # from the hopcap and vrt49 nightlies that share tron.
+    - cron: "0 13 * * 0,3"
 permissions:
   contents: read
 
 jobs:
   tron:
-    if: github.event_name == 'schedule' || inputs.place == 'tron' || inputs.place == 'both'
+    if: github.event_name == 'schedule' || inputs.place == 'tron' || inputs.place == 'all'
     runs-on: [self-hosted, hw-nemo]
     timeout-minutes: 150
     concurrency:
@@ -92,22 +98,32 @@ jobs:
             hw-out/*.log
           if-no-files-found: ignore
 
-  lablp:
-    if: github.event_name == 'workflow_dispatch' && (inputs.place == 'lablp' || inputs.place == 'both')
-    runs-on: [self-hosted, hw-bq]
-    timeout-minutes: 30
+  kuiper:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: zc706, part: adrv9009, carrier: zc706 }
+          - { name: lablp, part: adrv9361z7035, carrier: adrv1crr-fmc }
+    if: >-
+      github.event_name == 'schedule' || inputs.place == 'all' ||
+      inputs.place == 'zc706' || inputs.place == 'lablp'
+    runs-on: [self-hosted, hw-nemo]
+    timeout-minutes: 90
+    concurrency:
+      group: libdatax-hw-${{ matrix.name }}
+      cancel-in-progress: false
     env:
-      DATAX_HW_URI: ${{ vars.DATAX_HW_URI_LABLP }}
-      DATAX_HW_REQUIRE: "1"
-      DATAX_HW_IMAGE: stock
-      DATAX_HW_EVIDENCE: ${{ github.workspace }}/evidence-lablp.json
-      DATAX_LIBRARY: ${{ github.workspace }}/build/libdatax.so
+      OUT: ${{ github.workspace }}/hw-out
+      SELECTED: ${{ github.event_name == 'schedule' || inputs.place == 'all' || inputs.place == matrix.name }}
     steps:
       - uses: actions/checkout@v4
-      # Prerequisite, not implemented yet: power and boot lablp through labgrid on the runner host
+        if: env.SELECTED == 'true'
       - name: Build the pinned libiio v1
+        if: env.SELECTED == 'true'
         run: |
           rev=$(jq -r .libiio.revision pins.json)
+          rm -rf libiio
           git clone --filter=blob:none https://github.com/tfcollins/libiio libiio
           git -C libiio checkout "$rev"
           cmake -S libiio -B libiio/build -DWITH_EMU_BACKEND=ON -DWITH_IIOD_EMU=ON \
@@ -115,24 +131,30 @@ jobs:
             -DWITH_SERIAL_BACKEND=OFF -DHAVE_DNS_SD=OFF -DWITH_EXAMPLES=OFF
           cmake --build libiio/build -j"$(nproc)"
       - name: Build libdatax
+        if: env.SELECTED == 'true'
         run: |
           cmake -S . -B build -DDATAX_LIBIIO_SOURCE=libiio -DDATAX_LIBIIO_BUILD=libiio/build
           cmake --build build -j"$(nproc)"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install Python package
-        run: pip install -e . numpy pytest
-      - name: Hardware suite
-        run: python -m pytest tests/hardware -v --junitxml=junit-lablp.xml
+      - name: Lab venv (libdatax, labgrid-plugins at pins.json)
+        if: env.SELECTED == 'true'
+        run: |
+          pin() { echo "git+https://github.com/$(jq -r ".$1.repository" pins.json)@$(jq -r ".$1.revision" pins.json)"; }
+          rm -rf .venv-hw
+          uv venv .venv-hw
+          uv pip install --python .venv-hw/bin/python -e . numpy pytest \
+            "labgrid-plugins @ $(pin labgrid_plugins)"
+      - name: ${{ matrix.name }}, catalog Kuiper image
+        if: env.SELECTED == 'true'
+        run: scripts/hw/kuiper-run.sh ${{ matrix.name }} ${{ matrix.part }} ${{ matrix.carrier }} "$OUT"
       - name: Redact outputs
-        if: always()
-        run: python3 scripts/hw/redact.py junit-lablp.xml evidence-lablp.json || true
+        if: always() && env.SELECTED == 'true'
+        run: test -d "$OUT" && python3 scripts/hw/redact.py "$OUT" && rm -f "$OUT"/*.raw.log || true
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && env.SELECTED == 'true'
         with:
-          name: hw-lablp
+          name: hw-${{ matrix.name }}
           path: |
-            junit-lablp.xml
-            evidence-lablp.json
+            hw-out/*.json
+            hw-out/*.xml
+            hw-out/*.log
           if-no-files-found: ignore

@@ -16,8 +16,17 @@ and [evidence/ci](evidence/ci/2026-11-11-tron/README.md).
   (coordinator, addresses, artifact directory) come from the runner's `.env`,
   never from this repository. Logs and artifacts pass through
   `scripts/hw/redact.py` before they are printed or uploaded.
-- **lablp** (ADRV9361-Z7035, label `hw-bq`): no runner registered yet, and the
-  job has no boot step yet.
+- **The other lab boards libdatax drives** (job `kuiper`, also on `hw-nemo`):
+  `scripts/hw/kuiper-run.sh` asks labgrid for the board by part
+  (`adi-lg request --mode uri`), so the coordinator's board catalog picks the
+  Kuiper image and the place's own boot strategy boots it. The suite then runs
+  against the exported URI with `DATAX_HW_IMAGE=stock` (the P3a tests skip).
+  - `zc706`: ADRV9009 on ZC706 (place `nemo`).
+  - `lablp`: ADRV9361-Z7035 on ADRV1CRR-FMC (place `lablp`).
+- **Lab boards with no libdatax device family** (AD9081 on `mini2`, ADRV9371 on
+  `bq`, DAQ3 on `nuc`) are not run here. tick and vrt49 cover them in their own
+  workflows. Opening them through libdatax fails with `ENOTSUP` "unsupported
+  device family".
 - The repository is public, so the lab runners accept only this workflow on
   `main`, dispatched or scheduled by the owner (a job-started hook on the runner
   enforces it), and fork pull requests need approval.

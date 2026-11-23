@@ -1,0 +1,81 @@
+{
+  "datax_module": "python/datax/__init__.py",
+  "iio_context": {
+    "attributes": {
+      "hdl_system_id": "[adrv9009] [RX:M=4 L=2 S=1 TX:M=4 L=4 S=1 RX_OS:M=2 L=2 S=1 DAC_FIFO_ADDR_WIDTH=10] on [zc706] git branch [hdl_2023_r2] git [2156ac7e874a1dc321d9f64a325009fafe563419] clean [2024-11-01 15:05:22] UTC",
+      "hw_carrier": "Xilinx Zynq ZC706",
+      "hw_mezzanine": "ADRV9009-W/PCBZ",
+      "hw_model": "ADRV9009-W/PCBZ on Xilinx Zynq ZC706",
+      "hw_name": "9009RC0,9528",
+      "hw_serial": "00048",
+      "hw_vendor": "Analog Devices",
+      "ip,ip-addr": "<ip>",
+      "local,kernel": "6.1.70-284114-g2e8908932dfd",
+      "uri": "ip:host"
+    },
+    "description": "Linux host 6.1.70-284114-g2e8908932dfd #1060 SMP PREEMPT Tue Mar 18 16:11:24 EET 2025 armv7l <ip>",
+    "version": "0.26-5e1e9cb"
+  },
+  "image": "stock",
+  "image_hashes": "kuiper=labgrid catalog default for adrv9009/zc706",
+  "libdatax_commit": "c9b81c2d09c2a3672d1cb2a800afac788c272383",
+  "libdatax_library": "build/libdatax.so.0.1.0",
+  "libdatax_version": "0.1",
+  "libiio_pin": "6534f14215f4738cec224bf50f13f475fe5264a6",
+  "pps_source": "internal",
+  "tests": {
+    "test_digital_loopback[ch0]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 485,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_digital_loopback[ch1]": {
+      "evm_db": -300.0,
+      "gain": [
+        1.0,
+        0.0
+      ],
+      "lag": 688,
+      "loopback_transform": "iq_exchange_no_shift",
+      "mismatches_vs_expected": 0
+    },
+    "test_family_and_channels": {
+      "channels": 2,
+      "device": "adrv9009",
+      "family": "adrv9009"
+    },
+    "test_recv_timeout_recovers": {
+      "first_recv": "data arrived within 1 ms"
+    },
+    "test_rx_block_nonconstant_per_channel": {
+      "std_by_channel": {
+        "0": 3530.21435546875,
+        "1": 43114.6484375
+      }
+    },
+    "test_rx_throughput_recorded": {
+      "direct_reg_access": true,
+      "mb_per_s": 31.765553795075395,
+      "rx_device": "axi-adrv9009-rx-hpc",
+      "samples": 79429632,
+      "seconds": 10.001982967136428,
+      "stats": {
+        "blocks_done": 1212,
+        "enabled": false,
+        "overflow_detect": true,
+        "overflows": 64,
+        "status_polls": 96,
+        "underflows": 0
+      }
+    },
+    "test_tx_oneshot_drains": {
+      "drain_s": 0.0038869420532137156
+    }
+  },
+  "uri": "ip:host"
+}

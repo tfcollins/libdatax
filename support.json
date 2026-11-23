@@ -75,6 +75,24 @@
           "workflow": "hw-test.yml"
         }
       }
+    },
+    "adrv9009-zc706": {
+      "features": {
+        "streaming-rx": {
+          "status": "validated",
+          "tier": 2,
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-23-zc706/README.md",
+          "note": "stock Kuiper 2023_R2_P1 (labgrid catalog), HDL hdl_2023_r2; single ADRV9009, 2 channels; digital loopback bit-exact (I/Q exchanged); hw-test.yml kuiper leg (zc706)",
+          "workflow": "hw-test.yml"
+        },
+        "streaming-tx": {
+          "status": "validated",
+          "tier": 2,
+          "evidence": "https://github.com/tfcollins/libdatax/blob/main/docs/evidence/ci/2026-11-23-zc706/README.md",
+          "note": "stock Kuiper 2023_R2_P1 (labgrid catalog), HDL hdl_2023_r2; single ADRV9009, 2 channels; digital loopback bit-exact (I/Q exchanged); hw-test.yml kuiper leg (zc706)",
+          "workflow": "hw-test.yml"
+        }
+      }
     }
   }
 }

@@ -256,13 +256,12 @@ def mismatches_at_lag(expected, raw, lag, mask=None):
 
 
 def spread_ok(values, tol=1):
-    """Every value within ``tol`` of the median (the "identical within +-1
-    sample" rule); returns ``(ok, median, max - min)``."""
+    """The "identical within +-1 sample" rule (controller ruling, S4): the
+    spread max - min is at most ``tol``. Returns ``(ok, median, max - min)``."""
     v = sorted(int(x) for x in values)
     if not v:
         return False, None, None
-    med = v[len(v) // 2]
-    return all(abs(x - med) <= tol for x in v), med, v[-1] - v[0]
+    return v[-1] - v[0] <= tol, v[len(v) // 2], v[-1] - v[0]
 
 
 def ring_coverage_s(block_samples, block_count, fs):

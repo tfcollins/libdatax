@@ -39,7 +39,7 @@ known-bad.
 
 | | ADRV9009-ZU11EG (`stock`) | ADRV9009-ZU11EG (`hopcap-sfp`) | ADRV9009-ZU11EG (`timed-dma`), not yet validated | ADRV9009 / ZC706 | ADRV9361-Z7035 |
 |---|---|---|---|---|---|
-| PL (`hdl_system_id`) | HDL `main` `085a6ed7` (recovery bitstream) | `adrv9009zu11eg_vrt49` on `corundum` (hopcap `ac07d56`: Tick, FHM trigger, PPS selector; XSA `6292e762`) | hopcap `--profile timed-dma` (hopcap `c342514`, boot set from `36a1710`; tick `1787c33`; vrt49 PR #91 `0c8764d`, `VRT_DAC_TX_ENABLE=0`; XSA `44cce693`): hopcap-sfp plus Tick's DMA gates, the capture tagger, chip B's FHM pin and the stock TX DMA | `hdl_2023_r2` `2156ac7e`, project `adrv9009` on `zc706` | `hdl_2023_r2` `2156ac7e`, project `adrv9361z7035_ccfmc`, LVDS |
+| PL (`hdl_system_id`) | HDL `main` `085a6ed7` (recovery bitstream) | `adrv9009zu11eg_vrt49` on `corundum` (hopcap `ac07d56`: Tick, FHM trigger, PPS selector; XSA `6292e762`) | hopcap `--profile timed-dma` (hopcap `c342514`; bitstream and XSA built from `73793f3`, boot set from `36a1710`; tick `1787c33`; vrt49 PR #91 `0c8764d`, `VRT_DAC_TX_ENABLE=0`; XSA `44cce693`): hopcap-sfp plus Tick's DMA gates, the capture tagger, chip B's FHM pin and the stock TX DMA | `hdl_2023_r2` `2156ac7e`, project `adrv9009` on `zc706` | `hdl_2023_r2` `2156ac7e`, project `adrv9361z7035_ccfmc`, LVDS |
 | Kernel | Kuiper 2023_R2 `6.1.70-284114-g2e8908932dfd` (aarch64) | hopcap's build `6.1.70-g2e8908932dfd-dirty` | hopcap's build (ADI linux `2e89089`), to be recorded by the first run | Kuiper 2023_R2 `6.1.70-284114-g2e8908932dfd` (armv7l) | same as ZC706 (armv7l) |
 | Device tree | Kuiper 2023_R2 | hopcap's | hopcap's, with `adi,stream-gate-map` on the Tick node | Kuiper boot folder `zynq-zc706-adv7511-adrv9009` | Kuiper boot folder `zynq-adrv9361-z7035-fmc` |
 | iiod | stock Kuiper `0.26-5e1e9cb` | same | same (expected) | same | same |
@@ -217,7 +217,7 @@ and PLL readback; there is no scope, and the evidence says so. See
 Needs the `timed-dma` image and `DATAX_HW_IMAGE=timed-dma` (not yet
 validated). `test_hw_timed_stream.py` checks block 0's hardware timestamp
 against Tick's edge capture, the first-sample offset of a TX pattern through
-the framer loopback over 10 runs (within +-1 sample: REQ-TEST-023, and the
+the framer loopback over 10 runs (max - min <= 1 sample: REQ-TEST-023, and the
 image's release latency), a TX burst gated off and on at 20 ms through the
 loopback, and chip B's FHM (timed tunes with PLL readback; enabling FHM must
 not move its LO). Over `ip:` only the blocks enqueued before T carry

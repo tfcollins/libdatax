@@ -340,9 +340,10 @@ def test_loopback_alignment(dev, hw_ctx, family, request, record):
     record("lag_spread", lspread)
     fml = ht.spread_ok([r["first_minus_lag"] % PERIOD for r in runs])
     record("first_minus_lag_median", fml[1])
-    ALIGN.update(first=med, lag=lmed, strip=strip, first_minus_lag=fml[1])
-    assert ok, f"first-sample offsets {firsts} not identical within +-1 sample"
+    assert ok, f"first-sample offsets {firsts} not identical within +-1 sample (max - min)"
     assert lok, f"pattern lags {[r['lag'] for r in runs]} not identical within +-1 sample"
+    # (c)'s reference, only from a passing (b)
+    ALIGN.update(first=med, lag=lmed, strip=strip, first_minus_lag=fml[1], passed=True)
 
 
 # ---- (c) gated burst: TX gated off and on, observed through the loopback -------------------
@@ -368,39 +369,33 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     ntx = tx_count(dev)
     d_off = ht.ticks_to_frames(ms(dev, GATE_OFF_MS), fs, hz)
     d_on = ht.ticks_to_frames(ms(dev, GATE_ON_MS), fs, hz)
-    ref_first = ALIGN.get("first")
+    ref_first = ALIGN.get("first") if ALIGN.get("passed") else None   # (b) passed
     need = d_on + (PERIOD if ref_first is None else ref_first) + 3 * PERIOD
     cover = ht.ring_coverage_s(BIG_BLOCK, NBLOCKS, fs)
     record("ring_coverage_s", cover)
     assert BIG_BLOCK * NBLOCKS - strip >= need, \
         f"the pre-T ring ({BIG_BLOCK} x {NBLOCKS}) cannot hold the {need} frames needed"
     tone = tone_raw(PERIOD)
+    attempts, r = [], None
     with digital_loopback(hw_ctx, family, record):
-        rx = track(request, dev.rx_stream(channels=(RX_CH,), block_samples=BIG_BLOCK,
-                                          block_count=NBLOCKS))
-        tx = preload_tx(dev, request, [tone] * ntx)
-        T, cost = start_pair(dev, rx, tx, PAIR_LEAD_MS)
-        t_off, t_on = T + ms(dev, GATE_OFF_MS), T + ms(dev, GATE_ON_MS)
-        s_off = sched.at(t_off).gate_off(tx, report=True)
-        s_on = sched.at(t_on).gate_on(tx, report=True)
-        sched.commit()
-        blocks, parts, total = [], [], 0
-        while total < need and len(blocks) < NBLOCKS:
-            n = BIG_BLOCK - strip if not blocks else BIG_BLOCK
-            raw, info = rx.recv_raw(n, timeout_ms=WAIT_MS)
-            if not blocks:
-                edge = ht.edge_capture(hw_ctx)
-                edge_read_at = dev.time.now
-            blocks.append({"start": total, "timestamp_ticks": info.timestamp_ticks,
-                           "discontinuous": info.discontinuous,
-                           "valid_samples": info.valid_samples, "frames": raw.shape[0]})
-            parts.append(raw)
-            total += raw.shape[0]
-        done = [sched.wait(s, WAIT_MS) for s in (s_off, s_on)]
-        stats = lb.stream_stats(rx)
-        rx.close()
-        tx.close()
-    stream = np.concatenate(parts)
+        for lead in (PAIR_LEAD_MS, 2 * PAIR_LEAD_MS):    # as (a) and (b): one retry when late
+            try:
+                r = _burst_capture(dev, hw_ctx, request, sched, ntx, tone, strip, need, lead)
+                attempts.append({"lead_ms": lead, "result": "ok"})
+                break
+            except datax.LateError as e:
+                attempts.append({"lead_ms": lead, "result": "late", "error": str(e)})
+                for st in request.node.opened:
+                    with contextlib.suppress(Exception):
+                        st.close()
+                with contextlib.suppress(Exception):
+                    sched.flush()
+    record("attempts", attempts)
+    assert r is not None, f"late at every lead: {attempts}"
+    T, cost, t_off, t_on = r["T"], r["cost"], r["t_off"], r["t_on"]
+    blocks, edge, edge_read_at = r["blocks"], r["edge"], r["edge_read_at"]
+    done, stats = r["done"], r["stats"]
+    stream = np.concatenate(r["parts"])
     exp = lb.expected_loopback(family, tone)
 
     # The anchor: block 0's tag, else Tick's edge capture of the opening.
@@ -482,6 +477,40 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
         f"gate edges off the commanded times + (b)'s offset - {n0}: {res}"
 
 
+def _burst_capture(dev, hw_ctx, request, sched, ntx, tone, strip, need, lead_ms):
+    """One gated-burst capture: RX and the tone TX from T, the gate off/on
+    commands, the pre-T blocks read, both completions. LateError from a late
+    start_at or commit (retried); a gate command that completes late is a
+    result, asserted by the caller."""
+    rx = track(request, dev.rx_stream(channels=(RX_CH,), block_samples=BIG_BLOCK,
+                                      block_count=NBLOCKS))
+    tx = preload_tx(dev, request, [tone] * ntx)
+    T, cost = start_pair(dev, rx, tx, lead_ms)
+    t_off, t_on = T + ms(dev, GATE_OFF_MS), T + ms(dev, GATE_ON_MS)
+    s_off = sched.at(t_off).gate_off(tx, report=True)
+    s_on = sched.at(t_on).gate_on(tx, report=True)
+    sched.commit()
+    blocks, parts, total, edge, edge_read_at = [], [], 0, None, None
+    while total < need and len(blocks) < NBLOCKS:
+        n = BIG_BLOCK - strip if not blocks else BIG_BLOCK
+        raw, info = rx.recv_raw(n, timeout_ms=WAIT_MS)
+        if not blocks:
+            edge = ht.edge_capture(hw_ctx)
+            edge_read_at = dev.time.now
+        blocks.append({"start": total, "timestamp_ticks": info.timestamp_ticks,
+                       "discontinuous": info.discontinuous,
+                       "valid_samples": info.valid_samples, "frames": raw.shape[0]})
+        parts.append(raw)
+        total += raw.shape[0]
+    done = [sched.wait(s, WAIT_MS) for s in (s_off, s_on)]
+    stats = lb.stream_stats(rx)
+    rx.close()
+    tx.close()
+    return {"T": T, "cost": cost, "t_off": t_off, "t_on": t_on, "blocks": blocks,
+            "parts": parts, "edge": edge, "edge_read_at": edge_read_at, "done": done,
+            "stats": stats}
+
+
 # ---- (d) chip-B FHM ---------------------------------------------------------------------
 
 def restage(dev, table):
@@ -495,14 +524,16 @@ def restage(dev, table):
 
 def test_chip_b_lo_unmoved_by_fhm_enable(dev, hw_ctx, record):
     """Plan gap 4: stage_hop_table enables FHM on both chips when the map names
-    fhm-b. Enabling it must not move chip B's LO: turn B's FHM off (through
-    the phy: closing the scheduler leaves it on, only the context's close
-    turns it off), park B away from the FHM init frequency, stage, read B's
-    live PLL back."""
+    fhm-b. Enabling it must not move chip B's LO: turn B's FHM off through the
+    phy (libdatax turns FHM off only when the context closes, so an earlier
+    test's stage leaves it on), park B away from the FHM init frequency,
+    stage, read B's live PLL back. Chip B is left as found: its LO, then its
+    FHM enable."""
     if dev._sched is not None and not dev._sched.closed:
         dev._sched.close()
     phys = (ht.PHY_A, ht.PHY_B)
-    record("fhm_enable_found", {p: ht.read_fhm_enable(hw_ctx, p) for p in phys})
+    found = {p: ht.read_fhm_enable(hw_ctx, p) for p in phys}
+    record("fhm_enable_found", found)
     ht.write_fhm_enable(hw_ctx, 0, ht.PHY_B)
     before = {p: {"fhm_enable": ht.read_fhm_enable(hw_ctx, p), "lo_hz": ht.read_lo_hz(hw_ctx, p)}
               for p in phys}
@@ -524,9 +555,10 @@ def test_chip_b_lo_unmoved_by_fhm_enable(dev, hw_ctx, record):
         assert after[ht.PHY_B]["pll_hz"] == PARK_B_HZ, \
             f"enabling FHM moved chip B's PLL from {PARK_B_HZ} to {after[ht.PHY_B]['pll_hz']}"
     finally:
-        try:                                 # B back as found: FHM off, its LO restored
+        try:                                 # B back as found: its LO (FHM off), then FHM
             ht.write_fhm_enable(hw_ctx, 0, ht.PHY_B)
             ht.write_lo_hz(hw_ctx, orig_b, ht.PHY_B)
+            ht.write_fhm_enable(hw_ctx, found[ht.PHY_B], ht.PHY_B)
             record("restored_b", {"fhm_enable": ht.read_fhm_enable(hw_ctx, ht.PHY_B),
                                   "lo_hz": ht.read_lo_hz(hw_ctx, ht.PHY_B)})
         except Exception as e:

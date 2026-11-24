@@ -55,6 +55,8 @@ def test_images_json_timed_dma_provenance():
     for repo in ("hopcap", "tick", "vrt49"):
         rev = e["provenance"][repo]["revision"]
         assert len(rev) == 40 and int(rev, 16) >= 0, (repo, rev)
+    for k in ("built_from", "bit_xsa_built_from"):       # boot set, and the bit/XSA build
+        assert len(e["provenance"]["hopcap"][k]) == 40, k
     assert ht.gate_map_roles(e["stream_gate_map"]) == [
         "rx-dma", "tx-dma", "rx-mode", "tx-mode", "fhm-b", "tx-start-fullmask-only"]
     assert "timed-dma" in ht.IMAGES

@@ -108,7 +108,9 @@ completion records and chip B's PLL readback. Throughput is never asserted.
   channel start at the same T, 10 times. Recorded per run: the RX index of the
   first non-zero sample, the pattern's lag, both `start_at` call times (the
   `ip:` setup cost) and mismatches against the looped-back pattern (asserted 0
-  after the first 2 samples). The offsets must be identical within +-1 sample.
+  after the first 2 samples). The offsets must be identical within +-1 sample: max - min <= 1 over the 10 runs.
+  A late `start_at` is retried (at most 3 late runs); (c) uses the median as
+  its reference only when this test passed.
   The offset is TX release, DAC path, framer loopback and RX together, against
   the RX release, so the median is recorded as the release-latency measurement
   of this image; the RX-only fabric latency cannot be separated here.

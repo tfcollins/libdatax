@@ -209,7 +209,8 @@ def test_pattern_lag_and_mismatches():
 
 def test_spread_ok():
     assert ht.spread_ok([10, 10, 11, 10]) == (True, 10, 1)
-    assert ht.spread_ok([9, 10, 11]) == (True, 10, 2)          # +-1 of the median
+    assert ht.spread_ok([9, 10, 11]) == (False, 10, 2)         # max - min must be <= 1
+    assert ht.spread_ok([7, 7, 7]) == (True, 7, 0)
     assert ht.spread_ok([9, 10, 12])[0] is False
     assert ht.spread_ok([])[0] is False
 

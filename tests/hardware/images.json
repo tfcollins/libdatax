@@ -33,6 +33,7 @@
           "branch": "p3b-timed-dma",
           "revision": "c342514ed067faf41b851f51af5f854aa0503be4",
           "built_from": "36a171057711260cc213b8d711b200b78fc60518",
+          "bit_xsa_built_from": "73793f3fd84ab73835487df8e4277f49932c51eb",
           "profile": "timed-dma"
         },
         "tick": {

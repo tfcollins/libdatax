@@ -423,3 +423,65 @@ The builder check (a fresh reviewer, no context) asked three questions:
 3. **Does the Python `recv` change shape?** No. It keeps `(samples, BlockInfo)`, and
    `BlockInfo.timestamp_ticks` is 0 when unknown, as in C. The S0 doc pass found that the real
    field is `timestamp_ticks: int`. The earlier draft's "`.timestamp` is None" is withdrawn.
+
+## Spike G2/G3 rulings (2026-11-24)
+
+Source: tick branch `p3b-spike-gate` 3455531, with 18 simulation tests. The real ADI
+`util_cpack2`, `axi_dmac_transfer` and `axi_dacfifo` run at the block design's parameters.
+
+Results:
+- G2(a) passes: release jitter is under one device clock.
+- G2(b) passes.
+- G2(c) RX passes.
+- **G2(c) TX fails as specified:** each pause/resume behind `axi_dacfifo` loses 2 words and
+  repeats 1.
+- G2(d): gate the cpack `fifo_wr_en` **pin** only. The `adc_valid_0` net also feeds four vrt49
+  blocks, the VRT time base among them.
+- G3 passes at the real 128-bit width.
+
+Rulings (implementer's calls; the owner is away and the standing instruction is to decide):
+
+1. **TX gate closures mute; they do not pause.** This supersedes decisions 2 and 5.
+   - While a TX gate is closed, reads continue and the DAC receives zeros. The cyclic buffer
+     keeps playing and resumes time-aligned.
+   - TX `start_at` still holds reads from its close until T, then mutes the first N reads.
+     N is `axi_dacfifo`'s stale register plus duplicates of word 0: N = 3 at 8 converters.
+   - Why: a true pause behind the DDR `axi_dacfifo` corrupts samples, and the bypass mode is no
+     better. Mute keeps the waveform's phase tied to device time, which is what a gated burst
+     pattern needs.
+   - Cost if wrong: an application wanting pause and resume must reload its buffer.
+2. **TX `start_at` with a partial channel mask** is one upack read early after a reload. That
+   comes from `util_upack2`'s leftover half-word from the forced-open run.
+   - S2 fixes it: reset upack well before the read release, then re-prime it, and make N a
+     per-mask value.
+   - If that fails, the image advertises a `tx-start-fullmask-only` role in `stream_gate_map`,
+     and libdatax refuses partial-mask TX `start_at` with `-ENOTSUP`.
+3. **RX insertion:** only `util_som_rx_cpack/fifo_wr_en` is re-routed, and only
+   `util_som_rx_cpack/reset` gets the extra `pack_reset`. The `adc_valid_0` and `adc_rst` nets
+   are untouched, and the netlist check asserts this.
+   - `pack_reset` holds cpack in reset while the gate is timed and closed. Non-power-of-two
+     channel counts need it.
+4. **Adapter re-arm:** `tlast = !mode | !pass`, from the gate's synchronized outputs. Beats that
+   carry the synthetic tlast pass unmodified. This replaces decision 3's "while mode is 0".
+5. **Tag-versus-data race:**
+   - The gate's `OPEN_DELAY` is 12 device clocks. 6 failed once when a TX open shared T.
+   - S2 adds a tick-domain filter so the RX tagger only sees gate-0 tags.
+   - libdatax also orders an RX open before a TX open at the same T.
+   - The release latency is about 18 device clocks. It is fixed per image and measured in S4.
+6. **Timestamp contract (decision 3, refined):**
+   - `util_cpack2` drops the first sample after any gap, so the first stored sample is the
+     second released one.
+   - libdatax strips `ceil(32 / frame_bytes)` whole frames, not 32 bytes: 2, 4 or 8 frames at
+     8, 4 or 2 converters, and 3 frames at 6.
+   - Block 0's `timestamp_ticks` is `capture_tick + round((1 + dropped_frames) × tick_hz / fs)`.
+   - The fixed fabric release latency is not added in S3. S4 measures it, and the API page
+     states it per image.
+7. **Overflow side effect:** with the gate forced open and no DMA running, cpack overflow drives
+   TPL `adc_dovf` continuously. The stock design does the same with no buffer active.
+   `start_at` clears any sticky overflow status after the DMA enable, so a stream does not start
+   "discontinuous".
+8. **The axi_dmac holds about 2 descriptors in hardware.** "Every block enqueued before T"
+   holds at the IIO/kernel level. That is sufficient, and the simulation confirmed it.
+9. **S2 integration bench:** one run with the real `axi_timed_command_scheduler` driving the
+   gate and tagger. It covers same-T command spacing and the late-flagged tag on the
+   execute-now path.

@@ -343,12 +343,23 @@ def test_loopback_alignment(dev, hw_ctx, family, request, record):
 BURST_RUNS = 3          # the gate latencies must be fixed: same edges every run
 
 
+def gate_edge_offset_frames():
+    """The image's measured TX gate edge constant (P3b spec, option 1 item 7):
+    where a mid-stream TX gate edge lands, in frames, against the commanded time
+    plus (b)'s offset less the start mute (ht.TX_START_MUTE_READS). A fixed
+    latency of the image's gate path like the loopback offset itself, measured
+    on tron and pinned in images.json; every edge must sit there +-1 sample."""
+    images = json.loads((Path(__file__).parent / "images.json").read_text())
+    return int(images["tron"]["timed-dma"]["tx_gate_edge_offset_frames"])
+
+
 @pytest.mark.needs_tx
 def test_gated_burst(dev, hw_ctx, family, request, record):
     """RX runs from a start_at; a constant-tone cyclic TX started at the same T
     is gated off at T + 20 ms and on at T + 40 ms, BURST_RUNS times. In each
-    run the edges must sit at the commanded times plus (b)'s offset, +-1
-    sample, and both gate commands complete on time.
+    run the edges must sit at the commanded times plus (b)'s offset plus the
+    image's edge constant (images.json tx_gate_edge_offset_frames), +-1 sample,
+    identical +-1 across the bursts, and both gate commands complete on time.
 
     Times are libdatax's derived block timestamps: every block read here is
     one of the 4 enqueued before T, which libdatax keeps clean even though
@@ -371,6 +382,8 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     need = d_on + (PERIOD if ref_first is None else ref_first) + 3 * PERIOD
     record("ring_coverage_s", ht.ring_coverage_s(BIG_BLOCK, NBLOCKS, fs))
     record("tx_buffer_frames", PERIOD)
+    c = gate_edge_offset_frames()
+    record("tx_gate_edge_offset_frames", c)
     record("reference_first", ref_first)
     assert BIG_BLOCK * NBLOCKS - strip >= need, \
         f"the pre-T ring ({BIG_BLOCK} x {NBLOCKS}) cannot hold the {need} frames needed"
@@ -395,17 +408,20 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
             record("attempts", attempts)
             assert r is not None, f"late at every lead: {attempts}"
             results.append(_burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz,
-                                           d_off, d_on, ref_first, need))
+                                           d_off, d_on, ref_first, need, c))
             record("runs", [{k: v for k, v in x.items() if k != "fails"} for x in results])
     fails = [f"run {i}: {f}" for i, x in enumerate(results) for f in x["fails"]]
     record("residuals", [x["edges"]["residuals"] for x in results])
-    for key in ("off", "on", "spacing"):
-        record(f"{key}_residual_spread",
-               ht.spread_ok([x["edges"]["residuals"][key] for x in results])[2])
+    for key in ("off", "on", "spacing"):        # the same edges every burst, +-1 sample
+        vals = [x["edges"]["residuals"][key] for x in results]
+        ok, _, spread = ht.spread_ok([v for v in vals if v is not None])
+        record(f"{key}_residual_spread", spread)
+        if not ok:
+            fails.append(f"{key} edges not identical +-1 across bursts: {vals}")
     assert not fails, "; ".join(fails)
 
 
-def _burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz, d_off, d_on, ref_first, need):
+def _burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz, d_off, d_on, ref_first, need, c):
     """Edges, contiguity, timestamps and diagnostics of one burst capture.
     Returns plain data, with ``fails``: the assertion texts that failed."""
     T, t_off, t_on = r["T"], r["t_off"], r["t_on"]
@@ -452,7 +468,7 @@ def _burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz, d_off, d_on, ref_first, 
     first, e_off, e_on = rs[0][0], rs[0][1], rs[1][0]
     ref = ref_first if ref_first is not None else first
     n0 = ht.TX_START_MUTE_READS
-    want_off, want_on = ref - n0 + d_off, ref - n0 + d_on
+    want_off, want_on = ref - n0 + d_off + c, ref - n0 + d_on + c
     res = {"first": first - ref, "off": e_off - want_off, "on": e_on - want_on,
            "spacing": (e_on - e_off) - (d_on - d_off)}
     # The start mute measured here: the gate edges are tied to the time-aligned
@@ -460,6 +476,8 @@ def _burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz, d_off, d_on, ref_first, 
     out["edges"] = {"first": first, "off": e_off, "on": e_on,
                     "want_off": want_off, "want_on": want_on,
                     "start_mute_reads_assumed": n0,
+                    "edge_offset_frames": c,
+                    "raw_residuals": {"off": res["off"] + c, "on": res["on"] + c},
                     "start_mute_reads_measured": {"off": ref + d_off - e_off,
                                                   "on": ref + d_on - e_on},
                     "residuals": res}
@@ -516,7 +534,8 @@ def _burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz, d_off, d_on, ref_first, 
     if ref_first is not None and abs(res["first"]) > 1:
         fails.append(f"start offset {first} vs (b)'s {ref_first}")
     if abs(res["off"]) > 1 or abs(res["on"]) > 1:
-        fails.append(f"gate edges off the commanded times + (b)'s offset - {n0}: {res}")
+        fails.append(f"gate edges off the commanded times + (b)'s offset - {n0} "
+                     f"+ the image's edge constant {c}: {res}")
     return out
 
 

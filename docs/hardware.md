@@ -219,7 +219,10 @@ validated). `test_hw_timed_stream.py` checks block 0's hardware timestamp
 against Tick's edge capture, the first-sample offset of a TX pattern through
 the framer loopback over 10 runs (each run within +-1 sample of the median: REQ-TEST-023, and the
 image's release latency), a TX burst gated off and on at 20 ms through the
-loopback, and chip B's FHM (timed tunes with PLL readback; enabling FHM must
+loopback (its edges sit at a measured constant: on the timed-dma image
+they land 7 frames before the commanded time plus the loopback offset less
+the TX start mute, every burst and every run; `images.json` pins it as
+`tx_gate_edge_offset_frames`), and chip B's FHM (timed tunes with PLL readback; enabling FHM must
 not move its LO). Over `ip:` only the blocks enqueued before T carry
 timestamps: the ring overflows before the host reads it, and libdatax
 attributes that to the first re-armed block, which reads discontinuous with

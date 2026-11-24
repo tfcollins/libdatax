@@ -613,6 +613,34 @@ static void test_start_at_tx_late_on_submit(void)
 	fx_close(&x);
 }
 
+static void test_start_at_tx_host_late(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	unsigned long long T;
+	size_t e0;
+
+	/* The unreported TX open's other late path: the feeder's guard rule
+	 * finishes it LATE through its hook. */
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, false);
+	CHECK(preload(s, NB * BS) == (int)(NB * BS));
+	e0 = fake_tick_exec_log(x.f, 0, NULL, 0);
+	T = at(&x, 30);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	fake_tick_advance(x.f, T - 5 * MS - now(&x));
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	WAIT_FOR(events(&x.ev, DATAX_EVT_LATE_COMMAND, "host could not keep the queue fed"));
+	CHECK(preload(s, 1) == DATAX_ERR_LATE);
+	CHECK(strstr(lasterr(&x), "host could not keep the queue fed") != NULL);
+	step_to(&x, T + 10 * FT, 1 * MS);
+	CHECK(gate_execs(&x, e0, x.txl, T, NULL, NULL) == 0);   /* never pushed */
+	CHECK(!gate_bit(&x, x.txl));
+	(void)datax_stream_stop(s);
+	fx_close(&x);
+}
+
 static void test_held_slot_open_never_delivers_shifted(void)
 {
 	struct fx x;
@@ -1362,6 +1390,7 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_start_at_rx_first_frame_at_T),
 	T_(test_start_at_late_at_dispatch_fails),
 	T_(test_start_at_tx_late_on_submit),
+	T_(test_start_at_tx_host_late),
 	T_(test_held_slot_open_never_delivers_shifted),
 	T_(test_refeed_keeps_near_edge),
 	T_(test_stop_cancels_open),

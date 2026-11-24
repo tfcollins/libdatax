@@ -393,6 +393,7 @@ if(DATAX_LIBIIO_BUILD)
   set(DATAX_STREAM_TIMED_TESTS
     test_start_at_guard_margin_late test_start_at_order test_start_at_rx_first_frame_at_T
     test_start_at_late_at_dispatch_fails test_start_at_tx_late_on_submit
+    test_start_at_tx_host_late
     test_held_slot_open_never_delivers_shifted test_refeed_keeps_near_edge
     test_stop_cancels_open test_cancel_keeps_others test_stop_armed_rx_bounded
     test_start_after_aborted_start_at_open test_start_forces_open

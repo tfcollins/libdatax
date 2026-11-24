@@ -58,6 +58,9 @@ struct datax_stream {
 	bool polled_once, detect_off;
 	long long last_poll_us;
 	bool disc_pending;                  /* RX: report discontinuous next */
+	/* RX: an overflow block 0's poll saw, deferred to block 1 (stream.c,
+	 * rx_block_defer) */
+	bool disc_next;
 
 	/* P3b Task 3 (stream_timed.c): timed start. timed: started by
 	 * start_at (stop() then cancels its gate commands); stopping: stop()

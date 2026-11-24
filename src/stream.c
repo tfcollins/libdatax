@@ -591,6 +591,7 @@ int datax_stream_start(struct datax_stream *s)
 	/* An overflow seen before a stop() belongs to the old run: the first
 	 * block after a restart must not carry it. */
 	s->disc_pending = false;
+	s->disc_next = false;
 	if (s->cfg.cyclic) {
 		/* Cyclic TX enables at its single send (TX task), or now when
 		 * send() preloaded the buffer. */
@@ -811,6 +812,27 @@ static void rx_block_meta(struct datax_stream *s)
 		rx_block0_tag(s);
 }
 
+/*
+ * After the status check, before the block's time. Block 0 of a timed,
+ * tagged release has nothing before it: the gate was closed until T and
+ * every block was enqueued before T. Its first sample is anchored by its own
+ * tag, so no overflow can make its timestamp wrong. An overflow its poll
+ * sees therefore lies after it (at native rates over ip: the ring is always
+ * full by the time the host takes block 0): it is deferred to block 1, the
+ * "next block is discontinuous" granularity, and is sticky from there.
+ */
+static void rx_block_defer(struct datax_stream *s)
+{
+	if (s->disc_next) {
+		s->disc_pending = true;
+		s->disc_next = false;
+	}
+	if (s->timed && s->strip_frames && s->blk == 0 && s->disc_pending) {
+		s->disc_pending = false;
+		s->disc_next = true;
+	}
+}
+
 /* After the status check: the block's time, and the count of blocks. */
 static void rx_block_time(struct datax_stream *s)
 {
@@ -919,6 +941,7 @@ hold:
 		s->stats.blocks_done++;
 		rx_block_meta(s);
 		datax_stream_status_check(s, false);
+		rx_block_defer(s);
 		rx_block_time(s);
 		return 0;
 	}

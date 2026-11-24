@@ -192,6 +192,7 @@ void datax_stream_timed_reset(struct datax_stream *s)
 	s->blk0_held = false;
 	s->anchored = false;
 	s->unknown = false;
+	s->disc_next = false;
 	s->blk = 0;
 	s->blk_strip = 0;
 	s->blk_ts = 0;

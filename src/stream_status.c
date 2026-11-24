@@ -180,6 +180,7 @@ void datax_stream_status_clear(struct datax_stream *s)
 	int ret;
 
 	s->disc_pending = false;
+	s->disc_next = false;
 	if (s->detect_off)
 		return;
 	s->stats.status_polls++;

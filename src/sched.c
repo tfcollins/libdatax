@@ -455,9 +455,13 @@ int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
 	s->dev = dev;
 	s->ctx = ctx;
 	s->poll_us = DATAX_SCHED_DEFAULT_POLL_US;
-	/* GPIO bit 0 drives TAL_GPIO_0, the FHM hop trigger, on the adrv9009
-	 * (ZU11EG) image: only queue_tune may drive it. */
-	s->reserved_mask = dev->family == DATAX_FAMILY_ADRV9009 ? 0x1u : 0u;
+	/* The FHM hop triggers (fhm.h) on the adrv9009 (ZU11EG) image: chip
+	 * A's TAL_GPIO_0 on GPIO bit 0, and chip B's on bit 1 when the gate map
+	 * names fhm-b. Only queue_tune may drive them. */
+	s->reserved_mask = 0u;
+	if (dev->family == DATAX_FAMILY_ADRV9009)
+		s->reserved_mask = DATAX_FHM_TRIGGER_A |
+				   (dev->caps.gate_map.fhm_b ? DATAX_FHM_TRIGGER_B : 0u);
 	s->next_order = 1;
 	s->next_done = 1;
 	/* Locks first: once published, get_time may take a reference and io. */

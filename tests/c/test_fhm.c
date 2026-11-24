@@ -12,7 +12,12 @@
  * moves only when the test advances it, edge by edge, waiting for the
  * poller's staging writes in between, so the run is deterministic.
  *
- * Usage: test_fhm [one <name>]
+ * Chip-B mode (P3b Task 6, its own ctest test_fhm_chipb): the fake Tick
+ * carries the P3b bitmap and a stream_gate_map naming fhm-b, and a second
+ * fake FHM follows GPIO bit 1 as chip B (Talise B's TAL_GPIO_0, P3b spec
+ * decision 7), bound through datax_internal_fhm_bind_fake_chip.
+ *
+ * Usage: test_fhm [realtime | chipb] [one <name>]
  */
 #include <errno.h>
 #include <pthread.h>
@@ -297,6 +302,11 @@ struct fx {
 	struct fake_tick *f;
 	struct fake_fhm *m;
 	struct fshim sh;
+	/* chip-B mode: chip B's fake FHM (GPIO bit 1) and its shim, and the
+	 * rising edges seen per GPIO bit (ground truth) */
+	struct fake_fhm *mb;
+	struct fshim shb;
+	_Atomic unsigned int rises[4];
 	struct tshim tsh;
 	struct datax_sched *s;
 	struct evrec ev;
@@ -324,15 +334,32 @@ static void msleep(unsigned int ms)
 
 /* Tick queue depth for the next fx_open (0: tron's 16). */
 static unsigned int g_depth;
+/* Chip-B mode (argv "chipb"): fhm-b in the gate map, chip B's fake on bit 1. */
+static bool g_chipb;
+#define CHIPB_MAP    "rx-dma,tx-dma,rx-mode,tx-mode,fhm-b"
+#define CHIPB_BITMAP 0xdfu
+
+/* gpio hook (fake Tick lock held): count rising edges per bit. */
+static void count_rises(void *user, uint32_t old_gpio, uint32_t new_gpio, uint64_t ticks)
+{
+	struct fx *x = user;
+
+	(void)ticks;
+	for (unsigned int b = 0; b < 4; b++)
+		if (!(old_gpio & (1u << b)) && (new_gpio & (1u << b)))
+			atomic_fetch_add(&x->rises[b], 1u);
+}
 
 static void fx_open(struct fx *x, bool create)
 {
 	const char *uri = getenv("DATAX_TEST_URI");
-	struct fake_tick_config cfg = { .tick_hz = HZ, .queue_depth = g_depth };
+	struct fake_tick_config cfg = { .tick_hz = HZ, .queue_depth = g_depth,
+					.capability_bitmap = g_chipb ? CHIPB_BITMAP : 0 };
 
 	memset(x, 0, sizeof(*x));
 	CHECK(uri != NULL);
 	CHECK(pthread_mutex_init(&x->sh.mu, NULL) == 0);
+	CHECK(pthread_mutex_init(&x->shb.mu, NULL) == 0);
 	CHECK(pthread_mutex_init(&x->tsh.mu, NULL) == 0);
 	CHECK(pthread_mutex_init(&x->ev.m, NULL) == 0);
 	x->f = fake_tick_new(&cfg);
@@ -343,10 +370,24 @@ static void fx_open(struct fx *x, bool create)
 	x->sh.f = x->f;
 	x->tsh.f = x->f;
 	x->tsh.depth = g_depth ? g_depth : 16;
+	if (g_chipb) {
+		/* before the Tick bind: the gate map is probed there */
+		fake_tick_set_gate_map(x->f, CHIPB_MAP);
+		x->mb = fake_fhm_new(0);
+		CHECK(x->mb != NULL);
+		CHECK(fake_fhm_attach_bit(x->mb, x->f, 1) == 0);
+		CHECK(fake_tick_add_gpio_hook(x->f, count_rises, x) == 0);
+		x->shb.m = x->mb;
+		x->shb.f = x->f;
+	}
 	CHECK(datax_context_create_from_uri(uri, &x->ctx) == 0);
 	CHECK(datax_context_get_device(x->ctx, 0, &x->dev) == 0);
 	CHECK(datax_internal_tick_bind_fake(x->dev, &tshim_ops, &x->tsh) == 0);
 	CHECK(datax_internal_fhm_bind_fake(x->dev, &fshim_ops, &x->sh) == 0);
+	if (g_chipb) {
+		CHECK(x->dev->caps.gate_map.fhm_b);
+		CHECK(datax_internal_fhm_bind_fake_chip(x->dev, 1, &fshim_ops, &x->shb) == 0);
+	}
 	CHECK(datax_context_set_event_callback(x->ctx, on_event, &x->ev) == 0);
 	fake_tick_advance(x->f, 1000 * MS);
 	if (create) {
@@ -360,9 +401,11 @@ static void fx_close(struct fx *x)
 {
 	datax_sched_destroy(x->s);
 	datax_context_destroy(x->ctx);
-	fake_fhm_free(x->m);
+	fake_fhm_free(x->m);         /* both before the Tick: they clear its hooks */
+	fake_fhm_free(x->mb);
 	fake_tick_free(x->f);
 	pthread_mutex_destroy(&x->sh.mu);
+	pthread_mutex_destroy(&x->shb.mu);
 	pthread_mutex_destroy(&x->tsh.mu);
 	pthread_mutex_destroy(&x->ev.m);
 }
@@ -415,11 +458,11 @@ static void fed(struct fx *x)
 
 /* Advance the fake clock until the FHM has seen n committing edges (at
  * most limit ticks), then a little past the edge, and give the poller time. */
-static void to_edge(struct fx *x, unsigned int n, unsigned long long limit)
+static void to_edges(struct fx *x, unsigned int na, unsigned int nb, unsigned long long limit)
 {
 	unsigned long long t0 = fake_tick_now(x->f);
 
-	while (fake_fhm_edges(x->m) < n) {
+	while (fake_fhm_edges(x->m) < na || (x->mb && fake_fhm_edges(x->mb) < nb)) {
 		CHECK(fake_tick_now(x->f) - t0 < limit);
 		fed(x);
 		fake_tick_advance(x->f, 10 * US);
@@ -427,6 +470,17 @@ static void to_edge(struct fx *x, unsigned int n, unsigned long long limit)
 	fake_tick_advance(x->f, PAST);
 	msleep(3);
 	fed(x);
+}
+
+static void to_edge(struct fx *x, unsigned int n, unsigned long long limit)
+{
+	to_edges(x, n, 0, limit);
+}
+
+/* Chip B (chip-B mode): n committing edges on chip B's fake. */
+static void to_edge_b(struct fx *x, unsigned int n, unsigned long long limit)
+{
+	to_edges(x, 0, n, limit);
 }
 
 static struct datax_completion wait_done(struct fx *x, long seq)
@@ -1825,6 +1879,359 @@ static void test_teardown_flush_is_silent(void)
 	printf("test_teardown_flush_is_silent: ok\n");
 }
 
+/* ---- chip-B mode (P3b Task 6): Talise B's FHM on Tick GPIO bit 1 ------------- */
+
+/* fhm-b and chip B's seam: tunes on channels 2-3 (RX 2-3, TX 2-3) pulse
+ * bit 1 only, primed and one behind, and chip A (bit 0) is untouched. */
+static void test_tune_chip_b_on_bit1(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t0;
+	size_t base;
+	long s1, s2;
+
+	fx_open(&x, true);
+	base = stage(&x, plan, 2);
+	CHECK(stages(&x.shb) == 0);               /* the stage time is measured on chip A */
+	t0 = now(&x) + 100 * MS;
+	s1 = datax_sched_queue_tune(x.s, t0, 2, F_A);
+	CHECK(s1 > 0);
+	s2 = datax_sched_queue_tune(x.s, t0 + 20 * MS, 7, F_B);   /* chip B's TX1 */
+	CHECK(s2 > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 6;
+	WAIT_FOR(stages(&x.shb) == 1);            /* F_A staged on chip B before the priming edge */
+	CHECK(stage_hz(&x.shb, 0) == F_A);
+	to_edge_b(&x, 1, 200 * MS);               /* the priming edge */
+	CHECK(now(&x) < t0);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_INIT);
+	WAIT_FOR(stages(&x.shb) == 2);
+	CHECK(stage_hz(&x.shb, 1) == F_B);
+	to_edge_b(&x, 2, 50 * MS);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_A);
+	CHECK(fake_tick_gpio(x.f) & 0x2);         /* its pulse is on bit 1 ... */
+	CHECK(!(fake_tick_gpio(x.f) & 0x1));      /* ... not bit 0 */
+	to_edge_b(&x, 3, 50 * MS);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_B);
+	c = wait_done(&x, s1);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	CHECK(c.executed_ticks == c.requested_ticks && c.requested_ticks == t0);
+	c = wait_done(&x, s2);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	fake_tick_advance(x.f, 11 * MS);
+	msleep(3);
+	CHECK(!(fake_tick_gpio(x.f) & 0x3));
+	/* ground truth: three rises on bit 1, none on bit 0; chip A never
+	 * moved and saw no staging write after stage_hop_table */
+	CHECK(atomic_load(&x.rises[1]) == 3);
+	CHECK(atomic_load(&x.rises[0]) == 0);
+	CHECK(fake_fhm_edges(x.m) == 0);
+	CHECK(fake_fhm_pll_hz(x.m) == F_INIT);
+	CHECK(stages(&x.sh) == base);
+	CHECK(count_events(&x.ev, DATAX_EVT_LATE_COMMAND) == 0);
+	fx_close(&x);
+
+	/* fhm-b present, chip B's seam detached: P3a's -ENOTSUP, for
+	 * queue_tune and timed set_frequency alike */
+	fx_open(&x, false);
+	CHECK(datax_internal_fhm_bind_fake_chip(x.dev, 2, &fshim_ops, &x.shb) == -EINVAL);
+	CHECK(datax_internal_fhm_bind_fake_chip(x.dev, 1, NULL, NULL) == 0);
+	(void)stage(&x, plan, 2);
+	CHECK(!fake_fhm_enabled(x.mb));
+	CHECK(datax_device_set_frequency(x.dev, 2, F_A, now(&x) + 100 * MS) == -ENOTSUP);
+	CHECK(strstr(lasterr(&x), "chip B FHM trigger is not wired on this image"));
+	fake_tick_set_access_cost(x.f, COST);
+	CHECK(datax_sched_create(x.dev, &x.s) == 0);
+	fake_tick_set_access_cost(x.f, 0);
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 3, F_A) == -ENOTSUP);
+	CHECK(strstr(lasterr(&x), "chip B FHM trigger is not wired on this image"));
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 1, F_A) > 0);
+	fx_close(&x);
+	printf("test_tune_chip_b_on_bit1: ok\n");
+}
+
+/* Interleaved tunes on both chips: each chip gets its own priming edge and
+ * stages one ahead on its own pipeline; neither disturbs the other. */
+static void test_two_pipelines_independent(void)
+{
+	static const unsigned long long plan[3] = { F_A, F_B, F_C };
+	struct fx x;
+	unsigned long long t0;
+	size_t base;
+	long a1, b1, a2, b2;
+
+	fx_open(&x, true);
+	base = stage(&x, plan, 3);
+	t0 = now(&x) + 100 * MS;
+	/* rises 7 ms or more apart: all four reported (spacing 2.7 ms) */
+	a1 = datax_sched_queue_tune(x.s, t0, 0, F_A);
+	b1 = datax_sched_queue_tune(x.s, t0 + 7 * MS, 2, F_B);
+	a2 = datax_sched_queue_tune(x.s, t0 + 20 * MS, 1, F_C);
+	b2 = datax_sched_queue_tune(x.s, t0 + 27 * MS, 3, F_A);
+	CHECK(a1 > 0 && b1 > 0 && a2 > 0 && b2 > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 12;                              /* two priming pulses, four tunes */
+	WAIT_FOR(stages(&x.sh) == base + 1 && stages(&x.shb) == 1);
+	CHECK(stage_hz(&x.sh, base) == F_A);
+	CHECK(stage_hz(&x.shb, 0) == F_B);
+
+	to_edges(&x, 1, 0, 200 * MS);             /* chip A's priming edge (t0 - 10 ms) */
+	CHECK(fake_fhm_edges(x.mb) == 0);
+	CHECK(fake_fhm_pll_hz(x.m) == F_INIT);
+	WAIT_FOR(stages(&x.sh) == base + 2);
+	CHECK(stage_hz(&x.sh, base + 1) == F_C);
+	CHECK(stages(&x.shb) == 1);               /* chip B still waits on its own */
+
+	to_edges(&x, 1, 1, 50 * MS);              /* chip B's priming edge (t0 - 3 ms) */
+	CHECK(fake_fhm_edges(x.m) == 1);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_INIT);
+	WAIT_FOR(stages(&x.shb) == 2);
+	CHECK(stage_hz(&x.shb, 1) == F_A);
+	CHECK(now(&x) < t0);
+
+	to_edges(&x, 2, 1, 50 * MS);              /* A1 */
+	CHECK(fake_fhm_pll_hz(x.m) == F_A);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_INIT);
+	to_edges(&x, 2, 2, 50 * MS);              /* B1 */
+	CHECK(fake_fhm_pll_hz(x.mb) == F_B);
+	CHECK(fake_fhm_pll_hz(x.m) == F_A);
+	to_edges(&x, 3, 2, 50 * MS);              /* A2 */
+	CHECK(fake_fhm_pll_hz(x.m) == F_C);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_B);
+	to_edges(&x, 3, 3, 50 * MS);              /* B2 */
+	CHECK(fake_fhm_pll_hz(x.mb) == F_A);
+
+	{
+		const long seq[4] = { a1, b1, a2, b2 };
+		const unsigned long long at[4] = { t0, t0 + 7 * MS, t0 + 20 * MS, t0 + 27 * MS };
+
+		for (int i = 0; i < 4; i++) {
+			struct datax_completion c = wait_done(&x, seq[i]);
+
+			CHECK(c.status == DATAX_COMPLETION_OK);
+			CHECK(c.requested_ticks == at[i]);
+			CHECK(c.executed_ticks == c.requested_ticks);
+		}
+	}
+	fake_tick_advance(x.f, 11 * MS);
+	msleep(3);
+	CHECK(stages(&x.sh) == base + 2 && stages(&x.shb) == 2);   /* two tunes each */
+	CHECK(atomic_load(&x.rises[0]) == 3 && atomic_load(&x.rises[1]) == 3);
+	CHECK(!(fake_tick_gpio(x.f) & 0x3));
+	CHECK(count_events(&x.ev, DATAX_EVT_LATE_COMMAND) == 0);
+	fx_close(&x);
+	printf("test_two_pipelines_independent: ok\n");
+}
+
+/* test_fhm_stage_late on chip B: the write staging C stalls past B's edge;
+ * C's tune is LATE "stage late" and chip B stays on B. */
+static void test_chip_b_stage_late(void)
+{
+	static const unsigned long long plan[3] = { F_A, F_B, F_C };
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t0;
+	long seq[3];
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 3);
+	t0 = now(&x) + 100 * MS;
+	for (int i = 0; i < 3; i++)
+		CHECK((seq[i] = datax_sched_queue_tune(x.s, t0 + (unsigned long long)i * 20 * MS,
+						       2 + (unsigned int)(i % 2), plan[i])) > 0);
+	pthread_mutex_lock(&x.shb.mu);
+	x.shb.stall_hz = F_C;
+	x.shb.stall_ticks = 25 * MS;
+	pthread_mutex_unlock(&x.shb.mu);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 8;
+	to_edge_b(&x, 1, 200 * MS);
+	to_edge_b(&x, 2, 50 * MS);
+	WAIT_FOR(fake_fhm_edges(x.mb) >= 3);
+	c = wait_done(&x, seq[0]);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	c = wait_done(&x, seq[1]);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	to_edge_b(&x, 4, 50 * MS);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_B);
+	c = wait_done(&x, seq[2]);
+	CHECK(c.status == DATAX_COMPLETION_LATE);
+	CHECK(strstr(lasterr(&x), "stage late") != NULL);
+	WAIT_FOR(has_event(&x.ev, DATAX_EVT_LATE_COMMAND, seq[2], "stage late"));
+	CHECK(fake_fhm_edges(x.m) == 0);
+	fx_close(&x);
+	printf("test_chip_b_stage_late: ok\n");
+}
+
+/* The PLL readback goes to chip B's seam: a mismatch there is DROPPED with
+ * both frequencies; chip A's readback is not consulted. */
+static void test_chip_b_readback_mismatch(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+	struct datax_completion c;
+	unsigned long long t0;
+	char want[96];
+	long s1, s2;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);
+	t0 = now(&x) + 100 * MS;
+	s1 = datax_sched_queue_tune(x.s, t0, 3, F_A);
+	s2 = datax_sched_queue_tune(x.s, t0 + 20 * MS, 3, F_B);
+	CHECK(s1 > 0 && s2 > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 6;
+	to_edge_b(&x, 1, 200 * MS);
+	fake_fhm_corrupt_next_readback(x.m, 2472000000ULL);   /* chip A: must not matter */
+	fake_fhm_corrupt_next_readback(x.mb, 2471000000ULL);
+	to_edge_b(&x, 2, 50 * MS);
+	c = wait_done(&x, s1);
+	CHECK(c.status == DATAX_COMPLETION_DROPPED);
+	snprintf(want, sizeof(want), "PLL 2471000000 Hz, expected %llu Hz", F_A);
+	CHECK(strstr(lasterr(&x), want) != NULL);
+	to_edge_b(&x, 3, 50 * MS);
+	c = wait_done(&x, s2);
+	CHECK(c.status == DATAX_COMPLETION_OK);
+	CHECK(fake_fhm_pll_hz(x.mb) == F_B);
+	fx_close(&x);
+	printf("test_chip_b_readback_mismatch: ok\n");
+}
+
+/* With fhm-b, GPIO bit 1 belongs to chip B's FHM like bit 0 to chip A's:
+ * queue_gpio refuses it; the other bits stay free. */
+static void test_reserved_bit1_with_fhm_b(void)
+{
+	struct fx x;
+	unsigned long long t;
+
+	fx_open(&x, true);
+	t = now(&x) + 100 * MS;
+	CHECK(datax_sched_queue_gpio(x.s, t, 0x2, 0x2) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "reserved") != NULL);
+	CHECK(strstr(lasterr(&x), "0x3") != NULL);       /* the reserved lines */
+	CHECK(datax_sched_queue_gpio(x.s, t, 0x1, 0x1) == -EINVAL);
+	CHECK(datax_sched_queue_gpio(x.s, t, 0x6, 0x4) == -EINVAL);
+	CHECK(datax_sched_queue_gpio(x.s, t, 0xc, 0x4) > 0);
+	fx_close(&x);
+	printf("test_reserved_bit1_with_fhm_b: ok\n");
+}
+
+/* A chip-B tune alone moves one chip: PHASE_COHERENT is cleared (P3a
+ * decision 7), as for chip A. */
+static void test_phase_coherent_cleared_by_chip_b(void)
+{
+	static const unsigned long long plan[1] = { F_A };
+	struct fx x;
+	const struct datax_caps *caps;
+	long s1;
+
+	fx_open(&x, true);
+	caps = datax_device_get_caps(x.dev);
+	/* The PHASE_COHERENT rule's inputs (test_mcs owns the rule itself):
+	 * MCS present and verified, RF PLL phase sync on. */
+	pthread_mutex_lock(&x.ctx->lock);
+	x.dev->caps.probe_flags |= 1u << DATAX_CAP_MCS;
+	x.dev->caps.mcs_attrs = true;
+	x.dev->mcs_verified = true;
+	pthread_mutex_unlock(&x.ctx->lock);
+	datax_internal_mcs_force_phase_sync(x.dev, true);
+	CHECK(datax_caps_has(caps, DATAX_CAP_PHASE_COHERENT));
+	(void)stage(&x, plan, 1);
+	s1 = datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 2, F_A);
+	CHECK(s1 > 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	x.ndesc = 4;
+	to_edge_b(&x, 1, 200 * MS);
+	CHECK(!x.dev->single_chip_tuned);         /* a priming edge is not a tune */
+	CHECK(datax_caps_has(caps, DATAX_CAP_PHASE_COHERENT));
+	to_edge_b(&x, 2, 50 * MS);
+	CHECK(wait_done(&x, s1).status == DATAX_COMPLETION_OK);
+	WAIT_FOR(x.dev->single_chip_tuned);
+	CHECK(!datax_caps_has(caps, DATAX_CAP_PHASE_COHERENT));
+	datax_internal_mcs_force_phase_sync(x.dev, true);   /* recomputes the flags */
+	CHECK(!datax_caps_has(caps, DATAX_CAP_PHASE_COHERENT));
+	CHECK(fake_fhm_edges(x.m) == 0);
+	datax_internal_mcs_force_phase_sync(x.dev, false);
+	fx_close(&x);
+	printf("test_phase_coherent_cleared_by_chip_b: ok\n");
+}
+
+/* stage_hop_table parks both triggers low, enables FHM on both chips and
+ * reads both enables back; teardown disables both. */
+static void test_stage_enables_both_chips(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	struct fx x;
+
+	fx_open(&x, true);
+	/* chip B's driver swallowed the enable: -EIO, naming it */
+	x.shb.enable_reads_zero = true;
+	fake_fhm_set_access_cost(x.m, STAGE_COST);
+	CHECK(datax_device_stage_hop_table(x.dev, plan, 2) == -EIO);
+	fake_fhm_set_access_cost(x.m, 0);
+	CHECK(strstr(lasterr(&x), "did not enable") != NULL);
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 2, F_A) == -EINVAL);
+	x.shb.enable_reads_zero = false;
+
+	/* a foreign write left bit 1 high: the priming rise needs it low */
+	{
+		struct datax_tick_descriptor d = {
+			.version = DATAX_TICK_DESC_VERSION, .size_bytes = DATAX_TICK_DESC_SIZE,
+			.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE, .target_id = 0,
+			.timestamp_ticks = 0, .flags = DATAX_TICK_FLAG_LATE_EXECUTE_NOW,
+			.sequence_id = 0x7ffffff1u, .args = { 0x2, 0x2, 0, 0 },
+		};
+		unsigned char b[48];
+		char csv[256];
+		size_t n = 0;
+
+		CHECK(datax_internal_tick_descriptor_pack(&d, b) == 0);
+		for (int i = 0; i < 12; i++) {
+			uint32_t w = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 |
+				     (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
+
+			n += (size_t)snprintf(csv + n, sizeof(csv) - n, "%s%u", i ? "," : "", w);
+		}
+		CHECK(fake_tick_write(x.f, "command_descriptor", csv) == 0);
+	}
+	raise_bit0(&x);
+	CHECK((fake_tick_gpio(x.f) & 0x3) == 0x3);
+	(void)stage(&x, plan, 2);
+	CHECK(!(fake_tick_gpio(x.f) & 0x3));
+	CHECK(fake_fhm_enabled(x.m) && fake_fhm_enabled(x.mb));
+	CHECK(x.sh.enable_writes[1] == 2 && x.shb.enable_writes[1] == 2);
+	CHECK(stages(&x.shb) == 0);
+	/* both pipelines start fresh: each chip's first tune primes */
+	{
+		unsigned long long t0 = now(&x) + 100 * MS;
+		/* the foreign rises above hit engines the failed stage enabled */
+		unsigned int ea = fake_fhm_edges(x.m), eb = fake_fhm_edges(x.mb);
+		struct fake_tick_exec rec[16];
+		size_t n;
+
+		CHECK(datax_sched_queue_tune(x.s, t0, 0, F_A) > 0);
+		CHECK(datax_sched_queue_tune(x.s, t0 + 5 * MS, 2, F_B) > 0);
+		CHECK(datax_sched_commit(x.s) == 0);
+		x.ndesc = 8;
+		to_edges(&x, ea + 2, eb + 2, 200 * MS);
+		CHECK(fake_fhm_pll_hz(x.m) == F_A && fake_fhm_pll_hz(x.mb) == F_B);
+		n = fake_tick_exec_log(x.f, x.ebase, rec, 16) - x.ebase;
+		CHECK(n >= 6);
+		CHECK(rec[0].requested_ticks == t0 - 10 * MS && !rec[0].reported);
+	}
+	datax_context_destroy(x.ctx);
+	x.ctx = NULL;
+	x.s = NULL;
+	CHECK(!fake_fhm_enabled(x.m) && !fake_fhm_enabled(x.mb));
+	CHECK(x.sh.enable_writes[0] == 1 && x.shb.enable_writes[0] == 1);
+	CHECK(!(fake_tick_gpio(x.f) & 0x3));
+	fx_close(&x);
+	printf("test_stage_enables_both_chips: ok\n");
+}
+
 /* ---- repro mode: tron-like timing (not part of the default run) -------------- */
 
 /*
@@ -2027,10 +2434,31 @@ int main(int argc, char **argv)
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },
 	};
 
+	static const struct { const char *name; void (*fn)(void); } tb[] = {
+		{ "tune_chip_b_on_bit1", test_tune_chip_b_on_bit1 },
+		{ "two_pipelines_independent", test_two_pipelines_independent },
+		{ "chip_b_stage_late", test_chip_b_stage_late },
+		{ "chip_b_readback_mismatch", test_chip_b_readback_mismatch },
+		{ "reserved_bit1_with_fhm_b", test_reserved_bit1_with_fhm_b },
+		{ "phase_coherent_cleared_by_chip_b", test_phase_coherent_cleared_by_chip_b },
+		{ "stage_enables_both_chips", test_stage_enables_both_chips },
+	};
+
 	/* Real-time mode (its own ctest, test_fhm_realtime): tron-like timing
 	 * with a wall-clock fake and per-access latency. */
 	if (argc > 1 && !strcmp(argv[1], "realtime")) {
 		test_realtime_no_stage_late();
+		return 0;
+	}
+	/* Chip-B mode (its own ctest, test_fhm_chipb): fhm-b in the gate map. */
+	if (argc > 1 && !strcmp(argv[1], "chipb")) {
+		g_chipb = true;
+		for (size_t i = 0; i < sizeof(tb) / sizeof(tb[0]); i++) {
+			if (argc > 3 && !strcmp(argv[2], "one") && strcmp(argv[3], tb[i].name))
+				continue;
+			tb[i].fn();
+		}
+		printf("test_fhm chipb: all ok\n");
 		return 0;
 	}
 	for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {

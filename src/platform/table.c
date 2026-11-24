@@ -94,15 +94,16 @@ int datax_fold_devices(struct datax_context *ctx)
 			if (b)
 				dev->phy[dev->nphy++] = b;
 			have_adrv = true;
-			/* FHM seam: chip A's TRX LO (only its FHM GPIO is wired to
-			 * Tick on the ZU11EG image, spec decision 7). */
-			if (a) {
+			/* FHM seams: each chip's TRX LO. Chip B's is used only
+			 * when the Tick's gate map names fhm-b (its FHM GPIO on
+			 * Tick GPIO bit 1, P3b spec decision 7; fhm.c). */
+			for (unsigned int c = 0; c < dev->nphy && c < 2; c++) {
 				struct iio_channel *lo =
-					iio_device_find_channel(a, "altvoltage0", true);
+					iio_device_find_channel(dev->phy[c], "altvoltage0", true);
 
 				if (lo) {
-					dev->fhm_ops = &datax_fhm_iio_ops;
-					dev->fhm_h = lo;
+					dev->fhm_ops[c] = &datax_fhm_iio_ops;
+					dev->fhm_h[c] = lo;
 				}
 			}
 		}

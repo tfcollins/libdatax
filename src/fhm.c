@@ -15,21 +15,28 @@
  *   4439-4442, defaults 2400 and 2500 MHz). libdatax therefore uses the
  *   default band, as hopcap src/hopcap/talise.py FhmStager does.
  * - The engine is one stage deep (hopcap docs/explanation/fhm-pipeline.md,
- *   tick STATUS.md): each rising edge on TAL_GPIO_0 (Tick GPIO bit 0 on the
- *   ZU11EG image) commits the frequency staged before the previous edge, and
- *   the first edge after enabling lands on fhmInitFrequency.
- * - Only chip A's FHM GPIO is wired to Tick on this image (decision 7).
+ *   tick STATUS.md): each rising edge on TAL_GPIO_0 commits the frequency
+ *   staged before the previous edge, and the first edge after enabling
+ *   lands on fhmInitFrequency.
+ * - Chip A's TAL_GPIO_0 is Tick GPIO bit 0 on the ZU11EG image (P3a). Chip
+ *   B's is Tick GPIO bit 1 on an image whose Tick stream_gate_map names
+ *   fhm-b (P3b spec decision 7, G4: its device tree already selects
+ *   TAL_GPIO_0, so only FHM enable is needed at run time); without fhm-b
+ *   chip B keeps P3a's -ENOTSUP.
  * - Spike: a reported falling edge is held by the full completion slot and
  *   blocks the next rise, so a tune reports its rising edge only (ruling 1).
  *
- * The pipeline. Tunes are queued in time order. Each is a rise/fall pulse on
- * bit 0 (rise reported when no other reported command is within the report
+ * The pipelines: one per chip (struct fhm_pipe), independent of each other
+ * (P3b decision 7), sharing the hop table and the stage time (measured on
+ * chip A). Per chip, tunes are queued in time order. Each is a rise/fall
+ * pulse on the chip's trigger bit (DATAX_FHM_TRIGGER; below "the line")
+ * (rise reported when no other reported command is within the report
  * spacing, so with dense hops every Nth rise is reported); a priming edge
  * (unreported) precedes the first tune after enabling or after the
  * pipeline drained.
  *
  * Pulse width (controller ruling): min(10 ms, half the distance to the next
- * edge on bit 0). Only 10 ms is proven on hardware (tick
+ * edge on the line). Only 10 ms is proven on hardware (tick
  * examples/adrv9009_fhm_hop_demo.py, hopcap HopPlan.pulse_ticks); an edge's
  * fall is placed 10 ms after its rise and pulled in when the next edge is
  * queued in the same uncommitted batch. Once committed it cannot move, so
@@ -43,8 +50,10 @@
  * after E(j-1) makes tune j LATE "stage late". A reported tune's hook reads
  * the PLL back: a mismatch is DROPPED "PLL <got> Hz, expected <want> Hz".
  *
- * Locks: io (held by every hook caller), then fhm->lock, then s->lock, then
- * ctx->lock. queue_tune takes fhm->lock then s->lock, never io.
+ * Locks: io (held by every hook caller), then fhm->lock (it covers both
+ * pipes), then s->lock, then ctx->lock. queue_tune takes fhm->lock then
+ * s->lock, never io. The edge hooks' user is the pipe; the scheduler's one
+ * poll hook's user is the struct datax_fhm, and it runs both pipes.
  */
 #include <errno.h>
 #include <stdarg.h>
@@ -88,7 +97,6 @@
  * device time, the completion sequence id, late_count, overflow_count,
  * queue_level and one descriptor write (poller.c iterate). */
 #define FHM_ITER_ROUND_TRIPS 6u
-#define TRIGGER_MASK 0x1u          /* GPIO bit 0 -> TAL_GPIO_0 */
 
 enum edge_state { E_LIVE, E_FIRED, E_NOEDGE };
 
@@ -102,7 +110,7 @@ struct fhm_edge {
 	bool late;                 /* hz could not be staged in time */
 	bool fire_pending;         /* reconcile: fired, not yet processed */
 	bool behind;               /* the previous edge did not fire */
-	bool needs_park;           /* its fall never ran: park bit 0 low after the rise */
+	bool needs_park;           /* its fall never ran: park the line low after the rise */
 	int stage_err;             /* the staging write failed */
 	long fall_seq;             /* the fall ending this pulse */
 	unsigned long long pulse;  /* rise to fall, API ticks */
@@ -110,21 +118,32 @@ struct fhm_edge {
 	bool hold_traced;          /* trace: its first staging hold was logged */
 };
 
+struct datax_fhm;
+
+/* One chip's pipeline, under its container's lock. Embedded in struct
+ * datax_fhm (never moved): the edge hooks hold a pointer to it. */
+struct fhm_pipe {
+	struct datax_fhm *fhm;         /* the container (lock, table, stage_us) */
+	unsigned int chip;             /* dev->fhm_ops index: 0 chip A, 1 chip B */
+	uint32_t trigger;              /* its Tick GPIO bit, DATAX_FHM_TRIGGER(chip) */
+	bool fresh;                    /* FHM (re)enabled: the next tune primes */
+	bool enabled;                  /* this context enabled FHM: disable at teardown */
+	struct fhm_edge *e;            /* edges in time order */
+	size_t n, cap;
+	unsigned int next_num;         /* trace: E0 is the first edge after enabling */
+};
+
 struct datax_fhm {
-	pthread_mutex_t lock;
+	pthread_mutex_t lock;          /* covers both pipes */
 	unsigned long long table[FHM_TABLE_DEPTH];
 	size_t ntable;
 	unsigned long long stage_us;   /* DATAX_LIMIT_HOP_STAGE_US */
-	bool fresh;                    /* FHM (re)enabled: the next tune primes */
-	bool enabled;                  /* this context enabled FHM: disable at teardown */
 	/* device time is being aligned (re-review N1): set with the live-tune
 	 * check, cleared after the history reset, so no tune can be queued on
 	 * the old mapping and then erased. A count: an involuntary late-edge
 	 * adoption may overlap set_time_next_pps. */
 	unsigned int aligning;
-	struct fhm_edge *e;            /* edges in time order */
-	size_t n, cap;
-	unsigned int next_num;         /* trace: E0 is the first edge after enabling */
+	struct fhm_pipe pipe[DATAX_FHM_CHIPS];
 };
 
 /* ---- opt-in trace (DATAX_TRACE=fhm, a comma list) ------------------------------ */
@@ -221,11 +240,12 @@ static int iio_fhm_write(void *h, const char *attr, const char *val)
 
 const struct datax_tick_ops datax_fhm_iio_ops = { iio_fhm_read, iio_fhm_write };
 
-int datax_fhm_bind(struct datax_device *dev, const struct datax_tick_ops *ops, void *h)
+int datax_fhm_bind(struct datax_device *dev, unsigned int chip,
+		   const struct datax_tick_ops *ops, void *h)
 {
 	bool busy;
 
-	if (!dev || (ops && (!ops->read || !ops->write)))
+	if (!dev || chip >= DATAX_FHM_CHIPS || (ops && (!ops->read || !ops->write)))
 		return -EINVAL;
 	/* The hooks use fhm_ops/fhm_h unlocked: never rebind under a poller. */
 	pthread_mutex_lock(&dev->ctx->lock);
@@ -233,45 +253,55 @@ int datax_fhm_bind(struct datax_device *dev, const struct datax_tick_ops *ops, v
 	pthread_mutex_unlock(&dev->ctx->lock);
 	if (busy)
 		return -EBUSY;
-	dev->fhm_ops = ops;
-	dev->fhm_h = ops ? h : NULL;
+	dev->fhm_ops[chip] = ops;
+	dev->fhm_h[chip] = ops ? h : NULL;
 	datax_caps_fhm_rebound(dev);
 	return 0;
 }
 
-int datax_internal_fhm_bind_fake(struct datax_device *dev,
-				 const struct datax_tick_ops *ops, void *h)
+int datax_internal_fhm_bind_fake_chip(struct datax_device *dev, unsigned int chip,
+				      const struct datax_tick_ops *ops, void *h)
 {
-	int ret = datax_fhm_bind(dev, ops, h);
+	int ret = datax_fhm_bind(dev, chip, ops, h);
 
 	if (ret == -EBUSY)
 		return datax_error_ret(dev->ctx, EBUSY, "fhm",
 				       "fhm_bind_fake: the device has a scheduler; destroy it first");
+	if (ret && dev && chip >= DATAX_FHM_CHIPS)
+		return datax_error_ret(dev->ctx, EINVAL, "fhm",
+				       "fhm_bind_fake: chip %u (0 chip A, 1 chip B)", chip);
 	if (ret && dev)
 		return datax_error_ret(dev->ctx, -ret, "fhm", "fhm_bind_fake: ops need read and write");
 	return ret;
 }
 
-static int phy_write_u64(const struct datax_device *dev, const char *attr,
+int datax_internal_fhm_bind_fake(struct datax_device *dev,
+				 const struct datax_tick_ops *ops, void *h)
+{
+	return datax_internal_fhm_bind_fake_chip(dev, 0, ops, h);
+}
+
+/* chip's phy seam (dev->fhm_ops[chip]) */
+static int phy_write_u64(const struct datax_device *dev, unsigned int chip, const char *attr,
 			 unsigned long long v)
 {
 	char buf[32];
 
-	if (!dev->fhm_ops)
+	if (!dev->fhm_ops[chip])
 		return -ENODEV;
 	snprintf(buf, sizeof(buf), "%llu", v);
-	return dev->fhm_ops->write(dev->fhm_h, attr, buf);
+	return dev->fhm_ops[chip]->write(dev->fhm_h[chip], attr, buf);
 }
 
-static int phy_read_u64(const struct datax_device *dev, const char *attr,
+static int phy_read_u64(const struct datax_device *dev, unsigned int chip, const char *attr,
 			unsigned long long *v)
 {
 	char buf[64], *end;
 	int n;
 
-	if (!dev->fhm_ops)
+	if (!dev->fhm_ops[chip])
 		return -ENODEV;
-	n = dev->fhm_ops->read(dev->fhm_h, attr, buf, sizeof(buf));
+	n = dev->fhm_ops[chip]->read(dev->fhm_h[chip], attr, buf, sizeof(buf));
 	if (n < 0)
 		return n;
 	errno = 0;
@@ -295,6 +325,11 @@ static struct datax_fhm *fhm_get(struct datax_device *dev, bool create)
 			free(m);
 			m = NULL;
 		}
+		for (unsigned int c = 0; m && c < DATAX_FHM_CHIPS; c++) {
+			m->pipe[c].fhm = m;
+			m->pipe[c].chip = c;
+			m->pipe[c].trigger = DATAX_FHM_TRIGGER(c);
+		}
 		dev->fhm = m;
 	}
 	pthread_mutex_unlock(&dev->ctx->lock);
@@ -305,12 +340,14 @@ void datax_fhm_free(struct datax_device *dev)
 {
 	if (!dev || !dev->fhm)
 		return;
-	/* Leave the chip as found: FHM off, after the scheduler was destroyed
+	/* Leave each chip as found: FHM off, after the scheduler was destroyed
 	 * (its queue flushed). Best effort. */
-	if (dev->fhm->enabled)
-		(void)phy_write_u64(dev, ATTR_ENABLE, 0);
+	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
+		if (dev->fhm->pipe[c].enabled)
+			(void)phy_write_u64(dev, c, ATTR_ENABLE, 0);
+		free(dev->fhm->pipe[c].e);
+	}
 	pthread_mutex_destroy(&dev->fhm->lock);
-	free(dev->fhm->e);
 	free(dev->fhm);
 	dev->fhm = NULL;
 }
@@ -338,27 +375,29 @@ static unsigned long long edge_hw(const struct datax_sched *s, const struct fhm_
 	return datax_devtime_to_hw(s->dev, e->api);
 }
 
-static struct fhm_edge *find_edge(struct datax_fhm *m, long seq)
+static struct fhm_edge *find_edge(struct fhm_pipe *p, long seq)
 {
-	for (size_t i = 0; i < m->n; i++)
-		if (m->e[i].seq == seq)
-			return &m->e[i];
+	for (size_t i = 0; i < p->n; i++)
+		if (p->e[i].seq == seq)
+			return &p->e[i];
 	return NULL;
 }
 
-static void remove_edge(struct datax_fhm *m, struct fhm_edge *e)
+static void remove_edge(struct fhm_pipe *p, struct fhm_edge *e)
 {
-	size_t i = (size_t)(e - m->e);
+	size_t i = (size_t)(e - p->e);
 
-	memmove(&m->e[i], &m->e[i + 1], (m->n - i - 1) * sizeof(*e));
-	m->n--;
+	memmove(&p->e[i], &p->e[i + 1], (p->n - i - 1) * sizeof(*e));
+	p->n--;
 }
 
+/* A tune is live on either chip's pipeline. */
 static bool outstanding(const struct datax_fhm *m)
 {
-	for (size_t i = 0; i < m->n; i++)
-		if (m->e[i].st == E_LIVE)
-			return true;
+	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++)
+		for (size_t i = 0; i < m->pipe[c].n; i++)
+			if (m->pipe[c].e[i].st == E_LIVE)
+				return true;
 	return false;
 }
 
@@ -404,8 +443,9 @@ static void on_fired(struct datax_sched *s, struct fhm_edge *e, const char *via)
 	      edge_hw(s, e), last_hw(s), via, e->staged);
 	if (!e->hz)
 		return;
-	/* Decision 7: only chip A moved, so the chips' LO phases no longer
-	 * match (Task 5 owns PHASE_COHERENT; moot where it is false). */
+	/* P3a decision 7: only this chip moved, so the chips' LO phases no
+	 * longer match (Task 5 owns PHASE_COHERENT; moot where it is false).
+	 * Either chip; tuning both at the same T does not restore it. */
 	pthread_mutex_lock(&dev->ctx->lock);
 	dev->single_chip_tuned = true;
 	dev->caps.flags &= ~(1u << DATAX_CAP_PHASE_COHERENT);
@@ -458,10 +498,10 @@ static void shorten_fall(struct datax_sched *s, struct fhm_edge *e)
 
 /* Edge i did not fire for a host-known reason: the engine did not move, so
  * the next tune commits the frequency armed for this one (one behind). */
-static void mark_next_behind(struct datax_fhm *m, size_t i)
+static void mark_next_behind(struct fhm_pipe *p, size_t i)
 {
-	if (i + 1 < m->n && m->e[i + 1].hz && m->e[i + 1].st == E_LIVE)
-		m->e[i + 1].behind = true;
+	if (i + 1 < p->n && p->e[i + 1].hz && p->e[i + 1].st == E_LIVE)
+		p->e[i + 1].behind = true;
 }
 
 /*
@@ -470,14 +510,14 @@ static void mark_next_behind(struct datax_fhm *m, size_t i)
  * not. The device time read after the write decides on time vs late (a
  * false LATE is possible, a false OK is not).
  */
-static void advance(struct datax_fhm *m, struct datax_sched *s, const char *via)
+static void advance(struct fhm_pipe *p, struct datax_sched *s, const char *via)
 {
 	unsigned long long margin = us_ticks(FHM_MARGIN_US, s->tick_hz);
 
-	for (size_t j = 0; j < m->n; j++) {
-		struct fhm_edge *e = &m->e[j];
-		const struct fhm_edge *prev = j ? &m->e[j - 1] : NULL;
-		const struct fhm_edge *pp = j > 1 ? &m->e[j - 2] : NULL;
+	for (size_t j = 0; j < p->n; j++) {
+		struct fhm_edge *e = &p->e[j];
+		const struct fhm_edge *prev = j ? &p->e[j - 1] : NULL;
+		const struct fhm_edge *pp = j > 1 ? &p->e[j - 2] : NULL;
 		unsigned long long now = last_hw(s);
 		int ret;
 
@@ -513,7 +553,7 @@ static void advance(struct datax_fhm *m, struct datax_sched *s, const char *via)
 				pthread_mutex_unlock(&s->lock);
 				t0 = now + ns_ticks(mono0 > h0 ? mono0 - h0 : 0, s->tick_hz);
 			}
-			ret = phy_write_u64(s->dev, ATTR_HOP, e->hz);
+			ret = phy_write_u64(s->dev, p->chip, ATTR_HOP, e->hz);
 			if (ret) {
 				trace("stage E%u seq=%ld hz=%llu via=%s start~%llu err=%d", e->num,
 				      e->seq, e->hz, via, t0, ret);
@@ -537,13 +577,13 @@ static void advance(struct datax_fhm *m, struct datax_sched *s, const char *via)
 
 /* Unreported edges complete without a hook: fired once written and due
  * (or pruned, which needs both). */
-static void reconcile(struct datax_fhm *m, struct datax_sched *s)
+static void reconcile(struct fhm_pipe *p, struct datax_sched *s)
 {
 	bool any = false;
 
 	pthread_mutex_lock(&s->lock);
-	for (size_t i = 0; i < m->n; i++) {
-		struct fhm_edge *e = &m->e[i];
+	for (size_t i = 0; i < p->n; i++) {
+		struct fhm_edge *e = &p->e[i];
 		struct sched_cmd *c;
 
 		if (e->st != E_LIVE)
@@ -560,9 +600,9 @@ static void reconcile(struct datax_fhm *m, struct datax_sched *s)
 		}
 	}
 	pthread_mutex_unlock(&s->lock);
-	for (size_t i = 0; any && i < m->n; i++)
-		if (m->e[i].fire_pending)
-			on_fired(s, &m->e[i], "poll");
+	for (size_t i = 0; any && i < p->n; i++)
+		if (p->e[i].fire_pending)
+			on_fired(s, &p->e[i], "poll");
 }
 
 static bool settled(const struct fhm_edge *e)
@@ -572,17 +612,17 @@ static bool settled(const struct fhm_edge *e)
 
 /*
  * Deferred parks (fhm_on_fall): once edge i's rise has fired, or its time
- * plus the margin has passed, drive bit 0 low through the undroppable
- * immediate write. If the next edge on bit 0 was due before the park
+ * plus the margin has passed, drive the line low through the undroppable
+ * immediate write. If the next edge on the line was due before the park
  * landed, it rose onto a high line and made no edge: that tune and the one
  * after it land one behind (fail closed).
  */
-static void park_deferred(struct datax_fhm *m, struct datax_sched *s)
+static void park_deferred(struct fhm_pipe *p, struct datax_sched *s)
 {
 	unsigned long long margin = us_ticks(FHM_MARGIN_US, s->tick_hz), after;
 
-	for (size_t i = 0; i < m->n; i++) {
-		struct fhm_edge *e = &m->e[i];
+	for (size_t i = 0; i < p->n; i++) {
+		struct fhm_edge *e = &p->e[i];
 
 		if (!e->needs_park)
 			continue;
@@ -593,11 +633,11 @@ static void park_deferred(struct datax_fhm *m, struct datax_sched *s)
 		if (e->st != E_FIRED && last_hw(s) < edge_hw(s, e) + margin)
 			continue;                       /* the rise may still come */
 		e->needs_park = false;
-		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+		(void)datax_tick_gpio_now(s->dev, s, p->trigger, 0);
 		after = datax_poller_read_time(s) ? ~0ULL : last_hw(s);
 		trace("park E%u seq=%ld (deferred) landed by %llu", e->num, e->seq, after);
-		if (i + 1 < m->n && edge_hw(s, &m->e[i + 1]) <= after) {
-			struct fhm_edge *nx = &m->e[i + 1];
+		if (i + 1 < p->n && edge_hw(s, &p->e[i + 1]) <= after) {
+			struct fhm_edge *nx = &p->e[i + 1];
 
 			trace("lost edge E%u: due before the park", nx->num);
 			if (nx->hz && (nx->st == E_LIVE || !nx->reported)) {
@@ -606,27 +646,27 @@ static void park_deferred(struct datax_fhm *m, struct datax_sched *s)
 					emit_unreported(s, nx,
 							"previous edge did not fire; lands one behind");
 			}
-			mark_next_behind(m, i + 1);
+			mark_next_behind(p, i + 1);
 		}
 	}
 }
 
 /* Deferred parks waiting on a rise's time: wake the poller then. */
-static void request_park_wake(struct datax_fhm *m, struct datax_sched *s)
+static void request_park_wake(struct fhm_pipe *p, struct datax_sched *s)
 {
-	for (size_t i = 0; i < m->n; i++)
-		if (m->e[i].needs_park)
-			datax_sched_wake_at(s, edge_hw(s, &m->e[i]) +
+	for (size_t i = 0; i < p->n; i++)
+		if (p->e[i].needs_park)
+			datax_sched_wake_at(s, edge_hw(s, &p->e[i]) +
 					       us_ticks(FHM_MARGIN_US, s->tick_hz));
 }
 
 /* The poll hook alone notices an unreported edge fire (reconcile), and the
  * next staging may wait on it: wake the poller just after the earliest one
  * (its time plus the margin) rather than at its next period. */
-static void request_wake(struct datax_fhm *m, struct datax_sched *s)
+static void request_wake(struct fhm_pipe *p, struct datax_sched *s)
 {
-	for (size_t i = 0; i < m->n; i++) {
-		const struct fhm_edge *e = &m->e[i];
+	for (size_t i = 0; i < p->n; i++) {
+		const struct fhm_edge *e = &p->e[i];
 
 		if (e->st == E_LIVE && !e->reported) {
 			datax_sched_wake_at(s, edge_hw(s, e) + us_ticks(FHM_MARGIN_US, s->tick_hz));
@@ -637,29 +677,35 @@ static void request_wake(struct datax_fhm *m, struct datax_sched *s)
 
 /* Drop edges nobody needs any more (their pulse is over too); keep the
  * last two for ordering. */
-static void trim(struct datax_fhm *m, struct datax_sched *s)
+static void trim(struct fhm_pipe *p, struct datax_sched *s)
 {
 	unsigned long long now = last_hw(s);
 
-	while (m->n > 2 && m->e[0].st != E_LIVE && !m->e[0].needs_park && settled(&m->e[1]) &&
-	       settled(&m->e[2]) && edge_hw(s, &m->e[0]) + m->e[0].pulse < now)
-		remove_edge(m, &m->e[0]);
+	while (p->n > 2 && p->e[0].st != E_LIVE && !p->e[0].needs_park && settled(&p->e[1]) &&
+	       settled(&p->e[2]) && edge_hw(s, &p->e[0]) + p->e[0].pulse < now)
+		remove_edge(p, &p->e[0]);
 }
 
 /* ---- hooks -------------------------------------------------------------------- */
 
+/* The scheduler's one poll hook: user is the struct datax_fhm, and each
+ * chip's pipeline runs in turn (both are under m->lock). */
 static void fhm_poll(struct datax_sched *s, unsigned long long hw_now, void *user)
 {
 	struct datax_fhm *m = user;
 
 	(void)hw_now;   /* s->last_hw is re-read as staging writes take time */
 	pthread_mutex_lock(&m->lock);
-	reconcile(m, s);
-	park_deferred(m, s);
-	advance(m, s, "poll");
-	trim(m, s);
-	request_wake(m, s);
-	request_park_wake(m, s);
+	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
+		struct fhm_pipe *p = &m->pipe[c];
+
+		reconcile(p, s);
+		park_deferred(p, s);
+		advance(p, s, "poll");
+		trim(p, s);
+		request_wake(p, s);
+		request_park_wake(p, s);
+	}
 	pthread_mutex_unlock(&m->lock);
 }
 
@@ -691,7 +737,7 @@ set_result(struct datax_sched_result *r, enum datax_completion_status st, const 
 }
 
 /* Reported tune: one behind, stage late, stage failure or the PLL readback. */
-static void verdict(struct datax_sched *s, const struct fhm_edge *e,
+static void verdict(struct datax_sched *s, const struct fhm_pipe *p, const struct fhm_edge *e,
 		    struct datax_sched_result *r)
 {
 	unsigned long long got = 0;
@@ -706,7 +752,7 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 	} else if (e->stage_err) {
 		set_result(r, DATAX_COMPLETION_DROPPED, "stage write failed (%d)", e->stage_err);
 	} else {
-		ret = phy_read_u64(s->dev, ATTR_HOP, &got);
+		ret = phy_read_u64(s->dev, p->chip, ATTR_HOP, &got);
 		if (ret)
 			set_result(r, DATAX_COMPLETION_DROPPED, "PLL readback failed (%d)", ret);
 		else if (got != e->hz)
@@ -722,7 +768,7 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 
 /*
  * A fall's hook: only a flush or destroy matters. flush_queue dropped this
- * fall; if its rise executed bit 0 is left high, and the next priming rise
+ * fall; if its rise executed the line is left high, and the next priming rise
  * would write 1 onto a high line: no edge, reported EXECUTED, every later
  * tune one behind. Park the line low
  * through the undroppable immediate write (datax_tick_gpio_now): the
@@ -732,7 +778,8 @@ static void verdict(struct datax_sched *s, const struct fhm_edge *e,
 static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_result *r,
 			void *user)
 {
-	struct datax_fhm *m = user;
+	struct fhm_pipe *p = user;
+	struct datax_fhm *m = p->fhm;
 	struct fhm_edge *e = NULL;
 
 	if (r->discarded)
@@ -743,7 +790,7 @@ static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_resu
 		 * late-PPS adoption), so whatever pulse is on the line is
 		 * orphaned. Deciding from the rise's state misses a rise that
 		 * executed before the poller saw it: destroy does not drain. */
-		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+		(void)datax_tick_gpio_now(s->dev, s, p->trigger, 0);
 		return;
 	}
 	/*
@@ -754,14 +801,14 @@ static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_resu
 	 * has passed (park_deferred), with a targeted wake.
 	 */
 	pthread_mutex_lock(&m->lock);
-	for (size_t i = 0; i < m->n && !e; i++)
-		if (m->e[i].fall_seq == seq)
-			e = &m->e[i];
+	for (size_t i = 0; i < p->n && !e; i++)
+		if (p->e[i].fall_seq == seq)
+			e = &p->e[i];
 	if (!e) {
 		/* Trimmed: its pulse is over, so the rise's time has passed. */
 		pthread_mutex_unlock(&m->lock);
 		trace("park now: fall seq=%ld of a trimmed edge ended unwritten", seq);
-		(void)datax_tick_gpio_now(s->dev, s, TRIGGER_MASK, 0);
+		(void)datax_tick_gpio_now(s->dev, s, p->trigger, 0);
 		return;
 	}
 	if (e->st != E_NOEDGE) {               /* a rise that never fired raised nothing */
@@ -776,18 +823,19 @@ static void fhm_on_fall(struct datax_sched *s, long seq, struct datax_sched_resu
 static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_result *r,
 			void *user)
 {
-	struct datax_fhm *m = user;
+	struct fhm_pipe *p = user;
+	struct datax_fhm *m = p->fhm;
 	struct fhm_edge *e;
 	bool record;
 
 	pthread_mutex_lock(&m->lock);
-	e = find_edge(m, seq);
+	e = find_edge(p, seq);
 	if (!e) {
 		pthread_mutex_unlock(&m->lock);
 		return;
 	}
 	if (r->discarded) {               /* a rejected commit: it never existed */
-		remove_edge(m, e);
+		remove_edge(p, e);
 		pthread_mutex_unlock(&m->lock);
 		return;
 	}
@@ -807,7 +855,7 @@ static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_resu
 			 * (the edge most likely fired). */
 			if (r->status != DATAX_COMPLETION_FLUSHED &&
 			    strncmp(r->detail, "no completion", 13))
-				mark_next_behind(m, (size_t)(e - m->e));
+				mark_next_behind(p, (size_t)(e - p->e));
 		}
 	}
 	if (record && e->st == E_FIRED) {
@@ -815,13 +863,28 @@ static void fhm_on_edge(struct datax_sched *s, long seq, struct datax_sched_resu
 		 * enough for the next edge to fire, and a readback after it would
 		 * see the next frequency. That costs the staging one round trip. */
 		if (e->hz && r->status != DATAX_COMPLETION_DROPPED)
-			verdict(s, e, r);
-		advance(m, s, "record");
+			verdict(s, p, e, r);
+		advance(p, s, "record");
 	}
 	pthread_mutex_unlock(&m->lock);
 }
 
 /* ---- stage_hop_table ---------------------------------------------------------- */
+
+/* Chip c's FHM trigger is wired to Tick and its seam bound: chip A whenever
+ * its seam is; chip B only when the Tick's gate map names fhm-b (decision 7:
+ * Tick GPIO bit 1). Without fhm-b chip B is never touched. */
+static bool chip_wired(const struct datax_device *dev, unsigned int c)
+{
+	if (c >= DATAX_FHM_CHIPS || !dev->fhm_ops[c])
+		return false;
+	return c == 0 || dev->caps.gate_map.fhm_b;
+}
+
+static char chip_name(unsigned int c)
+{
+	return c ? 'B' : 'A';
+}
 
 static int cmp_ull(const void *a, const void *b)
 {
@@ -832,7 +895,8 @@ static int cmp_ull(const void *a, const void *b)
 
 /* The staging round trip: FHM_STAGE_SAMPLES writes, each between two
  * device-time reads, less the median cost of a back-to-back time read (so
- * each sample is one write). io held if a scheduler exists. */
+ * each sample is one write). On chip A; both chips' pipelines budget with
+ * it. io held if a scheduler exists. */
 static int measure_stage(struct datax_device *dev, unsigned long long hz,
 			 unsigned long long *us)
 {
@@ -853,7 +917,7 @@ static int measure_stage(struct datax_device *dev, unsigned long long hz,
 	for (unsigned int i = 0; i <= FHM_STAGE_SAMPLES; i++) {
 		ret = datax_tick_read_u64(dev, "current_time_ticks", &t[i]);
 		if (!ret && i < FHM_STAGE_SAMPLES)
-			ret = phy_write_u64(dev, ATTR_HOP, hz);
+			ret = phy_write_u64(dev, 0, ATTR_HOP, hz);
 		if (ret)
 			return ret;
 	}
@@ -907,7 +971,7 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 	if (!datax_tick_present(dev))
 		return datax_error_ret(dev->ctx, ENOTSUP, "fhm",
 				       "no Tick scheduler in this context (it triggers the hops)");
-	if (!dev->fhm_ops)
+	if (!dev->fhm_ops[0])
 		return datax_error_ret(dev->ctx, ENOTSUP, "fhm",
 				       "stage_hop_table: adrv9009-phy has no TRX LO channel "
 				       "(altvoltage0) for FHM");
@@ -929,43 +993,54 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 				      "stage_hop_table: timed tunes are queued; flush them first");
 		goto out;
 	}
-	/* A fired tune's pulse still on the line: the park below would cut
+	/* A fired tune's pulse still on either line: the park below would cut
 	 * it. Wait for its fall (or flush, which parks the line itself). */
-	for (size_t i = 0; s && i < m->n; i++)
-		if (fall_alive(s, &m->e[i])) {
-			ret = datax_error_ret(dev->ctx, EBUSY, "fhm",
-					      "stage_hop_table: a tune's trigger pulse is still "
-					      "on the line; wait for it or flush");
-			goto out;
-		}
-	/* Park the trigger low first, as hopcap (TickSession.park_trigger_low)
-	 * and the Tick demo do before enabling FHM: the priming rise needs a
-	 * low line to make an edge. */
-	ret = datax_tick_gpio_now(dev, s, TRIGGER_MASK, 0);
-	if (ret) {
-		ret = datax_error_ret(dev->ctx, -ret, "fhm",
-				      "stage_hop_table: parking the FHM trigger low failed (%d)", ret);
-		goto out;
-	}
-	/* Enabling (re)primes the engine: the next edge lands on
-	 * fhmInitFrequency (fhm-pipeline.md). Chip A only (decision 7). */
-	ret = phy_write_u64(dev, ATTR_ENABLE, 1);
-	if (ret) {
-		ret = datax_error_ret(dev->ctx, -ret, "fhm",
-				      "stage_hop_table: writing %s failed (%d)", ATTR_ENABLE, ret);
-		goto out;
-	}
-	m->enabled = true;
-	/* The driver can swallow a TALISE_setFhmMode failure (adrv9009.c
-	 * FHM_ENABLE: its return is not checked): read it back. */
-	{
+	for (unsigned int c = 0; s && c < DATAX_FHM_CHIPS; c++)
+		for (size_t i = 0; i < m->pipe[c].n; i++)
+			if (fall_alive(s, &m->pipe[c].e[i])) {
+				ret = datax_error_ret(dev->ctx, EBUSY, "fhm",
+						      "stage_hop_table: a tune's trigger pulse is "
+						      "still on the line; wait for it or flush");
+				goto out;
+			}
+	/* Each wired chip: A always, B with fhm-b and its seam (decision 7). */
+	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
+		struct fhm_pipe *p = &m->pipe[c];
 		unsigned long long on = 0;
 
-		ret = phy_read_u64(dev, ATTR_ENABLE, &on);
+		if (!chip_wired(dev, c))
+			continue;
+		/* Park the trigger low first, as hopcap
+		 * (TickSession.park_trigger_low) and the Tick demo do before
+		 * enabling FHM: the priming rise needs a low line to make an
+		 * edge. */
+		ret = datax_tick_gpio_now(dev, s, p->trigger, 0);
+		if (ret) {
+			ret = datax_error_ret(dev->ctx, -ret, "fhm",
+					      "stage_hop_table: parking chip %c's FHM trigger low "
+					      "failed (%d)", chip_name(c), ret);
+			goto out;
+		}
+		/* Enabling (re)primes the engine: the next edge lands on
+		 * fhmInitFrequency (fhm-pipeline.md), so this chip's next tune
+		 * primes whatever happens below. */
+		ret = phy_write_u64(dev, c, ATTR_ENABLE, 1);
+		if (ret) {
+			ret = datax_error_ret(dev->ctx, -ret, "fhm",
+					      "stage_hop_table: writing chip %c's %s failed (%d)",
+					      chip_name(c), ATTR_ENABLE, ret);
+			goto out;
+		}
+		p->enabled = true;
+		p->fresh = true;
+		/* The driver can swallow a TALISE_setFhmMode failure (adrv9009.c
+		 * FHM_ENABLE: its return is not checked): read it back. */
+		ret = phy_read_u64(dev, c, ATTR_ENABLE, &on);
 		if (ret || on != 1) {
 			ret = datax_error_ret(dev->ctx, EIO, "fhm",
-					      "stage_hop_table: FHM did not enable (%s reads %llu, "
-					      "err %d)", ATTR_ENABLE, on, ret);
+					      "stage_hop_table: FHM did not enable on chip %c (%s "
+					      "reads %llu, err %d)", chip_name(c), ATTR_ENABLE, on,
+					      ret);
 			goto out;
 		}
 	}
@@ -979,10 +1054,13 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 	memcpy(m->table, uniq, n * sizeof(uniq[0]));
 	m->ntable = n;
 	m->stage_us = us;
-	m->fresh = true;
-	m->next_num = 0;
+	/* Both pipelines start fresh; nothing is outstanding: forget the past. */
+	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
+		m->pipe[c].fresh = true;
+		m->pipe[c].next_num = 0;
+		m->pipe[c].n = 0;
+	}
 	trace("staged table n=%zu stage_us=%llu (enable, park and measure done)", n, us);
-	m->n = 0;                          /* nothing outstanding: forget the past */
 	pthread_mutex_lock(&dev->ctx->lock);
 	dev->caps.limits[DATAX_LIMIT_HOP_STAGE_US] = us;
 	dev->caps.measured |= 1u << DATAX_LIMIT_HOP_STAGE_US;
@@ -998,9 +1076,10 @@ out:
 
 /* ---- queue_tune --------------------------------------------------------------- */
 
-/* Family, channel (chip A only) and staged frequency. */
+/* Family, channel (chip B only when wired) and staged frequency; *chip is
+ * the channel's chip. */
 static int check_tune(struct datax_device *dev, unsigned int ch, unsigned long long hz,
-		      const char *verb)
+		      const char *verb, unsigned int *chip)
 {
 	const struct datax_family_ops *ops = datax_family_ops(dev->family);
 	struct datax_fhm *m;
@@ -1016,14 +1095,16 @@ static int check_tune(struct datax_device *dev, unsigned int ch, unsigned long l
 				       "%s: channel %u out of range (device has %u)", verb, ch,
 				       dev->rx_channels + dev->tx_channels);
 	n = ch < dev->rx_channels ? ch : ch - dev->rx_channels;
-	if (n / ops->rx_channels_per_phy)
+	*chip = n / ops->rx_channels_per_phy;
+	if (*chip && !chip_wired(dev, *chip))
 		return datax_error_ret(dev->ctx, ENOTSUP, "fhm",
 				       "%s: chip B FHM trigger is not wired on this image "
 				       "(channel %u)", verb, ch);
 	m = fhm_get(dev, false);
 	if (m) {
 		pthread_mutex_lock(&m->lock);
-		staged = in_table(m, hz);
+		/* and the last stage_hop_table enabled FHM on this chip */
+		staged = in_table(m, hz) && m->pipe[*chip].enabled;
 		pthread_mutex_unlock(&m->lock);
 	}
 	if (!staged)
@@ -1034,17 +1115,17 @@ static int check_tune(struct datax_device *dev, unsigned int ch, unsigned long l
 }
 
 static long enqueue_edge(struct datax_sched *s, datax_time when, bool rise, bool report,
-			 bool consume, struct datax_fhm *m)
+			 bool consume, struct fhm_pipe *p)
 {
 	struct datax_sched_cmd_spec spec = {
 		.when = when,
 		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
 		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
-		.args = { TRIGGER_MASK, rise ? TRIGGER_MASK : 0u, 0, 0 },
+		.args = { p->trigger, rise ? p->trigger : 0u, 0, 0 },
 		.report = report,
 		.consume = consume,
 		.on_complete = rise ? fhm_on_edge : fhm_on_fall,
-		.user = m,
+		.user = p,
 	};
 
 	return datax_sched_enqueue(s, &spec);
@@ -1108,17 +1189,20 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 {
 	struct datax_device *dev = s->dev;
 	struct datax_fhm *m;
+	struct fhm_pipe *p;
 	struct fhm_edge *last = NULL, *live = NULL;
 	unsigned long long hzt = s->tick_hz, pmax, ppulse, window, lead, now, when_hw;
 	datax_time first;
 	bool prime, report = true;
 	long seqs[4] = { 0, 0, 0, 0 };
+	unsigned int chip = 0;
 	long ret;
 
-	ret = check_tune(dev, ch, hz, "queue_tune");
+	ret = check_tune(dev, ch, hz, "queue_tune", &chip);
 	if (ret)
 		return ret;
 	m = fhm_get(dev, false);
+	p = &m->pipe[chip];   /* this chip's pipeline; the other is not consulted */
 	pthread_mutex_lock(&m->lock);
 	if (m->aligning) {
 		ret = datax_error_ret(s->ctx, EBUSY, "fhm",
@@ -1155,18 +1239,18 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 	pthread_mutex_lock(&s->lock);
 	now = s->last_hw + ns_ticks(datax_mono_ns() - s->last_hw_mono, hzt);
 	pthread_mutex_unlock(&s->lock);
-	if (m->n)
-		last = &m->e[m->n - 1];
+	if (p->n)
+		last = &p->e[p->n - 1];
 	/* The gap reference: the latest edge whose pulse can still be on the
 	 * line, i.e. any edge that is not NOEDGE, or a NOEDGE one whose fall is
 	 * still queued (it executes, and would cut a later pulse short). */
-	for (size_t i = m->n; i-- > 0 && !live;)
-		if (m->e[i].st != E_NOEDGE || fall_alive(s, &m->e[i]))
-			live = &m->e[i];
+	for (size_t i = p->n; i-- > 0 && !live;)
+		if (p->e[i].st != E_NOEDGE || fall_alive(s, &p->e[i]))
+			live = &p->e[i];
 	/* A priming edge when the engine was just enabled, or when the last
 	 * edge has fired (or is about to) so nothing is left to commit this
 	 * tune's frequency: the next edge would commit whatever was armed. */
-	prime = m->fresh || !last || last->st == E_NOEDGE ||
+	prime = p->fresh || !last || last->st == E_NOEDGE ||
 		edge_hw(s, last) <= now + window;
 	if (prime && when < lead) {
 		ret = datax_error_ret(s->ctx, EINVAL, "fhm",
@@ -1214,28 +1298,28 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 		report = d >= s->spacing_ticks;
 	}
 	pthread_mutex_unlock(&s->lock);
-	if (m->n + 2 > m->cap) {
-		size_t cap = m->cap ? 2 * m->cap : 16;
-		struct fhm_edge *e = realloc(m->e, cap * sizeof(*e));
+	if (p->n + 2 > p->cap) {
+		size_t cap = p->cap ? 2 * p->cap : 16;
+		struct fhm_edge *e = realloc(p->e, cap * sizeof(*e));
 
 		if (!e) {
 			ret = datax_error_ret(s->ctx, ENOMEM, "fhm", "out of memory");
 			goto out;
 		}
 		if (live)
-			live = e + (live - m->e);
-		m->e = e;
-		m->cap = cap;
+			live = e + (live - p->e);
+		p->e = e;
+		p->cap = cap;
 	}
 	if (prime) {
-		seqs[0] = enqueue_edge(s, first, true, false, false, m);
+		seqs[0] = enqueue_edge(s, first, true, false, false, p);
 		if (seqs[0] > 0)
-			seqs[1] = enqueue_edge(s, first + ppulse, false, false, false, m);
+			seqs[1] = enqueue_edge(s, first + ppulse, false, false, false, p);
 	}
 	if (!prime || seqs[1] > 0) {
-		seqs[2] = enqueue_edge(s, when, true, report, consume, m);
+		seqs[2] = enqueue_edge(s, when, true, report, consume, p);
 		if (seqs[2] > 0)
-			seqs[3] = enqueue_edge(s, when + pmax, false, false, false, m);
+			seqs[3] = enqueue_edge(s, when + pmax, false, false, false, p);
 	}
 	if (seqs[3] <= 0) {
 		for (int i = 0; i < 4; i++)
@@ -1248,20 +1332,22 @@ static long queue_tune(struct datax_sched *s, datax_time when, unsigned int ch,
 		fit_pulse(s, live, first);
 	if (prime) {
 		trace("queue E%u prime seq=%ld fall=%ld hw=%llu pulse=%llu lead_us=%llu window_us=%llu "
-		      "now~%llu", m->next_num, seqs[0], seqs[1], datax_devtime_to_hw(dev, first),
-		      ppulse, lead * 1000000ULL / hzt, window * 1000000ULL / hzt, now);
-		m->e[m->n++] = (struct fhm_edge){ .seq = seqs[0], .api = first,
+		      "now~%llu chip=%c", p->next_num, seqs[0], seqs[1],
+		      datax_devtime_to_hw(dev, first), ppulse, lead * 1000000ULL / hzt,
+		      window * 1000000ULL / hzt, now, chip_name(chip));
+		p->e[p->n++] = (struct fhm_edge){ .seq = seqs[0], .api = first,
 						  .fall_seq = seqs[1], .pulse = ppulse,
-						  .num = m->next_num++ };
+						  .num = p->next_num++ };
 	}
-	trace("queue E%u tune seq=%ld fall=%ld hw=%llu hz=%llu reported=%d consume=%d now~%llu",
-	      m->next_num, seqs[2], seqs[3], when_hw, hz, report, consume, now);
-	m->e[m->n++] = (struct fhm_edge){ .num = m->next_num++, .seq = seqs[2], .api = when, .hz = hz,
+	trace("queue E%u tune seq=%ld fall=%ld hw=%llu hz=%llu reported=%d consume=%d now~%llu "
+	      "chip=%c", p->next_num, seqs[2], seqs[3], when_hw, hz, report, consume, now,
+	      chip_name(chip));
+	p->e[p->n++] = (struct fhm_edge){ .num = p->next_num++, .seq = seqs[2], .api = when, .hz = hz,
 					  .reported = report, .fall_seq = seqs[3],
 					  .pulse = pmax };
-	m->fresh = false;
+	p->fresh = false;
 	(void)datax_sched_set_poll_hook(s, fhm_poll, m);
-	request_wake(m, s);
+	request_wake(p, s);
 	ret = seqs[2];
 out:
 	pthread_mutex_unlock(&m->lock);
@@ -1280,12 +1366,13 @@ int datax_fhm_timed_set_frequency(struct datax_device *dev, unsigned int ch,
 				  unsigned long long hz, datax_time when)
 {
 	struct datax_sched *s, *made = NULL;
+	unsigned int chip;
 	size_t nb = 0;
 	long seq;
 	int ret;
 
 	/* Validate first: a refused call must not leave a scheduler behind. */
-	ret = check_tune(dev, ch, hz, "set_frequency");
+	ret = check_tune(dev, ch, hz, "set_frequency", &chip);
 	if (ret)
 		return ret;
 	s = datax_device_sched_get(dev);
@@ -1355,7 +1442,7 @@ int datax_fhm_align_begin(struct datax_device *dev, bool force)
  * End it. changed: the mapping did change, so the remembered edges (API
  * times on the old mapping) are forgotten and the next tune primes; a
  * deferred park still pending is performed first (N2: forgetting it would
- * leave bit 0 high). adopted (a late-edge adoption, s non-NULL, io held):
+ * leave the line high), on each chip. adopted (a late-edge adoption, s non-NULL, io held):
  * the FHM commands it did not already drop (builder or unwritten) are
  * finished DROPPED "device time jumped on a late PPS edge", their pipeline
  * state being gone. Hold io when s is non-NULL.
@@ -1366,25 +1453,36 @@ void datax_fhm_align_end(struct datax_device *dev, struct datax_sched *s, bool c
 	struct datax_fhm *m = fhm_get(dev, false);
 	long *seqs = NULL;
 	bool park = false;
-	size_t n = 0;
+	size_t n = 0, edges = 0;
 
 	if (!m)
 		return;
 	pthread_mutex_lock(&m->lock);
 	if (changed) {
-		for (size_t i = 0; i < m->n; i++)
-			park = park || m->e[i].needs_park;
-		if (park)
-			(void)datax_tick_gpio_now(dev, s, TRIGGER_MASK, 0);
-		if (adopted && s && m->n)
-			seqs = malloc(2 * m->n * sizeof(*seqs));
-		for (size_t i = 0; seqs && i < m->n; i++) {
-			seqs[n++] = m->e[i].seq;
-			if (m->e[i].fall_seq > 0)
-				seqs[n++] = m->e[i].fall_seq;
+		for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
+			struct fhm_pipe *p = &m->pipe[c];
+			bool pk = false;
+
+			for (size_t i = 0; i < p->n; i++)
+				pk = pk || p->e[i].needs_park;
+			if (pk)
+				(void)datax_tick_gpio_now(dev, s, p->trigger, 0);
+			park = park || pk;
+			edges += p->n;
 		}
-		m->n = 0;
-		m->fresh = true;
+		if (adopted && s && edges)
+			seqs = malloc(2 * edges * sizeof(*seqs));
+		for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
+			struct fhm_pipe *p = &m->pipe[c];
+
+			for (size_t i = 0; seqs && i < p->n; i++) {
+				seqs[n++] = p->e[i].seq;
+				if (p->e[i].fall_seq > 0)
+					seqs[n++] = p->e[i].fall_seq;
+			}
+			p->n = 0;
+			p->fresh = true;
+		}
 	}
 	if (m->aligning)
 		m->aligning--;

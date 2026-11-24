@@ -62,6 +62,12 @@ int datax_internal_tick_bind_fake(struct datax_device *dev,
  * -EBUSY while the device has a scheduler. */
 int datax_internal_fhm_bind_fake(struct datax_device *dev,
 				 const struct datax_tick_ops *ops, void *h);
+/* The same for either chip: chip 0 is chip A (datax_internal_fhm_bind_fake),
+ * chip 1 chip B (adrv9009-phy-b's TRX LO, triggered on Tick GPIO bit 1 when
+ * the Tick's stream_gate_map names fhm-b). 0, -EINVAL (chip > 1, or ops
+ * missing a function), or -EBUSY while the device has a scheduler. */
+int datax_internal_fhm_bind_fake_chip(struct datax_device *dev, unsigned int chip,
+				      const struct datax_tick_ops *ops, void *h);
 
 /* Pause (true) or resume (false) the scheduler's poller: while paused it
  * neither feeds the Tick queue nor drains completions (commit still accepts

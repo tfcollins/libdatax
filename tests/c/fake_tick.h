@@ -70,7 +70,12 @@ uint32_t fake_tick_stream_gate(struct fake_tick *f);  /* stream_gate_en level */
  * time gpio_out changes, with the old and new value and the tick. */
 typedef void (*fake_tick_gpio_hook)(void *user, uint32_t old_gpio, uint32_t new_gpio,
 				    uint64_t ticks);
+/* Replace every gpio hook with this one (NULL hook: none). */
 void fake_tick_set_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user);
+/* Add a gpio hook (called after the earlier ones). 0, -EINVAL for a NULL
+ * hook, or -ENOSPC past FAKE_TICK_MAX_GPIO_HOOKS. */
+#define FAKE_TICK_MAX_GPIO_HOOKS 4
+int fake_tick_add_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user);
 
 /* ---- stream gate levels, the tag latch and the gate map ---- */
 
@@ -142,15 +147,21 @@ unsigned long fake_tick_access_count(struct fake_tick *f, const char *attr, bool
  * - frequency_hopping_mode_enable "1" enables GPIO-trigger mode; the next
  *   edge commits fhmInitFrequency;
  * - writing frequency_hopping_mode stages the next frequency;
- * - each rising edge on Tick GPIO bit 0 (TAL_GPIO_0) commits the frequency
+ * - each rising edge on the followed Tick GPIO bit (TAL_GPIO_0; bit 0 unless
+ *   fake_fhm_attach_bit chose another) commits the frequency
  *   staged before the previous edge and arms the latest staged one;
  * - reading frequency_hopping_mode returns the live RF PLL frequency.
  * The PLL starts at init_hz (0: FAKE_FHM_INIT_HZ).
  */
 struct fake_fhm *fake_fhm_new(uint64_t init_hz);
 void fake_fhm_free(struct fake_fhm *m);
-/* Follow f's GPIO bit 0. Replaces any gpio hook on f; NULL f detaches. */
+/* Follow f's GPIO bit 0. Replaces any gpio hook on f; NULL f detaches
+ * (which clears every gpio hook on the old Tick). */
 void fake_fhm_attach(struct fake_fhm *m, struct fake_tick *f);
+/* Follow f's GPIO bit instead (chip B: bit 1, spec P3b decision 7), adding
+ * a gpio hook beside any already on f. 0, -EINVAL or -ENOSPC. Detach with
+ * fake_fhm_attach(m, NULL) or fake_fhm_free (both clear all of f's hooks). */
+int fake_fhm_attach_bit(struct fake_fhm *m, struct fake_tick *f, unsigned int bit);
 
 /* Same seam shape as the Tick ops; h is the struct fake_fhm *. */
 extern const struct datax_tick_ops fake_fhm_ops;

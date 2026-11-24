@@ -48,9 +48,10 @@ static bool fhm_attrs_present(const struct datax_device *dev)
 	char buf[32];
 	int n;
 
-	if (dev->family != DATAX_FAMILY_ADRV9009 || !dev->fhm_ops)
+	/* Chip A's seam: FHM_HOP needs at least chip A (fhm.c). */
+	if (dev->family != DATAX_FAMILY_ADRV9009 || !dev->fhm_ops[0])
 		return false;
-	n = dev->fhm_ops->read(dev->fhm_h, FHM_ENABLE_ATTR, buf, sizeof(buf));
+	n = dev->fhm_ops[0]->read(dev->fhm_h[0], FHM_ENABLE_ATTR, buf, sizeof(buf));
 	return n != -ENOENT && n != -ENODEV;
 }
 

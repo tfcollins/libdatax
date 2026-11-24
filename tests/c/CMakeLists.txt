@@ -356,6 +356,14 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_fhm_realtime PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 180)
+  # P3b Task 6: chip B's FHM on Tick GPIO bit 1 (fhm-b in the gate map),
+  # one pipeline per chip.
+  add_test(NAME test_fhm_chipb
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_fhm> chipb)
+  set_tests_properties(test_fhm_chipb PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 120)
   # The opt-in FHM trace: off by default, one line per event with
   # DATAX_TRACE=fhm (hardware diagnosis of stage-late tunes).
   add_test(NAME test_fhm_trace

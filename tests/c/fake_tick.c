@@ -111,8 +111,10 @@ struct fake_tick {
 	fake_tick_gate_hook gate_hook;
 	void *gate_hook_user;
 
-	fake_tick_gpio_hook hook;
-	void *hook_user;
+	/* gpio hooks: set_gpio_hook replaces them all, add_gpio_hook appends */
+	fake_tick_gpio_hook hook[FAKE_TICK_MAX_GPIO_HOOKS];
+	void *hook_user[FAKE_TICK_MAX_GPIO_HOOKS];
+	unsigned int nhook;
 	uint64_t access_cost;
 	bool inj_set;
 	char inj_attr[48];         /* "" matches any attribute */
@@ -260,8 +262,8 @@ static void set_gpio(struct fake_tick *f, uint32_t v)
 	uint32_t old = f->gpio;
 
 	f->gpio = v;
-	if (old != v && f->hook)
-		f->hook(f->hook_user, old, v, f->now);
+	for (unsigned int i = 0; old != v && i < f->nhook; i++)
+		f->hook[i](f->hook_user[i], old, v, f->now);
 }
 
 /* Capture-tag latch: gate and arm commands only (RTL lines 790-801, 813-826,
@@ -806,9 +808,30 @@ GETTER(fake_tick_stream_gate, gate)
 void fake_tick_set_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user)
 {
 	pthread_mutex_lock(&f->lock);
-	f->hook = hook;
-	f->hook_user = user;
+	f->nhook = 0;
+	if (hook) {
+		f->hook[0] = hook;
+		f->hook_user[0] = user;
+		f->nhook = 1;
+	}
 	pthread_mutex_unlock(&f->lock);
+}
+
+int fake_tick_add_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user)
+{
+	int ret = -ENOSPC;
+
+	if (!hook)
+		return -EINVAL;
+	pthread_mutex_lock(&f->lock);
+	if (f->nhook < FAKE_TICK_MAX_GPIO_HOOKS) {
+		f->hook[f->nhook] = hook;
+		f->hook_user[f->nhook] = user;
+		f->nhook++;
+		ret = 0;
+	}
+	pthread_mutex_unlock(&f->lock);
+	return ret;
 }
 
 void fake_tick_set_gate_hook(struct fake_tick *f, fake_tick_gate_hook hook, void *user)
@@ -917,6 +940,7 @@ struct fake_fhm {
 	uint64_t corrupt_hz;
 	uint64_t access_cost;
 	struct fake_tick *tick;
+	unsigned int bit;     /* the Tick GPIO bit followed (TAL_GPIO_0) */
 };
 
 struct fake_fhm *fake_fhm_new(uint64_t init_hz)
@@ -948,9 +972,11 @@ static void fhm_on_gpio(void *user, uint32_t old_gpio, uint32_t new_gpio, uint64
 {
 	struct fake_fhm *m = user;
 
+	uint32_t b = 1u << m->bit;   /* set before the hook was installed */
+
 	(void)ticks;
-	if ((old_gpio & 1u) || !(new_gpio & 1u))
-		return;   /* not a rising edge on bit 0 (TAL_GPIO_0) */
+	if ((old_gpio & b) || !(new_gpio & b))
+		return;   /* not a rising edge on the followed bit (TAL_GPIO_0) */
 	pthread_mutex_lock(&m->lock);
 	if (m->enabled) {
 		/* One stage deep (fhm-pipeline.md; plan.FhmPipelineModel.on_edge):
@@ -969,11 +995,23 @@ void fake_fhm_attach(struct fake_fhm *m, struct fake_tick *f)
 	pthread_mutex_lock(&m->lock);
 	old = m->tick;
 	m->tick = f;
+	m->bit = 0;
 	pthread_mutex_unlock(&m->lock);
 	if (old && old != f)
 		fake_tick_set_gpio_hook(old, NULL, NULL);
 	if (f)
 		fake_tick_set_gpio_hook(f, fhm_on_gpio, m);
+}
+
+int fake_fhm_attach_bit(struct fake_fhm *m, struct fake_tick *f, unsigned int bit)
+{
+	if (!m || !f || bit >= 32)
+		return -EINVAL;
+	pthread_mutex_lock(&m->lock);
+	m->tick = f;
+	m->bit = bit;
+	pthread_mutex_unlock(&m->lock);
+	return fake_tick_add_gpio_hook(f, fhm_on_gpio, m);
 }
 
 /* The access cost advances the Tick without the FHM lock held, since the

@@ -126,6 +126,25 @@ def _fake_path():
     return Path(lib).resolve().parent / "tests" / "c" / "libdatax_fake_tick.so"
 
 
+class FakeDmaConfig(C.Structure):
+    """struct fake_dma_config (tests/c/fake_dma.h)."""
+    _fields_ = [("sample_hz", C.c_uint64), ("rx_level", C.c_uint), ("rx_mode", C.c_uint),
+                ("tx_level", C.c_uint), ("tx_mode", C.c_uint)]
+
+
+class TxSegment(C.Structure):
+    """struct fake_dma_tx_segment."""
+    _fields_ = [("t_start", C.c_uint64), ("t_end", C.c_uint64), ("first_frame", C.c_uint64),
+                ("muted", C.c_bool), ("underflow", C.c_bool)]
+
+
+class FakeTickConfig(C.Structure):
+    """struct fake_tick_config."""
+    _fields_ = [("tick_hz", C.c_uint64), ("queue_depth", C.c_uint),
+                ("capability_bitmap", C.c_uint32)]
+
+
+STD_MAP = "rx-dma,tx-dma,rx-mode,tx-mode"
 _fake = None
 
 
@@ -149,11 +168,23 @@ def fake_lib():
         ("fake_fhm_new", vp, [u64]), ("fake_fhm_free", None, [vp]),
         ("fake_fhm_attach", None, [vp, vp]), ("fake_fhm_pll_hz", u64, [vp]),
         ("fake_fhm_edges", C.c_uint, [vp]),
+        ("fake_tick_set_gate_map", None, [vp, C.c_char_p]),
+        ("fake_tick_stream_gate", C.c_uint32, [vp]),
+        ("fake_dma_default_config", FakeDmaConfig, [u64]),
+        ("fake_dma_new", vp, [vp, C.POINTER(FakeDmaConfig)]),
+        ("fake_dma_free", None, [vp]),
+        ("fake_dma_frame_tick", u64, [vp, u64]),
+        ("fake_dma_tx_segments", C.c_size_t, [vp, C.POINTER(TxSegment), C.c_size_t]),
+        ("fake_dma_inject_overflow", None, [vp, u64]),
     ]:
         fn = getattr(f, name)
         fn.restype, fn.argtypes = res, args
     _fake = f
     return f
+
+
+def _ops_addr_n(lib, name, nptr):
+    return C.addressof((C.c_void_p * nptr).in_dll(lib, name))
 
 
 def _ops_addr(lib, name):
@@ -164,22 +195,87 @@ class FakeRig:
     """A Context on an emulator fixture with the fake Tick (and Talise FHM)
     bound to device 0."""
 
-    def __init__(self, uri, fhm):
+    def __init__(self, uri, fhm, dma_fs=None, gate_map=STD_MAP):
         import datax
         from datax._lib import get_lib
         self.fk = fake_lib()
         self.lib = get_lib()
+        self.dma = None
         for name, args in [("datax_internal_tick_bind_fake", [C.c_void_p, C.c_void_p, C.c_void_p]),
                            ("datax_internal_fhm_bind_fake", [C.c_void_p, C.c_void_p, C.c_void_p]),
                            ("datax_internal_sched_pause", [C.c_void_p, C.c_bool])]:
             fn = getattr(self.lib, name)
             fn.restype, fn.argtypes = C.c_int, args
-        self.tick = self.fk.fake_tick_new(None)
+        if dma_fs:
+            # P3b: Tick bitmap 0xdf (tron's 0x9f plus STREAM_TIMESTAMP) and a gate map
+            cfg = FakeTickConfig(HZ, 16, 0xdf)
+            self.tick = self.fk.fake_tick_new(C.byref(cfg))
+            if gate_map is not None:
+                self.fk.fake_tick_set_gate_map(self.tick, gate_map.encode())
+        else:
+            self.tick = self.fk.fake_tick_new(None)
         self.fhm = self.fk.fake_fhm_new(0) if fhm else None
         self.ctx = datax.Context(uri)
         self.dev = self.ctx.devices[0]
         self.bind(self.ctx)
         self._clock = None
+        if dma_fs:
+            self._bind_dma(dma_fs, gate_map)
+
+    def _bind_dma(self, fs, gate_map):
+        """The fake DMA as the block source of both directions, with the gate
+        bit positions the device's own parser gives for the map."""
+        self._set_phy_fs(int(fs))
+        cfg = self.fk.fake_dma_default_config(int(fs))
+        if gate_map is not None:
+            gm = (C.c_int * 7)()
+            self.lib.datax_internal_gate_map_parse.argtypes = [C.c_char_p, C.POINTER(C.c_int)]
+            assert self.lib.datax_internal_gate_map_parse(gate_map.encode(), gm) == 0
+            for i, name in ((1, "rx_level"), (2, "tx_level"), (3, "rx_mode"), (4, "tx_mode")):
+                if gm[i] >= 0:
+                    setattr(cfg, name, gm[i])
+        self.fs = int(fs)
+        self.frame_ticks = HZ // self.fs
+        self.dma = self.fk.fake_dma_new(self.tick, C.byref(cfg))
+        assert self.dma
+        self.lib.datax_internal_stream_bind_source.argtypes = [
+            C.c_void_p, C.c_int, C.c_void_p, C.c_void_p]
+        self.lib.datax_internal_stream_bind_source.restype = C.c_int
+        for direction, name in ((0, "fake_dma_rx_ops"), (1, "fake_dma_tx_ops")):
+            assert self.lib.datax_internal_stream_bind_source(
+                self.dev._ptr, direction, _ops_addr_n(self.fk, name, 6), self.dma) == 0
+        self.cfg = cfg
+
+    def _set_phy_fs(self, fs):
+        """Write the emulated phy's sampling_frequency (what start_at reads);
+        the public setter refuses: the rate is fixed by the JESD profile."""
+        io = C.CDLL(os.path.join(os.environ["DATAX_LIBIIO_BUILD"], "libiio.so.1"))
+        vp = C.c_void_p
+        for name, res, args in [
+            ("iio_context_find_device", vp, [vp, C.c_char_p]),
+            ("iio_device_find_channel", vp, [vp, C.c_char_p, C.c_bool]),
+            ("iio_channel_find_attr", vp, [vp, C.c_char_p]),
+            ("iio_attr_write_longlong", C.c_int, [vp, C.c_longlong]),
+        ]:
+            fn = getattr(io, name)
+            fn.restype, fn.argtypes = res, args
+        phy = io.iio_context_find_device(
+            self.lib.datax_context_get_iio_context(self.ctx._ptr), b"adrv9009-phy")
+        ch = io.iio_device_find_channel(phy, b"voltage0", False)
+        assert io.iio_attr_write_longlong(io.iio_channel_find_attr(ch, b"sampling_frequency"),
+                                          fs) == 0
+
+    def gate_level(self, bit):
+        return bool(self.fk.fake_tick_stream_gate(self.tick) >> bit & 1)
+
+    def tx_segments(self):
+        out = (TxSegment * 64)()
+        n = self.fk.fake_dma_tx_segments(self.dma, out, 64)
+        return list(out[:min(n, 64)])
+
+    def align(self, t):
+        """t rounded down to a sample-frame edge."""
+        return t - t % self.frame_ticks
 
     def bind(self, ctx):
         dev = ctx.devices[0]
@@ -280,6 +376,8 @@ class FakeRig:
         self.stop_clock()
         if self.ctx is not None:
             self.ctx.close()
+        if self.dma:
+            self.fk.fake_dma_free(self.dma)
         if self.fhm:
             self.fk.fake_fhm_free(self.fhm)
         self.fk.fake_tick_free(self.tick)
@@ -288,6 +386,8 @@ class FakeRig:
 @pytest.fixture
 def make_rig():
     """Factory: ``make_rig(fixture="adrv9009-zu11eg", fhm=True)`` -> FakeRig.
+    ``dma_fs=1e6`` also binds the fake DMA (P3b timed streams) at that sample
+    rate, with the fake Tick on bitmap 0xdf and ``gate_map``.
     Everything (rigs, emulators) is torn down after the test, context first."""
     if not _emu_available():
         pytest.skip("iiod-emu not found: set DATAX_LIBIIO_BUILD to a libiio build tree")
@@ -295,11 +395,11 @@ def make_rig():
     from emu import Emulator
     made, emus = [], []
 
-    def factory(fixture="adrv9009-zu11eg", fhm=True):
+    def factory(fixture="adrv9009-zu11eg", fhm=True, dma_fs=None, gate_map=STD_MAP):
         em = Emulator(EMU_DIR / f"{fixture}.xml")
         uri = em.__enter__()
         emus.append(em)
-        rig = FakeRig(uri, fhm)
+        rig = FakeRig(uri, fhm, dma_fs, gate_map)
         made.append(rig)
         return rig
 

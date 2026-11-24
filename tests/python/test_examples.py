@@ -60,3 +60,20 @@ def test_timed_example_runs(script, expect, make_rig, monkeypatch, capsys):
     runpy.run_path(str(ROOT / "examples" / "python" / script), run_name="__main__")
     out = capsys.readouterr().out
     assert expect in out, out
+
+
+def test_timed_burst_example_runs(make_rig, monkeypatch, capsys):
+    """timed_burst.py in-process against the fake Tick and fake DMA."""
+    import runpy
+    import datax
+    rig = make_rig(dma_fs=1_000_000)
+    rig.make_scheduler()
+    rig.start_clock(hz_ratio=0.25)
+    monkeypatch.setattr(datax, "Context", lambda uri=None: rig.ctx)
+    monkeypatch.setattr(sys, "argv", ["timed_burst.py"])
+    monkeypatch.delenv("DATAX_TEST_URI", raising=False)
+    runpy.run_path(str(ROOT / "examples" / "python" / "timed_burst.py"), run_name="__main__")
+    out = capsys.readouterr().out
+    assert "2 gate commands on time" in out, out
+    segs = rig.tx_segments()
+    assert any(s.muted for s in segs)

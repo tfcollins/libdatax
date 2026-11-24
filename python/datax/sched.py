@@ -73,6 +73,21 @@ class _At:
         return self._s._queue(get_lib().datax_sched_queue_gpio,
                               (self._t, int(mask), int(value)), report)
 
+    def gate_on(self, stream, report=False):
+        """Open the stream's gate at ``t`` (TX: resumes the output). The stream
+        must be running from ``start_at``, else ``Error`` (EINVAL); RX gating
+        raises ``CapabilityError``."""
+        return self._gate(stream, True, report)
+
+    def gate_off(self, stream, report=False):
+        """Close the stream's gate at ``t`` (TX: the DAC gets zeros, the
+        buffer keeps playing time-aligned). Same errors as ``gate_on``."""
+        return self._gate(stream, False, report)
+
+    def _gate(self, stream, enable, report):
+        return self._s._queue(get_lib().datax_sched_queue_stream_gate,
+                              (self._t, stream._live(), bool(enable)), report)
+
     def marker(self, line, width=1, report=False):
         return self._s._queue(get_lib().datax_sched_queue_marker,
                               (self._t, int(line), int(width)), report)

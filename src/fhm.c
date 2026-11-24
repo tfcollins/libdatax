@@ -128,6 +128,10 @@ struct fhm_pipe {
 	uint32_t trigger;              /* its Tick GPIO bit, DATAX_FHM_TRIGGER(chip) */
 	bool fresh;                    /* FHM (re)enabled: the next tune primes */
 	bool enabled;                  /* this context enabled FHM: disable at teardown */
+	/* the last stage_hop_table that reached the hardware read this chip's
+	 * enable back as 1: queue_tune may use it (cleared by every such stage
+	 * before it touches a chip, so a failed or unwired chip stays off) */
+	bool armed;
 	struct fhm_edge *e;            /* edges in time order */
 	size_t n, cap;
 	unsigned int next_num;         /* trace: E0 is the first edge after enabling */
@@ -1003,6 +1007,10 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 						      "still on the line; wait for it or flush");
 				goto out;
 			}
+	/* From here the stage touches the hardware: no chip is armed until
+	 * its own enable reads back 1 below (wired or not). */
+	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++)
+		m->pipe[c].armed = false;
 	/* Each wired chip: A always, B with fhm-b and its seam (decision 7). */
 	for (unsigned int c = 0; c < DATAX_FHM_CHIPS; c++) {
 		struct fhm_pipe *p = &m->pipe[c];
@@ -1043,6 +1051,7 @@ int datax_device_stage_hop_table(struct datax_device *dev,
 					      ret);
 			goto out;
 		}
+		p->armed = true;
 	}
 	ret = measure_stage(dev, uniq[0], &us);
 	if (ret) {
@@ -1084,7 +1093,7 @@ static int check_tune(struct datax_device *dev, unsigned int ch, unsigned long l
 	const struct datax_family_ops *ops = datax_family_ops(dev->family);
 	struct datax_fhm *m;
 	unsigned int n;
-	bool staged = false;
+	bool staged = false, armed = false;
 
 	if (dev->family != DATAX_FAMILY_ADRV9009 || !ops)
 		return datax_error_ret(dev->ctx, ENOTSUP, "fhm",
@@ -1103,14 +1112,20 @@ static int check_tune(struct datax_device *dev, unsigned int ch, unsigned long l
 	m = fhm_get(dev, false);
 	if (m) {
 		pthread_mutex_lock(&m->lock);
-		/* and the last stage_hop_table enabled FHM on this chip */
-		staged = in_table(m, hz) && m->pipe[*chip].enabled;
+		staged = in_table(m, hz);
+		armed = m->pipe[*chip].armed;
 		pthread_mutex_unlock(&m->lock);
 	}
 	if (!staged)
 		return datax_error_ret(dev->ctx, EINVAL, "fhm",
 				       "%s: frequency not staged: %llu Hz is not in the hop table "
 				       "(stage_hop_table first)", verb, hz);
+	/* The table may be an older stage's: this chip must have been enabled
+	 * (read back) by the last stage_hop_table. */
+	if (!armed)
+		return datax_error_ret(dev->ctx, EINVAL, "fhm",
+				       "%s: chip %c FHM was not enabled by the last stage_hop_table "
+				       "(channel %u; stage again)", verb, chip_name(*chip), ch);
 	return 0;
 }
 

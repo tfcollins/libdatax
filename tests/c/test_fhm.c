@@ -2232,6 +2232,56 @@ static void test_stage_enables_both_chips(void)
 	printf("test_stage_enables_both_chips: ok\n");
 }
 
+/* Fix round 1: a chip is armed only by a stage whose enable readback on it
+ * returned 1. A re-stage that fails a chip's readback disarms that chip (and,
+ * failing on chip A first, chip B too): tunes on the old table's frequencies
+ * are refused there, while a chip the re-stage did enable keeps tuning. */
+static void test_failed_restage_disarms(void)
+{
+	static const unsigned long long plan[2] = { F_A, F_B };
+	const char *want = "FHM was not enabled by the last stage_hop_table";
+	struct fx x;
+
+	fx_open(&x, true);
+	(void)stage(&x, plan, 2);                 /* A and B armed */
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 2, F_A) > 0);
+	CHECK(datax_sched_flush(x.s) == 0);
+
+	/* chip B's enable reads back 0: -EIO; chip B disarmed, chip A not */
+	x.shb.enable_reads_zero = true;
+	fake_fhm_set_access_cost(x.m, STAGE_COST);
+	CHECK(datax_device_stage_hop_table(x.dev, plan, 2) == -EIO);
+	fake_fhm_set_access_cost(x.m, 0);
+	x.shb.enable_reads_zero = false;
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 2, F_A) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "chip B") && strstr(lasterr(&x), want));
+	CHECK(datax_device_set_frequency(x.dev, 3, F_B, now(&x) + 100 * MS) == -EINVAL);
+	CHECK(strstr(lasterr(&x), want));
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 0, F_A) > 0);
+	CHECK(datax_sched_flush(x.s) == 0);
+
+	/* a good stage re-arms both */
+	(void)stage(&x, plan, 2);
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 2, F_A) > 0);
+	CHECK(datax_sched_flush(x.s) == 0);
+
+	/* chip A's enable reads back 0: both disarmed (the stage stops at A) */
+	x.sh.enable_reads_zero = true;
+	fake_fhm_set_access_cost(x.m, STAGE_COST);
+	CHECK(datax_device_stage_hop_table(x.dev, plan, 2) == -EIO);
+	fake_fhm_set_access_cost(x.m, 0);
+	x.sh.enable_reads_zero = false;
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 0, F_A) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "chip A") && strstr(lasterr(&x), want));
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 2, F_A) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "chip B") && strstr(lasterr(&x), want));
+	/* a frequency never staged keeps P3a's text */
+	CHECK(datax_sched_queue_tune(x.s, now(&x) + 100 * MS, 0, 2470000000ULL) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "frequency not staged"));
+	fx_close(&x);
+	printf("test_failed_restage_disarms: ok\n");
+}
+
 /* ---- repro mode: tron-like timing (not part of the default run) -------------- */
 
 /*
@@ -2442,6 +2492,7 @@ int main(int argc, char **argv)
 		{ "reserved_bit1_with_fhm_b", test_reserved_bit1_with_fhm_b },
 		{ "phase_coherent_cleared_by_chip_b", test_phase_coherent_cleared_by_chip_b },
 		{ "stage_enables_both_chips", test_stage_enables_both_chips },
+		{ "failed_restage_disarms", test_failed_restage_disarms },
 	};
 
 	/* Real-time mode (its own ctest, test_fhm_realtime): tron-like timing

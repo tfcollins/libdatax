@@ -492,3 +492,78 @@ Rulings (implementer's calls; the owner is away and the standing instruction is 
 9. **S2 integration bench:** one run with the real `axi_timed_command_scheduler` driving the
    gate and tagger. It covers same-T command spacing and the late-flagged tag on the
    execute-now path.
+
+## Tick clocking: option 1 (owner decision 2026-11-24, sdk#40)
+
+Hardware runs 2 and 3 showed Tick's timebase drifting 8.5–11.4 ppm against the converter
+clock. The owner chose option 1: Tick counts the converter clock, so a tick is an exact
+multiple of a sample and derived timestamps and gate edges need no calibration. Calls marked
+*(builder's call)* were made while writing this section; the rest follow from the decision.
+
+1. **Clock source: `core_clk_b`, 245.76 MHz, one tick per RX sample.**
+   - In ADI's `system_top`, `core_clk_b` is the dedicated pin pair from HMC7044 channel 7
+     (`CORE_CLK_RX_AB`, divider 12 from 2949.12 MHz) through IBUFDS and BUFG. It is not a
+     transceiver output, so it keeps running through JESD and transceiver resets.
+   - `core_clk_a` is channel 6 (`CORE_CLK_TX_OBS_AB`, divider 24, 122.88 MHz). It comes from
+     the same HMC7044 PLL2, so it is frequency-locked to `core_clk_b` at exactly 1:2.
+   - An HMC7044 output re-sync (MCS) can re-phase both clocks. Tick and the sample stream move
+     together, so the tick-to-sample mapping holds.
+2. **Tick's RTL is not changed.** The whole scheduler moves to the new clock:
+   - an `axi_clock_converter` on its AXI-Lite port (`sys_cpu_clk` → `core_clk_b`);
+   - a `proc_sys_reset` in the new domain, with `ext_reset_in` from `sys_cpu_resetn`;
+   - never `adc_rst`, because a link reset must not zero Tick time.
+   - Tick already double-flops `pps_in`.
+3. **Opt-in, default unchanged** *(builder's call)*.
+   - Tick's tron fragment reads `TICK_TIMEBASE_CLK`:
+     - unset or `sys_cpu_clk`: today's 100 MHz design;
+     - `core_clk_b`: 245.76 MHz;
+     - `core_clk_a`: 122.88 MHz.
+   - `TIME_TICK_HZ` follows from the choice.
+   - Only hopcap's timed-dma profile sets it. AD9081, Pluto, vrt49's adrv9361 design and
+     hopcap's hop profile keep 100 MHz, and vrt49's `TICK_PROVENANCE.md` does not change.
+4. **Driver: enable the clock before the first register access.**
+   - The AXI slave now sits on a clock Linux brings up. An access while that clock is stopped
+     hangs the PS, because the PL has no AXI timeout.
+   - The driver takes an optional first `clocks` entry (`devm_clk_get_optional_enabled`) before
+     probe reads the ID register. Probe defers until the HMC7044 has registered.
+   - When the clock rate is known, the driver warns if it differs from `REG_TICK_HZ` by more
+     than 100 ppm.
+   - The timed-dma overlay points `clocks` at `<&hmc7044 7>` and sets `adi,time-tick-hz` to
+     245760000.
+5. **Timed-dma profile changes (hopcap).**
+   - Both gates' `tick_clk` and the tag adapter's `tag_clk` move to `core_clk_b`, and the
+     tagger's `tag_tick_hz` constant becomes 245760000.
+   - The RX gate and the tag adapter become same-clock paths. Their false paths and the 10 ns
+     max-delay are removed, so those paths are timed normally rather than left unconstrained.
+   - The TX gate still crosses into `core_clk_a`. That crossing is now frequency-locked 2:1, so
+     its latency is fixed per boot.
+   - `tick_pps_select` stays on `sys_cpu_clk`. Its 100 ms output level enters Tick's own
+     synchronizer, whose first stage gets a false path.
+   - `vrt49_fhm_hop_ctrl` stays on `sys_cpu_clk`. Its 4-bit `scheduler_gpio` now crosses
+     domains *(builder's call)*:
+     - bits 3:1, the slot index, go through two flops;
+     - bit 0, the event, goes through three, so the slot has settled when the controller sees
+       the event edge.
+     - Tick writes the slot and event in one command and holds them until the next one, which
+       is microseconds away.
+     - The controller's settle and capture counts stay in its own 100 MHz cycles in this
+       profile. No libdatax or hopcap test runs the fabric hop on the timed-dma image.
+6. **Timing.**
+   - Before the full build, an out-of-context synthesis and implementation of the scheduler
+     alone at 4.069 ns shows whether 245.76 MHz closes.
+   - **Fallback** *(builder's call)*: if it does not close, or the full build misses, use
+     `TICK_TIMEBASE_CLK=core_clk_a`, which is 122.88 MHz and one tick per two RX samples.
+     - It is the same locked source, makes the TX gate same-clock, and needs no new clock
+       buffer.
+     - Gate edges can then only be commanded on even RX samples. Placement stays exact.
+7. **Acceptance.**
+   - The gated-burst criterion above stands: edges land at the commanded time plus the loopback
+     offset, ±1 sample.
+   - Runs 2 and 3 also showed a fixed intercept of about −7 frames on mid-stream TX edges. It is
+     relative to the start edge and does not grow with time. If it persists once the drift is
+     gone, it is ruled a deterministic edge-latency constant, like the loopback offset itself
+     *(builder's call)*:
+     - it is measured, documented on the platform page, and folded into the expected position;
+     - the test then requires every edge to sit at the same constant ±1 sample across bursts and
+       runs.
+   - The full P2, P3a and P3b suites, and Tick's own tron checks, must pass on the new image.

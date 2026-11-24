@@ -16,7 +16,7 @@ int main(void)
 	CHECK(datax_device_run_mcs(NULL) == -EINVAL);
 	CHECK(datax_device_stage_hop_table(NULL, &f, 1) == -EINVAL);
 	CHECK(datax_stream_start(NULL) == -EINVAL);
-	CHECK(datax_stream_start_at(NULL, 5) == -ENOTSUP);
+	CHECK(datax_stream_start_at(NULL, 5) == -EINVAL);
 	CHECK(datax_stream_stop(NULL) == -EINVAL);
 	CHECK(datax_stream_recv(NULL, NULL, 0, NULL, 0) == -EINVAL);
 	CHECK(datax_stream_send(NULL, NULL, 0, 0) == -EINVAL);

@@ -60,6 +60,12 @@ struct fake_dma_config {
 /* sample_hz with the standard map "rx-dma,tx-dma,rx-mode,tx-mode": bits 0..3. */
 struct fake_dma_config fake_dma_default_config(uint64_t sample_hz);
 
+/* sample_hz with the bit positions of a parsed Tick stream_gate_map (the
+ * device's dev->caps.gate_map); a role absent from the map keeps the default
+ * position. */
+struct fake_dma_config fake_dma_config_from_map(uint64_t sample_hz,
+						const struct datax_gate_map *map);
+
 /* NULL: invalid config (sample rate 0, a bit >= 8) or no memory. */
 struct fake_dma *fake_dma_new(struct fake_tick *f, const struct fake_dma_config *cfg);
 void fake_dma_free(struct fake_dma *d);
@@ -84,6 +90,10 @@ struct fake_dma_tx_segment {
 };
 /* Copy up to max segments from index 0; returns the total count. */
 size_t fake_dma_tx_segments(struct fake_dma *d, struct fake_dma_tx_segment *out, size_t max);
+
+/* How long a blocking dequeue waits before -ETIMEDOUT (default 50 ms): the
+ * context timeout of a real buffer (libiio's default is 5 s). */
+void fake_dma_set_wait_ms(struct fake_dma *d, unsigned int ms);
 
 /* ---- faults ---- */
 

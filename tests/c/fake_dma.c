@@ -85,6 +85,7 @@ struct fake_dma {
 
 	struct fake_dma_op *log;
 	size_t nlog, caplog;
+	unsigned int wait_ms;         /* blocking dequeue bound */
 };
 
 /* ---- the sample clock ---------------------------------------------------- */
@@ -542,9 +543,11 @@ static int dma_dequeue(void *h, bool tx, unsigned int i, bool nonblock)
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (;;) {
-		long waited_ms;
+		long waited_ms, wms;
 		int ret = -EBUSY;
 		struct fake_dma *e = enter(h);
+
+		wms = (long)e->wait_ms;
 
 		if (!x->open || i >= x->nblocks) {
 			ret = -EINVAL;
@@ -567,7 +570,7 @@ static int dma_dequeue(void *h, bool tx, unsigned int i, bool nonblock)
 			return ret;
 		clock_gettime(CLOCK_MONOTONIC, &t);
 		waited_ms = (t.tv_sec - t0.tv_sec) * 1000L + (t.tv_nsec - t0.tv_nsec) / 1000000L;
-		if (waited_ms >= WAIT_MS)
+		if (waited_ms >= wms)
 			return -ETIMEDOUT;
 		nanosleep(&(struct timespec){ .tv_nsec = POLL_MS * 1000000L }, NULL);
 	}
@@ -663,6 +666,29 @@ struct fake_dma_config fake_dma_default_config(uint64_t sample_hz)
 					 .tx_level = 1, .tx_mode = 3 };
 }
 
+struct fake_dma_config fake_dma_config_from_map(uint64_t sample_hz,
+						const struct datax_gate_map *map)
+{
+	struct fake_dma_config c = fake_dma_default_config(sample_hz);
+
+	if (map && map->rx_level >= 0)
+		c.rx_level = (unsigned int)map->rx_level;
+	if (map && map->rx_mode >= 0)
+		c.rx_mode = (unsigned int)map->rx_mode;
+	if (map && map->tx_level >= 0)
+		c.tx_level = (unsigned int)map->tx_level;
+	if (map && map->tx_mode >= 0)
+		c.tx_mode = (unsigned int)map->tx_mode;
+	return c;
+}
+
+void fake_dma_set_wait_ms(struct fake_dma *d, unsigned int ms)
+{
+	pthread_mutex_lock(&d->lock);
+	d->wait_ms = ms;
+	pthread_mutex_unlock(&d->lock);
+}
+
 struct fake_dma *fake_dma_new(struct fake_tick *f, const struct fake_dma_config *cfg)
 {
 	struct fake_dma *d;
@@ -676,6 +702,7 @@ struct fake_dma *fake_dma_new(struct fake_tick *f, const struct fake_dma_config 
 		return NULL;
 	d->f = f;
 	d->cfg = *cfg;
+	d->wait_ms = WAIT_MS;
 	if (fake_tick_read(f, "time_tick_hz", buf, sizeof(buf)) < 0 ||
 	    !(d->hz = strtoull(buf, NULL, 10)) || pthread_mutex_init(&d->lock, NULL)) {
 		free(d);

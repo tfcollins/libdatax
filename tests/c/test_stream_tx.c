@@ -240,8 +240,8 @@ static void test_tx_arg_errors(void)
 
 	CHECK(datax_stream_send(NULL, buf, 1, 0) == -EINVAL);
 	CHECK(datax_stream_create(dev, &c, &s) == 0);
-	CHECK(datax_stream_send(s, buf, 1, 0) == -EINVAL);
-	CHECK(strstr(err(ctx), "not started"));
+	/* P3b: send on an unstarted stream preloads (start() transmits it) */
+	CHECK(datax_stream_send(s, buf, 1, 0) == 1);
 	CHECK(datax_stream_start(s) == 0);
 	CHECK(datax_stream_send(s, NULL, 1, 0) == -EINVAL);
 	CHECK(datax_stream_send(s, buf, 0, 0) == -EINVAL);

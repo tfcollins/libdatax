@@ -2,6 +2,8 @@
 #ifndef DATAX_STREAM_H
 #define DATAX_STREAM_H
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -56,7 +58,63 @@ struct datax_stream {
 	bool polled_once, detect_off;
 	long long last_poll_us;
 	bool disc_pending;                  /* RX: report discontinuous next */
+
+	/* P3b Task 3 (stream_timed.c): timed start. timed: started by
+	 * start_at (stop() then cancels its gate commands); stopping: stop()
+	 * is cancelling them, so the hook does not fail the stream. fail: 0,
+	 * DATAX_ERR_LATE or -ECANCELED, set by the opening command's hook
+	 * (fail_detail its cause, under tmu). open_state: 0 unresolved, 1 the
+	 * opening ran on time, -1 it did not (RX holds block 0 until it is
+	 * resolved; tcv signals a change). open_seq: the opening command.
+	 * t_open: T in API ticks; fs: the sample rate read at start_at (0:
+	 * unknown). held: TX preload, filled and not enqueued (copy-mode send
+	 * on an unstarted stream). blk0_held: RX block 0 is dequeued at cur and
+	 * kept back until open_state is resolved. */
+	bool timed;
+	_Atomic bool stopping;
+	_Atomic int fail;
+	_Atomic int open_state;
+	_Atomic long open_seq;
+	datax_time t_open;
+	unsigned long long fs;
+	bool *held;
+	bool blk0_held;
+	pthread_mutex_t tmu;
+	pthread_cond_t tcv;
+	char fail_detail[160];
 };
+
+/* stream.c helpers shared with stream_timed.c. Each sets the last error
+ * on failure except enqueue (libiio's code is returned bare). */
+int datax_stream_hw_open(struct datax_stream *s);
+void datax_stream_hw_close(struct datax_stream *s);
+int datax_stream_enqueue(struct datax_stream *s, unsigned int i);
+int datax_stream_fail_iio(struct datax_stream *s, int ret, const char *what);
+int datax_stream_cyclic_arm(struct datax_stream *s, const char *verb);
+
+/* stream_timed.c. */
+/* Untimed start() and stop(): with the direction's RX_ARM/TX_ARM, write
+ * execute-now gate(mode, 0) and gate(level, 0) (forced open, the reset
+ * state), and clear the RX tag bit when clear_tag. Holds the scheduler's io
+ * while one exists. 0 (no Tick access without the flag) or -errno with
+ * last-error. */
+int datax_stream_force_open(struct datax_stream *s, bool clear_tag);
+/* stop() on a timed stream, before the P2 teardown: cancel the stream's
+ * gate commands on the device scheduler, then force the gate open. 0 or the
+ * first -errno (with last-error); the teardown runs either way. */
+int datax_stream_timed_stop(struct datax_stream *s);
+/* A failed timed stream: fail (DATAX_ERR_LATE or -ECANCELED) with a last
+ * error naming the cause, unless quiet; 0 otherwise. */
+int datax_stream_timed_failed(struct datax_stream *s, const char *verb, bool quiet);
+/* RX block 0 of a timed stream (dequeued, at cur): wait until the opening
+ * command is resolved, within timeout_ms (0: no wait; < 0: forever) and the
+ * now_us deadline. 0 when it ran on time, -ETIMEDOUT, or the failure. */
+int datax_stream_wait_open(struct datax_stream *s, int timeout_ms, long long deadline_us);
+/* Reset the timed state (start(), stop()). */
+void datax_stream_timed_reset(struct datax_stream *s);
+/* TX: held blocks, and enqueueing them in ring order (start, start_at). */
+unsigned int datax_stream_held_count(const struct datax_stream *s);
+int datax_stream_enqueue_held(struct datax_stream *s, const char *verb);
 
 /* stream_status.c. Poll the core status register: select it, read it, clear
  * the sticky bit by writing it back. 0, or a negative errno (no last error is
@@ -74,5 +132,9 @@ void datax_stream_status_apply(struct datax_stream *s, int ret, bool ovf, bool u
  * disc_pending) and underflows. A failed poll switches detection off for
  * the stream's life. discard: probe only, ignore stale flags. */
 void datax_stream_status_check(struct datax_stream *s, bool discard);
+/* Poll now whatever the rate limit says and discard the result (the sticky
+ * idle overflow of forced-open mode), restart the rate limit from now and
+ * clear disc_pending (start_at, G2/G3 ruling 7). */
+void datax_stream_status_clear(struct datax_stream *s);
 
 #endif

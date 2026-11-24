@@ -380,6 +380,48 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_sched_hooks PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # Timed streams (P3b Task 3): start_at, the targeted cancel and re-feed,
+  # forced open, TX preload, on the fake Tick and the fake DMA at 1 MSPS.
+  # Compiled from the library sources (it reads the scheduler's table and
+  # enqueues raw commands); one ctest per test.
+  add_executable(test_stream_timed test_stream_timed.c ${DATAX_SOURCES})
+  target_link_libraries(test_stream_timed PRIVATE iio_dep datax_fake_tick Threads::Threads)
+  target_include_directories(test_stream_timed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
+  target_compile_options(test_stream_timed PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_stream_timed PRIVATE _POSIX_C_SOURCE=200809L)
+  set(DATAX_STREAM_TIMED_TESTS
+    test_start_at_guard_margin_late test_start_at_order test_start_at_rx_first_frame_at_T
+    test_start_at_late_at_dispatch_fails test_start_at_tx_late_on_submit
+    test_held_slot_open_never_delivers_shifted test_refeed_keeps_near_edge
+    test_stop_cancels_open test_cancel_keeps_others test_stop_armed_rx_bounded
+    test_start_after_aborted_start_at_open test_start_forces_open
+    test_start_no_map_no_tick_writes test_start_at_enotsup_without_map
+    test_start_at_ealready test_start_at_refuses_uncommitted_batch
+    test_start_at_report_spacing_restores_gate test_spacing_ignores_unreported
+    test_start_at_tx_partial_mask_enotsup test_start_at_clears_idle_overflow
+    test_same_t_rx_open_before_tx test_start_at_tx_cyclic test_start_at_tx_stream_preload
+    test_tx_preload_rules test_sched_flush_fails_armed test_sched_destroy_while_armed)
+  foreach(tt ${DATAX_STREAM_TIMED_TESTS})
+    add_test(NAME stream_timed_${tt}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml
+              $<TARGET_FILE:test_stream_timed> ${tt})
+    set_tests_properties(stream_timed_${tt} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      LABELS stream_timed TIMEOUT 120)
+  endforeach()
+  if(VALGRIND)
+    add_test(NAME stream_timed_destroy_valgrind
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml
+              ${VALGRIND} --error-exitcode=1 --leak-check=full
+              --errors-for-leak-kinds=definite $<TARGET_FILE:test_stream_timed>
+              test_sched_destroy_while_armed)
+    set_tests_properties(stream_timed_destroy_valgrind PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      TIMEOUT 300)
+  endif()
   # MCS verification and PHASE_COHERENT (Task 5): the fsm fixture, attributes
   # edited through libiio to put a phy in each failing state. Compiled from
   # the library sources: it calls the unexported flag refresh.

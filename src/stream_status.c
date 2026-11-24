@@ -174,6 +174,21 @@ void datax_stream_status_check(struct datax_stream *s, bool discard)
 	datax_stream_status_apply(s, ret, ovf, unf, discard);
 }
 
+void datax_stream_status_clear(struct datax_stream *s)
+{
+	bool ovf = false, unf = false;
+	int ret;
+
+	s->disc_pending = false;
+	if (s->detect_off)
+		return;
+	s->stats.status_polls++;
+	ret = datax_stream_status_poll(s, &ovf, &unf);
+	datax_stream_status_apply(s, ret, ovf, unf, true);
+	s->polled_once = true;
+	s->last_poll_us = mono_us();
+}
+
 int datax_internal_device_stream_info(const struct datax_device *dev,
 				      enum datax_direction dir, char *name,
 				      size_t len, int *detect)

@@ -136,10 +136,17 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
 4. **`start_at` is "close, arm the DMA, open at T".** (Implementer's call.)
    - `start_at(T)` refuses T inside the guard margin with `DATAX_ERR_LATE`, as P3a commit does.
    - Before T, in this order:
-     1. Write execute-now `STREAM_GATE(mode=1)` and `STREAM_GATE(level=0)` for the direction:
-        timestamp 0, `LATE_EXECUTE_NOW`, through the scheduler. These "immediate" commands are
+     1. Write execute-now `STREAM_GATE(mode=1)` and `STREAM_GATE(level=0)` for the direction.
+        Each is timestamp 0, `LATE_EXECUTE_NOW` and **no** `REPORT_COMPLETION`, through a
+        generalised `datax_tick_gpio_now` (`datax_tick_cmd_now`). These "immediate" commands are
         exempt from the guard margin.
-     2. Wait for their completions.
+     2. Nothing to wait for (G5, 2026-11-23). Tick applies a late execute-now descriptor at push
+        time, so the effect is in place when the attribute write returns. It also raises
+        `late_count`, so the helper re-baselines `late_seen` under the scheduler's I/O lock, as
+        `datax_tick_gpio_now` already does. No spurious `DATAX_EVT_LATE_COMMAND` follows.
+        - The mode-bit enable latches Tick's shared capture tag with its late flag set. The RX
+          tagger keeps only its own gate's tag (gate 0), so the header written at T is the
+          on-time one.
      3. Open the IIO buffer and enqueue every RX block, or load the TX data: the whole
         `block_count` for streaming TX, the one buffer for cyclic TX.
      4. Commit `STREAM_GATE(level=1)` at T with `LATE_DROP | REPORT_COMPLETION`.
@@ -175,6 +182,15 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
        would then land at an arbitrary offset, and derived timestamps would be wrong.
      - Requiring whole-block bursts doesn't fix it either: the tick clock and the sample clock are
        asynchronous, so a time-based close cannot hit a block boundary exactly.
+   - **G6 result (2026-11-23): fail end to end, so RX gating is out of P3b**
+     (datax_sdk_sdr#39).
+     - It passes in HDL and kernel: AXIS-source `axi_dmac` early `tlast` with length reporting,
+       and the ADI 6.1 IIO dmaengine block `bytes_used`.
+     - It fails in libiio v1: the local mmap dequeue discards `bytes_used` and refuses a short RX
+       enqueue; iiod's dequeue response always sends the full block; `iio_block` has no
+       `bytes_used` getter.
+     - Fixing it is a libiio fork change plus an iiod protocol field, beyond P3b. The original
+       text follows for the record.
    - **Spike G6** decides whether RX gating joins P3b. It reads the code path for an AXIS-source
      RX DMA whose `tlast` ends a transfer early, and whether that short block's `bytes_used`
      survives the ADI kernel's IIO block path, iiod and libiio v1.
@@ -331,14 +347,26 @@ Blocked-lab until someone checks it at the bench.
   - the header lands in the first 32 bytes after each opening;
   - it matches `tick.capture.parse_capture_header`;
   - a reopening re-tags.
-- **G4 — chip-B pin.** Confirm the EMIO bit for `adrv9009_gpio_00_b` from the pinned
-  `system_top` and the constraint file, and write the split patch.
+- **G4 — chip-B pin.** Result 2026-11-23: pass.
+  - `adrv9009_gpio_00_b` is EMIO `gpio[58]` (the "58" comment on `01_b` is the wrong one) and
+    pin AM11, LVCMOS18.
+  - Linux GPIO number: 78 + 58 = 136.
+  - The patch splits the IOBUF into `[92:59]` (34 pins) and `[57:33]` (25 pins). It adds
+    `assign adrv9009_gpio_00_b = tick_fhm_gpio[1]` and `assign gpio_i[58] = tick_fhm_gpio[1]`,
+    and keeps the chip-A edits.
+  - `tick_fhm_gpio` is already 4 bits wide.
+  - The device tree already sets `adi,fhm-config-fhm-gpio-pin = 0` (TAL_GPIO_0) for chip B.
+    So chip B needs no device-tree change, only FHM enabled at run time.
 - **G6 — short RX blocks.** A code read: does an AXIS-source `axi_dmac` transfer that ends
   early on `tlast` report its length through the ADI kernel's IIO dmaengine block path, iiod's
   block protocol and libiio v1's `iio_block` dequeue? Pass brings RX gating into P3b (decision 5).
-- **G5 — execute-now over the attribute path.**
-  - On the fake Tick and in Tick's Python model, a `LATE_EXECUTE_NOW` descriptor with timestamp
-    0 executes on the next scheduler pass and completes `EXECUTED`, not `LATE`.
+- **G5 — execute-now over the attribute path.** Result 2026-11-23:
+  - A descriptor with timestamp 0 and `LATE_EXECUTE_NOW` executes at push. If reported, it
+    completes `LATE_EXECUTED`.
+  - It raises `late_count`, and on a gate enable it latches a late-flagged capture tag. The RTL,
+    Tick's Python model and libdatax's fake Tick all agree.
+  - So: send it unreported and re-baseline `late_seen` (decision 4).
+  - Original wording: "executes on the next scheduler pass and completes `EXECUTED`, not `LATE`".
   - Measure the `ip:` round trips `start_at` setup costs. That needs hardware, so it is
     estimated from P3a's per-attribute cost and confirmed in S4.
 
@@ -358,8 +386,9 @@ Blocked-lab until someone checks it at the bench.
   and `DATAX_EVT_STREAM_UNDERFLOW`. The docs follow the code.
 - **`api-python.md`:**
   - `rx.start_at(t)`;
-  - `samples, info = rx.recv()` keeps returning `BlockInfo`; `info.timestamp` is None when
-    unknown, and the doc's `samples, ts` example changes to match;
+  - `samples, info = rx.recv()` keeps returning `BlockInfo`. `info.timestamp_ticks` is 0 when
+    unknown, the same as in C (`python/datax/stream.py` has no None path, and adding one would
+    split the two APIs). The doc's `samples, ts` example changes to match;
   - `sched.at(t).gate_on/gate_off`;
   - `LateError`.
 - **`platform-adrv9009-zu11eg.md`:** the `timed-dma` image in the runbook, when S4 has it.
@@ -392,4 +421,5 @@ The builder check (a fresh reviewer, no context) asked three questions:
      `TIMESTAMPS` then stays false, because it means in-band.
    - Anything else partial needs the owner's sign-off.
 3. **Does the Python `recv` change shape?** No. It keeps `(samples, BlockInfo)`, and
-   `BlockInfo.timestamp` is None when unknown.
+   `BlockInfo.timestamp_ticks` is 0 when unknown, as in C. The S0 doc pass found that the real
+   field is `timestamp_ticks: int`. The earlier draft's "`.timestamp` is None" is withdrawn.

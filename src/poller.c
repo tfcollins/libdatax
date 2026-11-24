@@ -21,6 +21,7 @@
 #include <time.h>
 
 #include "scheduler.h"
+#include "tick_descriptor.h"
 #include "tick_ops.h"
 
 /* Without work the poller reads the counters only every this many periods. */
@@ -320,6 +321,18 @@ static int check_counters(struct datax_sched *s)
 
 /* ---- feed ------------------------------------------------------------------------- */
 
+/* Feed order: (hw_ts, lead first, insertion order). Tick runs commands of
+ * an equal timestamp in push order, so a lead command (an RX opening gate)
+ * reaches it before the others at its T (same-T ruling). */
+static bool feeds_before(const struct sched_cmd *c, const struct sched_cmd *b)
+{
+	if (c->hw_ts != b->hw_ts)
+		return c->hw_ts < b->hw_ts;
+	if (c->lead != b->lead)
+		return c->lead;
+	return c->order < b->order;
+}
+
 static struct sched_cmd *earliest_pending(struct datax_sched *s)
 {
 	struct sched_cmd *best = NULL;
@@ -327,12 +340,36 @@ static struct sched_cmd *earliest_pending(struct datax_sched *s)
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *c = &s->cmds[i];
 
-		if (c->state == CMD_PENDING &&
-		    (!best || c->hw_ts < best->hw_ts ||
-		     (c->hw_ts == best->hw_ts && c->order < best->order)))
+		if (c->state == CMD_PENDING && (!best || feeds_before(c, best)))
 			best = c;
 	}
 	return best;
+}
+
+/*
+ * A late_probe command was just pushed: late_count before and after the
+ * push (both read with io held, nothing else written between) rose, so Tick
+ * found it late on submit and dropped it (LATE_DROP, unreported: no record
+ * ever comes). Finish it LATE through its hook; datax_sched_finish raises
+ * the event. The rise is ours: re-baseline it so check_counters does not
+ * report it again. s->lock held.
+ */
+static void probe_late(struct datax_sched *s, long seq, unsigned long long before,
+		       unsigned long long after)
+{
+	struct sched_cmd *c = datax_sched_find(s, seq);
+	struct datax_sched_result res = {
+		.status = DATAX_COMPLETION_LATE,
+		.tick_status = DATAX_TICK_STATUS_LATE_DROPPED,
+	};
+
+	if (after <= before || !c || c->state != CMD_WRITTEN)
+		return;
+	s->late_seen += after - before;
+	res.requested_ticks = c->api_ts;
+	snprintf(res.detail, sizeof(res.detail),
+		 "late: Tick dropped it (late_count rose at its push)");
+	datax_sched_finish(s, c, &res);
 }
 
 static int feed(struct datax_sched *s)
@@ -357,7 +394,8 @@ restart:
 	h0 = s->last_hw_mono;
 	for (;;) {
 		struct sched_cmd *c = earliest_pending(s);
-		unsigned long long host, acc, now;
+		unsigned long long host, acc, now, before = 0, after = 0;
+		bool probe;
 		long seq;
 
 		if (!c)
@@ -416,11 +454,30 @@ restart:
 		if (!c || c->state != CMD_PENDING)
 			continue;
 		datax_sched_format_desc(c, buf, sizeof(buf));
+		probe = c->late_probe;
+		pthread_mutex_unlock(&s->lock);
+		if (probe) {
+			ret = rd(s, "late_count", &before);
+			accesses++;
+			if (ret)
+				return ret;        /* still PENDING: the next pass retries */
+		}
+		pthread_mutex_lock(&s->lock);
+		c = datax_sched_find(s, seq);
+		if (!c || c->state != CMD_PENDING)
+			continue;
 		c->state = CMD_WRITTEN;
-		seq = c->seq;
 		pthread_mutex_unlock(&s->lock);
 		ret = datax_tick_write_str(s->dev, "command_descriptor", buf);
 		accesses++;
+		/* A failed read after the push leaves it written: the late_count
+		 * watch (check_counters) still raises a rise as an event. */
+		if (!ret && probe && !rd(s, "late_count", &after)) {
+			accesses++;
+			pthread_mutex_lock(&s->lock);
+			probe_late(s, seq, before, after);
+			pthread_mutex_unlock(&s->lock);
+		}
 		pthread_mutex_lock(&s->lock);
 		if (ret) {
 			c = datax_sched_find(s, seq);

@@ -63,6 +63,9 @@ struct datax_sched_result {
 	bool queue_emptied;                  /* finished because Tick's queue was
 					      * emptied (flush, destroy, late-PPS
 					      * adoption): nothing queued remains */
+	bool cancelled;                      /* its owner cancelled it on purpose
+					      * (datax_sched_cancel_gates): a
+					      * consumed one raises no event */
 	char detail[DATAX_SCHED_DETAIL_LEN]; /* "" for OK */
 };
 
@@ -105,6 +108,13 @@ struct datax_sched_cmd_spec {
 	 * table instead of becoming DONE (nobody can wait on it: timed
 	 * set_frequency's tune on the device's own scheduler). */
 	bool consume;
+	/* At an equal hardware timestamp the feeder writes a lead command
+	 * before the others (same-T order: an RX opening gate before a TX one). */
+	bool lead;
+	/* Unreported, but late on submit must not pass silently: the feeder
+	 * samples late_count just before and after the push, and a rise
+	 * finishes the command LATE through its hook (a TX opening gate). */
+	bool late_probe;
 	datax_sched_complete_fn on_complete;  /* may be NULL */
 	void *user;
 };
@@ -126,6 +136,30 @@ long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spe
  */
 int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
 			uint32_t value);
+/* The same for any command: execute-now, unreported, timestamp 0. */
+int datax_tick_cmd_now(struct datax_device *dev, struct datax_sched *s, uint16_t command_id,
+		       uint16_t target_id, const uint32_t args[4]);
+/* STREAM_GATE bit to level (0 or 1) now: target 0x0200 | bit, args {bit, level}. */
+int datax_tick_gate_now(struct datax_device *dev, struct datax_sched *s, unsigned int bit,
+			unsigned int level);
+
+/*
+ * Targeted cancel (timed streams). Takes io itself (-EDEADLK if the caller
+ * holds it). Every non-DONE STREAM_GATE command on a bit of gate_mask, in any
+ * state, finishes FLUSHED (cancelled, detail) through its hook. If one of
+ * them was WRITTEN, Tick's queue is emptied and the rest is re-fed
+ * (flush_and_repend in sched.c): first a wait of at most one guard margin,
+ * io released, until no other written command is due before now + guard;
+ * then t1, drain, flush_queue, t2, drain; then every other written command
+ * not done goes back to PENDING when due after t2, is removed as executed
+ * when unreported and due before t1, and otherwise finishes DROPPED. 0 or
+ * -errno with last-error.
+ */
+int datax_sched_cancel_gates(struct datax_sched *s, uint32_t gate_mask, const char *detail);
+/* The same flush and re-feed with nothing cancelled, so the feeder rewrites
+ * Tick's queue in (hw_ts, lead first, order) order. If the wait's bound
+ * expires it changes nothing and sets a warning last-error (returns 0). */
+int datax_sched_refeed(struct datax_sched *s);
 
 /*
  * Ask the poller to run an iteration as soon as device time reaches
@@ -185,6 +219,7 @@ struct sched_cmd {
 	uint32_t args[4];
 	bool report;
 	bool consume;                      /* see datax_sched_cmd_spec */
+	bool lead, late_probe;             /* see datax_sched_cmd_spec */
 	bool lagged;                       /* a drain came after hw_ts: may be held */
 	datax_sched_complete_fn on_complete;
 	void *user;

@@ -100,6 +100,12 @@ void datax_internal_mcs_force_phase_sync(struct datax_device *dev, bool on);
  * Tick). */
 int datax_internal_pps_present(const struct datax_device *dev);
 
+/* The RX ring depth the server keeps whatever block_count asks for, as
+ * timed RX start_at sees it: -1 probe (the default: 4 for a libiio block
+ * source over ip:, where a v0 iiod keeps a 4-block kernel ring and the
+ * protocol cannot be told; 0 otherwise), 0 none, n a fixed n. 0, or -EINVAL. */
+int datax_internal_device_set_server_ring(struct datax_device *dev, int depth);
+
 /* Parse a Tick stream_gate_map text into out = {present, rx_level, tx_level,
  * rx_mode, tx_mode, fhm_b, tx_fullmask_only} (-1: role absent). 0, or
  * -EINVAL for a NULL text or a duplicated role (out then reads as absent). */

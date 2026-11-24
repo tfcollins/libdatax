@@ -40,6 +40,7 @@ static struct datax_device *new_device(struct datax_context *ctx,
 		return NULL;
 	dev->ctx = ctx;
 	dev->family = fam;
+	dev->server_ring = -1;             /* probe (stream_timed.c) */
 	strncpy(dev->name, name, sizeof(dev->name) - 1);
 	return dev;
 }

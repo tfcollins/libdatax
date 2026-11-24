@@ -2009,6 +2009,50 @@ static void test_ring_overflow_attributed_to_first_rearmed_block(void)
 	fx_close(&x);
 }
 
+/* S4 ruling: a v0 iiod over ip: keeps 4 kernel RX blocks whatever
+ * block_count asks for, so a timed RX start_at with more is refused (the
+ * pre-T contiguity rule could not hold). The probe sees the fake DMA bound
+ * as the block source (no server ring); the seam stands in for the libiio
+ * source over ip:. test_timed_rx_ring_refused_over_ip (Python) covers the
+ * probe on the real libiio source. */
+static void test_start_at_refuses_rx_ring_beyond_legacy_iiod(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_stream_config c = { .direction = DATAX_RX, .channel_mask = 0x1,
+					 .block_samples = BS, .block_count = 5 };
+	unsigned long desc;
+	int ret;
+
+	fx_open(&x, true);
+	/* the probe: a bound block source has no server ring, so 5 blocks are fine */
+	CHECK(datax_stream_create(x.dev, &c, &s) == 0);
+	ret = datax_stream_start_at(s, at(&x, 20));
+	if (ret)
+		fprintf(stderr, "start_at (probe) %d: %s\n", ret, datax_context_get_last_error(x.ctx));
+	CHECK(ret == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	/* a v0 iiod: refused before any Tick access, with the reason */
+	CHECK(datax_internal_device_set_server_ring(x.dev, 4) == 0);
+	desc = shim_get(&x.sh, &x.sh.desc);
+	CHECK(datax_stream_start_at(s, at(&x, 20)) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "4-block kernel ring") != NULL);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "v0 iiod") != NULL);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "block_count <= 4") != NULL);
+	CHECK(shim_get(&x.sh, &x.sh.desc) == desc);
+	CHECK(!s->started);
+	datax_stream_destroy(s);
+	/* 4 blocks are fine on it; TX is not concerned */
+	s = stream(&x, DATAX_RX, 0x1, false);
+	CHECK(datax_stream_start_at(s, at(&x, 20)) == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	datax_stream_destroy(s);
+	CHECK(datax_internal_device_set_server_ring(x.dev, -2) == -EINVAL);
+	CHECK(datax_internal_device_set_server_ring(NULL, 4) == -EINVAL);
+	CHECK(datax_internal_device_set_server_ring(x.dev, -1) == 0);
+	fx_close(&x);
+}
+
 /* A tag that does not parse: not stripped, unanchored, counted, warned. */
 static void test_tag_bad_magic_unanchored(void)
 {
@@ -2546,6 +2590,7 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_derived_timestamps),
 	T_(test_overflow_zeroes_timestamps),
 	T_(test_ring_overflow_attributed_to_first_rearmed_block),
+	T_(test_start_at_refuses_rx_ring_beyond_legacy_iiod),
 	T_(test_tag_bad_magic_unanchored),
 	T_(test_tag_flags_rejected),
 	T_(test_untimed_ts_zero),

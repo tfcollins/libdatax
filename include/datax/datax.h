@@ -139,9 +139,23 @@ struct datax_stream_config {
 	bool cyclic;                        /* TX: repeat from fabric memory */
 };
 
+/*
+ * What recv / get_block report about the first block they touched.
+ *  - timestamp_ticks: device time of the block's first delivered sample; 0 =
+ *    unknown (an untimed stream, or a timed one from its discontinuity on).
+ *  - discontinuous: samples were lost before this block (an overflow).
+ *    Untimed: the block taken when the overflow was seen. Timed RX (start_at):
+ *    the block_count blocks enqueued before T are filled back to back from
+ *    the release, so they are contiguous by construction; an overflow seen
+ *    while they are taken is attributed to block block_count, the first
+ *    re-armed one. From the discontinuity on, every block of that release
+ *    reads discontinuous with timestamp_ticks = 0, until the next start_at.
+ *  - valid_samples: frames in the block; block 0 of a timed RX release is
+ *    short by the stripped capture tag.
+ */
 struct datax_block_info {
 	unsigned long long timestamp_ticks; /* first delivered sample; 0 = unknown */
-	bool discontinuous;                 /* overflow occurred before this block */
+	bool discontinuous;                 /* samples lost before this block */
 	size_t valid_samples;
 };
 

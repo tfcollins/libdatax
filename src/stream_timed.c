@@ -45,6 +45,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <iio/iio.h>
+
 #include "error.h"
 #include "scheduler.h"
 #include "stream.h"
@@ -100,6 +102,44 @@ static int not_armable(struct datax_stream *s)
 	return datax_error_ret(s->dev->ctx, ENOTSUP, SUB,
 			       "start_at: %s needs DATAX_CAP_%s_ARM: the Tick stream_gate_map lacks %s%s%s",
 			       dname(s), dname(s), nl ? lv : "", nl && nm ? ", " : "", nm ? md : "");
+}
+
+/*
+ * The RX ring the server keeps (controller ruling, S4). A v0 iiod (Kuiper's
+ * stock 0.26) over ip: opens its kernel buffer with 4 blocks whatever
+ * block_count the client asks for, so the client's blocks past the 4th are
+ * copies the kernel ring may have overrun between, and a timed stream could
+ * not tell its pre-T blocks (contiguous by construction) from re-armed ones.
+ * libiio v1 does not say whether a network context speaks the legacy or the
+ * binary protocol (the context version is the server XML's: iiod-emu reports
+ * its fixture's 0.0), so over ip: the depth is never known and 4 is assumed.
+ * A local context is the kernel ring itself, and a bound block source (the
+ * Tier-1 fake DMA) has no server ring. 0 when no fixed depth applies.
+ */
+#define DATAX_LEGACY_IIOD_RING 4
+
+static int server_ring(const struct datax_stream *s)
+{
+	const struct iio_attr *a;
+	const char *uri;
+
+	if (s->dev->server_ring >= 0)
+		return s->dev->server_ring;
+	if (s->src != &datax_stream_iio_src)
+		return 0;
+	a = iio_context_find_attr(s->dev->ctx->iio, "uri");
+	uri = a ? iio_attr_get_static_value(a) : NULL;
+	return uri && !strncmp(uri, "ip:", 3) ? DATAX_LEGACY_IIOD_RING : 0;
+}
+
+int datax_internal_device_set_server_ring(struct datax_device *dev, int depth)
+{
+	if (!dev || depth < -1)
+		return -EINVAL;
+	pthread_mutex_lock(&dev->ctx->lock);
+	dev->server_ring = depth;
+	pthread_mutex_unlock(&dev->ctx->lock);
+	return 0;
 }
 
 /* tx-start-fullmask-only (G2/G3 ruling 2): TX start_at only on a mask of
@@ -436,6 +476,18 @@ int datax_stream_start_at(struct datax_stream *s, datax_time when)
 				       "start_at: TX start_at needs every TX channel on this image "
 				       "(tx-start-fullmask-only): mask 0x%x of %u channels",
 				       s->cfg.channel_mask, s->dev->tx_channels);
+	if (is_rx(s)) {
+		int ring = server_ring(s);
+
+		if (ring > 0 && s->cfg.block_count > (unsigned int)ring)
+			return datax_error_ret(ctx, EINVAL, SUB,
+					       "start_at: RX block_count %u exceeds the %d-block kernel "
+					       "ring a v0 iiod over ip: keeps (it ignores block_count; the "
+					       "server's depth is not known), so the blocks past the %dth "
+					       "could follow a gap the timestamps cannot see; use "
+					       "block_count <= %d",
+					       s->cfg.block_count, ring, ring, ring);
+	}
 	if (!is_rx(s) && !datax_stream_held_count(s))
 		return datax_error_ret(ctx, EINVAL, SUB,
 				       "start_at: no full TX block is held: preload with send() first");

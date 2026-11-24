@@ -334,6 +334,12 @@ Blocked-lab until someone checks it at the bench.
 ## Spike gates (S1)
 
 - **G1 — image base.** Decision 6. Pass: WNS ≥ 0, netlist checks green.
+  - Result 2026-11-24: pass on candidate A. That is hopcap `p3b-timed-dma` @ 73793f3: hopcap-sfp,
+    vrt49 `VRT_DAC_TX_ENABLE=0` (vrt49#91) and the `timed-dma` profile, built with Vivado 2025.1.
+  - Routed WNS is +0.096 ns, WHS +0.010 ns. `check_hop_netlist --profile timed-dma` passes.
+  - vrt49's `check-sfp-rx-netlist` is skipped by design, because cpack now feeds the DMA through
+    the tag adapter and the gate.
+  - Candidate B is not needed.
 - **G2 — gate and DMA sync.** In simulation with the ADI `axi_dmac` (FIFO source,
   `SYNC_TRANSFER_START 1`) and `util_cpack2`:
   - (a) with the gate closed before the DMA is enabled, the first word the DMA writes is the

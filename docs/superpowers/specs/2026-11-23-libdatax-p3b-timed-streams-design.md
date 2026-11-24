@@ -1,10 +1,11 @@
 # Design: libdatax P3b — timed DMA streams on the ADRV9009-ZU11EG
 
 Date: 2026-11-23
-Status: draft. Written under the owner's "start P3b. document stages and tasks in github
-project", with questions opted out by standing preference. Every decision below is the
-implementer's call and is marked as one. Two of them are **spike gates** (S1), not settled
-decisions.
+Status: approved to start 2026-11-23 (owner: "go go"). Written under the owner's "start P3b.
+document stages and tasks in github project", with questions opted out by standing preference.
+Every decision below is the implementer's call and is marked as one. Two of them are **spike
+gates** (S1), not settled decisions. The builder check's three questions are answered in
+"Builder check rulings" at the end.
 Tracking: datax_sdk_sdr#28 and its stage sub-issues on <https://github.com/users/tfcollins/projects/4>.
 Predecessor: `2026-11-05-libdatax-p3a-timed-control-design.md` (P3a, decision 1 split P3).
 
@@ -107,11 +108,13 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
 3. **RX timestamps: Tick's tagger, through a thin FIFO-interface adapter, oneshot per
    release.** (Implementer's call.)
    - The ZU11EG RX DMA takes FIFO input (no `tlast`), so the only burst boundary the fabric knows
-     is the gate opening.
+     is the gate opening. A closing gate cannot end a DMA block (see decision 5).
    - The adapter (`tick_fifo_tag_adapter`) presents cpack's `packed_fifo_wr` to the tagger as AXIS
-     with `tready` = 1. It asserts a synthetic `tlast` on the last beat before the gate closes,
-     so the next opening starts a new burst. The tagger runs in oneshot mode, enabled per gate
-     through Tick's `stream_tag_en`.
+     with `tready` = 1. It asserts a synthetic `tlast` while the RX mode bit is 0, so the tagger
+     re-arms for the next `start_at`. The tagger runs in oneshot mode, enabled per gate through
+     Tick's `stream_tag_en`.
+   - RX opens once per `start_at` and closes only at `stop`, so a release is always block 0 of an
+     IIO buffer: every block is enqueued before T, and the DMA writes from block 0's start.
    - The header carries `capture_tick`, the tick Tick latched when the opening `STREAM_GATE`
      executed. That equals T for an on-time command.
    - **Block 0 after each release carries the hardware tag.**
@@ -122,9 +125,8 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
    - **Blocks after block 0 have derived timestamps:**
      `T + round(samples_since_release × tick_hz / sample_rate)`.
      - These are exact only at the device rate. libdatax documents the rounding.
-   - After any discontinuity (overflow, or a gate close and reopen without a tag) a block reads
-     `timestamp_ticks = 0` ("unknown") with `discontinuous = true`. The next tagged block
-     re-anchors.
+   - After any discontinuity (an overflow) a block reads `timestamp_ticks = 0` ("unknown") with
+     `discontinuous = true` for the rest of the stream. The next `start_at` re-anchors.
    - `TIMESTAMPS` means "block 0 of each release is hardware-stamped". The API page says so.
    - The 32 overwritten bytes are lost samples, not shifted ones. That is Tick's tagger contract,
      since `axi_dmac` treats an inserted beat badly.
@@ -158,14 +160,29 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
      after the preloaded blocks. That is recorded, not asserted, as RX overflows are in P2.
    - Cost if wrong: if the execute-now round trips make `start_at` setup slower than a useful
      lead time, a `prepare()` split moves the close/arm half out of the timed call.
-5. **`queue_stream_gate(when, stream, enable)` drives the level bit only.**
+5. **`queue_stream_gate(when, stream, enable)` drives the level bit only, and on this image
+   only for TX.** (Implementer's call, from the builder check.)
    - It requires the stream to have been started with `start_at`. Otherwise it returns `-EINVAL`
      with "stream is not in timed mode; use start_at". `start()` leaves mode 0, so a level
      command would do nothing.
-   - A gated burst is `gate(t1, true)`, `gate(t2, false)`.
-   - Each re-opening produces a new tagged block 0 on RX.
-   - While the RX gate is closed, `recv` simply has no data. That is not an error and not an
-     overflow.
+   - **TX:** a gated burst is `gate(t1, true)`, `gate(t2, false)`. While closed the DAC outputs
+     zero and the TX FIFO is not read, so a cyclic buffer resumes where it paused. There are no
+     block boundaries to respect.
+   - **RX mid-stream gating returns `-ENOTSUP`** with "RX gating needs a DMA with end-of-burst
+     (tlast) on this image".
+     - Why: the RX DMA's FIFO source has no `tlast`, so closing the gate cannot end a block. The
+       tail of a burst would sit in a half-filled block until the next opening. The next header
+       would then land at an arbitrary offset, and derived timestamps would be wrong.
+     - Requiring whole-block bursts doesn't fix it either: the tick clock and the sample clock are
+       asynchronous, so a time-based close cannot hit a block boundary exactly.
+   - **Spike G6** decides whether RX gating joins P3b. It reads the code path for an AXIS-source
+     RX DMA whose `tlast` ends a transfer early, and whether that short block's `bytes_used`
+     survives the ADI kernel's IIO block path, iiod and libiio v1.
+     - If it does, S2 adds that route (`DMA_TYPE_SRC 1`, the adapter's synthetic `tlast` driven on
+       gate close), and the stream layer handles short blocks. RX gating then ships with a tagged
+       block per opening.
+     - If not, RX gating moves to a follow-up issue. `STREAM_GATE` stays true, because TX gating
+       works, and the API page states the RX restriction per platform.
    - The Python surface is `sched.at(t).gate_on(stream)` and `.gate_off(stream)`, as in
      `api-application-mapping.md`.
 6. **Image: spike gate G1 decides the base. The RTL lives in tick either way.** (Implementer's
@@ -256,8 +273,12 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
         loopback (P2's `loopback.py`). The pattern's first-sample offset in the RX block is
         recorded, and it must be identical across 10 runs within ±1 sample. That proves the
         release is deterministic.
-    - **Gated burst:** gate pattern on/off/on at 20 ms spacing. Assert one tagged block per
-      opening, `capture_tick` values equal to the command times, and no samples between bursts.
+    - **Gated burst** (TX, observed on RX): RX runs continuously from a `start_at`, and TX gates
+      a constant-tone cyclic buffer on/off/on at 20 ms spacing. The burst edges' sample positions
+      in the RX stream (derived timestamps) must sit at the commanded times plus the loopback
+      offset measured above, ±1 sample. Tick's completions for each gate command must be
+      `EXECUTED` on time. RX gating gets the same test, with one tagged block per opening, if G6
+      brings it in.
     - **Chip-B FHM:** timed tune on channel 2 with a PLL readback, same as chip A.
     - **Regression on the same image:** the full P2 suite (TX now runs) and the P3a suite.
     - **Evidence (REQ-TEST-023):** completion logs, edge-capture values, the recorded offsets and
@@ -284,7 +305,7 @@ repo.
 | Stage | What | Depends on | Needs tron |
 |---|---|---|---|
 | S0 Design | this spec, builder check, SDK doc amendments (REQ-DOC-001) | — | no |
-| S1 Spike | G1 image base (synth and timing), G2 gate and DMA sync in simulation, G3 tagger adapter in simulation, G4 chip-B bit, G5 execute-now gate over `ip:` on the fake Tick | S0 | no (boot check deferred to S4) |
+| S1 Spike | G1 image base (synth and timing), G2 gate and DMA sync in simulation, G3 tagger adapter in simulation, G4 chip-B bit, G5 execute-now gate over `ip:` on the fake Tick, G6 short RX blocks (code read) | S0 | no (boot check deferred to S4) |
 | S2 HDL and kernel | `tick_dma_gate`, `tick_fifo_tag_adapter`, `stream_gate_map` driver attribute (tick); `VRT_DAC_TX_ENABLE` (vrt49); `timed-dma` profile, chip-B route, device tree, netlist checks, build and boot set (hopcap) | S1 | no |
 | S3 libdatax Tier 1 | fake gate and source, `start_at`, `queue_stream_gate`, timestamps, capability probe, chip-B FHM, Python | S0 (API amended); S2 only for exact attribute names | no |
 | S4 Hardware | `images.json` entry, `tron-run.sh` and `hw-test.yml` image option, the `p3b` suite, the P2 and P3a regression | S2, S3 | **yes** |
@@ -301,16 +322,20 @@ Blocked-lab until someone checks it at the bench.
   - (a) with the gate closed before the DMA is enabled, the first word the DMA writes is the
     first sample after opening;
   - (b) later transfers, the next IIO blocks, do not wait for another `sync`;
-  - (c) closing and reopening mid-transfer drops samples and does not stall;
+  - (c) on TX, closing and reopening mid-buffer pauses `axi_tx_fifo` reads without an underflow
+    or a stall, and on RX, closing at `stop` leaves no stuck transfer;
   - (d) list every consumer of `adc_valid`, the vrt49 tap included.
 
-  Fail on (c) → `STREAM_GATE` ships start-only (decision 1's cost).
+  Fail on (c) for TX → `STREAM_GATE` ships start-only (decision 1's cost).
 - **G3 — tagger adapter.** In simulation, the adapter plus Tick's tagger at the cpack width:
   - the header lands in the first 32 bytes after each opening;
   - it matches `tick.capture.parse_capture_header`;
   - a reopening re-tags.
 - **G4 — chip-B pin.** Confirm the EMIO bit for `adrv9009_gpio_00_b` from the pinned
   `system_top` and the constraint file, and write the split patch.
+- **G6 — short RX blocks.** A code read: does an AXIS-source `axi_dmac` transfer that ends
+  early on `tlast` report its length through the ADI kernel's IIO dmaengine block path, iiod's
+  block protocol and libiio v1's `iio_block` dequeue? Pass brings RX gating into P3b (decision 5).
 - **G5 — execute-now over the attribute path.**
   - On the fake Tick and in Tick's Python model, a `LATE_EXECUTE_NOW` descriptor with timestamp
     0 executes on the next scheduler pass and completes `EXECUTED`, not `LATE`.
@@ -333,7 +358,8 @@ Blocked-lab until someone checks it at the bench.
   and `DATAX_EVT_STREAM_UNDERFLOW`. The docs follow the code.
 - **`api-python.md`:**
   - `rx.start_at(t)`;
-  - `samples, ts = rx.recv()`, with `ts` None when unknown;
+  - `samples, info = rx.recv()` keeps returning `BlockInfo`; `info.timestamp` is None when
+    unknown, and the doc's `samples, ts` example changes to match;
   - `sched.at(t).gate_on/gate_off`;
   - `LateError`.
 - **`platform-adrv9009-zu11eg.md`:** the `timed-dma` image in the runbook, when S4 has it.
@@ -345,3 +371,25 @@ Blocked-lab until someone checks it at the bench.
   costs.
 - Whether `tick_dma_gate` is one module with a direction parameter or two.
 - hopcap profile mechanics (`--profile` versus a second `--port`-style flag).
+
+## Builder check rulings (2026-11-23)
+
+The builder check (a fresh reviewer, no context) asked three questions:
+
+1. **How do gated RX bursts line up with DMA blocks?** They can't on a FIFO-source DMA.
+   - Ruling: RX opens once per `start_at`, and mid-stream gating is TX only. RX gating depends on
+     spike G6 (decisions 3 and 5).
+   - The gated-burst item is tested on TX through the loopback (decision 10).
+   - Cost if wrong: if the owner wants RX gating regardless, the AXIS route becomes mandatory
+     work in S2 and S3.
+2. **Does P3b exit if a fallback trips?**
+   - Ruling: P3b stays open until each REQ-TEST-022 item is met, and its stages stay on the board.
+     A tripped fallback becomes a new task under the stage it blocks, not a partial exit.
+   - One equivalence is accepted. If G3 fails, the timed-capture item is still met by:
+     - the gate release, plus the loopback determinism test (decision 10);
+     - the host filling `timestamp_ticks` from `edge_capture_ticks`.
+
+     `TIMESTAMPS` then stays false, because it means in-band.
+   - Anything else partial needs the owner's sign-off.
+3. **Does the Python `recv` change shape?** No. It keeps `(samples, BlockInfo)`, and
+   `BlockInfo.timestamp` is None when unknown.

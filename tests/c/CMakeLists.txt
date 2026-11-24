@@ -432,7 +432,9 @@ if(DATAX_LIBIIO_BUILD)
     test_destroy_from_event_callback_refused
     test_tag_vectors test_mode_bit_tag_ignored test_frames_to_ticks_no_overflow
     test_block0_tag_parsed_stripped test_strip_by_channel_count test_derived_timestamps
-    test_overflow_zeroes_timestamps test_tag_bad_magic_unanchored test_tag_flags_rejected
+    test_overflow_zeroes_timestamps test_ring_overflow_attributed_to_first_rearmed_block
+    test_start_at_refuses_rx_ring_beyond_legacy_iiod
+    test_tag_bad_magic_unanchored test_tag_flags_rejected
     test_untimed_ts_zero test_zero_copy_block0 test_soft_offset_timestamps
     test_gate_tx_burst test_gate_rx_enotsup test_gate_untimed_einval
     test_gate_before_open_einval test_gate_other_device_einval test_gate_no_cap_enotsup

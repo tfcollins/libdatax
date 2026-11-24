@@ -1876,13 +1876,25 @@ static void test_overflow_zeroes_timestamps(void)
 	s = stream(&x, DATAX_RX, 0x1, false);
 	T = at(&x, 20);
 	CHECK(datax_stream_start_at(s, T) == 0);
-	step_to(&x, T + 2 * BS * FT, 1 * MS);
+	/* take the pre-T blocks as they fill (no ring-full overflow) */
+	step_to(&x, T + 2 * BS * FT + BS * FT / 2, 1 * MS);
 	recv_n(s, BS - 8, 1, &info);
 	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
-	fake_dma_inject_overflow(x.d, 2);
+	recv_n(s, BS, 1, &info);
+	CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + BS) * FT);
+	step_to(&x, now(&x) + 2 * BS * FT, 1 * MS);
+	for (unsigned int b = 2; b < NB; b++) {
+		recv_n(s, BS, 1, &info);
+		CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + b * BS) * FT);
+	}
+	fake_dma_inject_overflow(x.d, 2);             /* lands in block NB, a re-armed one */
 	step_to(&x, now(&x) + 4 * BS * FT, 1 * MS);
 	msleep(150);                                  /* past the status rate limit */
-	recv_n(s, BS, 1, &info);
+	{
+		static int16_t gap[BS * 2];               /* block NB holds the gap itself */
+
+		CHECK(datax_stream_recv(s, gap, BS, &info, 3000) == (int)BS);
+	}
 	CHECK(info.discontinuous && info.timestamp_ticks == 0);
 	recv_n(s, BS, 1, &info);                      /* sticky: no new overflow */
 	CHECK(info.discontinuous && info.timestamp_ticks == 0);
@@ -1899,6 +1911,145 @@ static void test_overflow_zeroes_timestamps(void)
 	recv_n(s, BS, 1, &info);
 	CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + BS) * FT);
 	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+/* Take the NB pre-T blocks of a release (block 0 tagged): each keeps its
+ * derived timestamp and is not discontinuous, whatever the polls saw. */
+static void pre_t_blocks_clean(struct datax_stream *s, unsigned long long T)
+{
+	struct datax_block_info info;
+
+	CHECK(recv_n(s, BS - 8, 1, &info) == T / FT + 9);
+	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
+	CHECK(info.valid_samples == BS - 8);
+	for (unsigned int b = 1; b < NB; b++) {
+		CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + b * BS);
+		CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + b * BS) * FT);
+	}
+}
+
+/* S4 ruling: every block enqueued before T is filled back to back from the
+ * release, so blocks 0..NB-1 are contiguous by construction. An overflow
+ * seen while they are taken (here the natural one: the ring fills and the
+ * DMA overflows before the host takes block 0, as at native rates over ip:,
+ * where the poll runs past the 100 ms rate limit of start_at's clear) is
+ * attributed to block NB, the first re-armed one: it is discontinuous with
+ * timestamp 0, and so is every later block (sticky). */
+static void test_ring_overflow_attributed_to_first_rearmed_block(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	struct datax_internal_stream_stats st;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + (NB + 2) * BS * FT, 1 * MS);  /* the ring is full: frames lost */
+	msleep(150);                                  /* past the status rate limit */
+	pre_t_blocks_clean(s, T);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.overflows == 1);
+	step_to(&x, now(&x) + 3 * BS * FT, 1 * MS);  /* the re-armed blocks fill */
+	recv_n(s, BS, 1, &info);                      /* block NB */
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);   /* sticky */
+	CHECK(datax_stream_stop(s) == 0);
+
+	/* An overflow first seen mid-ring (at block 2's poll) is attributed to
+	 * block NB too. */
+	step_to(&x, now(&x) + 5 * MS, 1 * MS);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + NB * BS * FT + BS * FT / 2, 1 * MS);
+	CHECK(recv_n(s, BS - 8, 1, &info) == T / FT + 9);
+	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
+	CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + BS);
+	CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + BS) * FT);
+	fake_dma_inject_overflow(x.d, 0);             /* the flag only: no frame lost */
+	msleep(150);
+	for (unsigned int b = 2; b < NB; b++) {
+		CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + b * BS);
+		CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + b * BS) * FT);
+	}
+	step_to(&x, now(&x) + 3 * BS * FT, 1 * MS);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);
+	CHECK(datax_stream_stop(s) == 0);
+
+	/* zero-copy (a stream of its own: the mode latches): the same for get_block */
+	datax_stream_destroy(s);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	step_to(&x, now(&x) + 5 * MS, 1 * MS);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + (NB + 2) * BS * FT, 1 * MS);
+	msleep(150);
+	for (unsigned int b = 0; b < NB; b++) {
+		void *p = NULL;
+
+		CHECK(datax_stream_get_block(s, &p, &info, 3000) == 0);
+		CHECK(!info.discontinuous);
+		CHECK(info.timestamp_ticks == T + (b ? 1 + b * BS : 9) * FT);
+		CHECK(fake_dma_frame_index(p) == T / FT + (b ? 1 + b * BS : 9));
+		CHECK(datax_stream_put_block(s, p) == 0);
+	}
+	step_to(&x, now(&x) + 3 * BS * FT, 1 * MS);
+	{
+		void *p = NULL;
+
+		CHECK(datax_stream_get_block(s, &p, &info, 3000) == 0);
+		CHECK(info.discontinuous && info.timestamp_ticks == 0);
+		CHECK(datax_stream_put_block(s, p) == 0);
+	}
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+/* S4 ruling: a v0 iiod over ip: keeps 4 kernel RX blocks whatever
+ * block_count asks for, so a timed RX start_at with more is refused (the
+ * pre-T contiguity rule could not hold). The probe sees the fake DMA bound
+ * as the block source (no server ring); the seam stands in for the libiio
+ * source over ip:. test_timed_rx_ring_refused_over_ip (Python) covers the
+ * probe on the real libiio source. */
+static void test_start_at_refuses_rx_ring_beyond_legacy_iiod(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_stream_config c = { .direction = DATAX_RX, .channel_mask = 0x1,
+					 .block_samples = BS, .block_count = 5 };
+	unsigned long desc;
+	int ret;
+
+	fx_open(&x, true);
+	/* the probe: a bound block source has no server ring, so 5 blocks are fine */
+	CHECK(datax_stream_create(x.dev, &c, &s) == 0);
+	ret = datax_stream_start_at(s, at(&x, 20));
+	if (ret)
+		fprintf(stderr, "start_at (probe) %d: %s\n", ret, datax_context_get_last_error(x.ctx));
+	CHECK(ret == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	/* a v0 iiod: refused before any Tick access, with the reason */
+	CHECK(datax_internal_device_set_server_ring(x.dev, 4) == 0);
+	desc = shim_get(&x.sh, &x.sh.desc);
+	CHECK(datax_stream_start_at(s, at(&x, 20)) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "4-block kernel ring") != NULL);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "v0 iiod") != NULL);
+	CHECK(strstr(datax_context_get_last_error(x.ctx), "block_count <= 4") != NULL);
+	CHECK(shim_get(&x.sh, &x.sh.desc) == desc);
+	CHECK(!s->started);
+	datax_stream_destroy(s);
+	/* 4 blocks are fine on it; TX is not concerned */
+	s = stream(&x, DATAX_RX, 0x1, false);
+	CHECK(datax_stream_start_at(s, at(&x, 20)) == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	datax_stream_destroy(s);
+	CHECK(datax_internal_device_set_server_ring(x.dev, -2) == -EINVAL);
+	CHECK(datax_internal_device_set_server_ring(NULL, 4) == -EINVAL);
+	CHECK(datax_internal_device_set_server_ring(x.dev, -1) == 0);
 	fx_close(&x);
 }
 
@@ -2438,6 +2589,8 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_strip_by_channel_count),
 	T_(test_derived_timestamps),
 	T_(test_overflow_zeroes_timestamps),
+	T_(test_ring_overflow_attributed_to_first_rearmed_block),
+	T_(test_start_at_refuses_rx_ring_beyond_legacy_iiod),
 	T_(test_tag_bad_magic_unanchored),
 	T_(test_tag_flags_rejected),
 	T_(test_untimed_ts_zero),

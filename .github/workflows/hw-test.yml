@@ -13,9 +13,12 @@
 # before they are printed or uploaded.
 #
 # Every job runs on the hw-nemo runner and reaches the boards through labgrid:
-#   tron   ADRV9009-ZU11EG. Two boots, one per pinned image in
-#          tests/hardware/images.json: stock (P2 streaming incl. TX and loopback)
-#          and hopcap-sfp (P3a timed control). scripts/hw/tron-run.sh.
+#   tron   ADRV9009-ZU11EG. One boot per pinned image in tests/hardware/images.json
+#          (scripts/hw/tron-run.sh). image=both (the default, and what the schedule
+#          runs) boots stock (P2 streaming incl. TX and loopback) then hopcap-sfp
+#          (P3a timed control). image=timed-dma boots only the P3b image (timed
+#          streams, plus the P2 and P3a suites as its regression); it joins the
+#          scheduled set once its rows are validated (P3b S5).
 #   kuiper The other lab boards libdatax drives, on the labgrid catalog's Kuiper
 #          image (adi-lg request --mode uri). scripts/hw/kuiper-run.sh.
 #            zc706  ADRV9009 on ZC706 (place nemo)
@@ -36,7 +39,7 @@ on:
       image:
         description: tron image(s) to boot
         type: choice
-        options: [both, stock, hopcap-sfp]
+        options: [both, stock, hopcap-sfp, timed-dma]
         default: both
   schedule:
     # Sundays and Wednesdays (one busy board must not cost a whole week); offset
@@ -80,11 +83,14 @@ jobs:
           uv pip install --python .venv-hw/bin/python -e . numpy pytest \
             "hopcap[lab] @ $(pin hopcap)" "labgrid-plugins @ $(pin labgrid_plugins)"
       - name: tron, stock image
-        if: env.IMAGE != 'hopcap-sfp'
+        if: env.IMAGE == 'both' || env.IMAGE == 'stock'
         run: scripts/hw/tron-run.sh stock "$OUT"
       - name: tron, hopcap-sfp image
-        if: (success() || failure()) && env.IMAGE != 'stock'
+        if: (success() || failure()) && (env.IMAGE == 'both' || env.IMAGE == 'hopcap-sfp')
         run: scripts/hw/tron-run.sh hopcap-sfp "$OUT"
+      - name: tron, timed-dma image
+        if: (success() || failure()) && env.IMAGE == 'timed-dma'
+        run: scripts/hw/tron-run.sh timed-dma "$OUT"
       - name: Redact outputs
         if: always()
         run: test -d "$OUT" && python3 scripts/hw/redact.py "$OUT" && rm -f "$OUT"/*.raw.log || true

@@ -6,7 +6,7 @@
 # reservation per image. Used by .github/workflows/hw-test.yml on the hw-nemo
 # runner; runnable by hand with the same environment.
 #
-#   scripts/hw/tron-run.sh <stock|hopcap-sfp> <out-dir>
+#   scripts/hw/tron-run.sh <stock|hopcap-sfp|timed-dma> <out-dir>
 #
 # Needs: build/libdatax.so and libiio/build (the pinned v1 fork), and a venv
 # with this package, hopcap and labgrid-plugins at their pins.json revisions
@@ -26,8 +26,8 @@
 # Nothing unredacted reaches stdout (public job logs).
 set -uo pipefail
 
-image=${1:?usage: tron-run.sh <stock|hopcap-sfp> <out-dir>}
-out=${2:?usage: tron-run.sh <stock|hopcap-sfp> <out-dir>}
+image=${1:?usage: tron-run.sh <stock|hopcap-sfp|timed-dma> <out-dir>}
+out=${2:?usage: tron-run.sh <stock|hopcap-sfp|timed-dma> <out-dir>}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 venv=${DATAX_LAB_VENV:-$root/.venv-hw}
 port=${DATAX_LAB_HTTP_PORT:-8750}
@@ -35,6 +35,10 @@ lock=${DATAX_LAB_LOCK:-/tmp/vrt49-corundum-hardware.lock}
 for v in DATAX_LAB_ARTIFACTS DATAX_LAB_COORDINATOR DATAX_LAB_HTTP_BIND DATAX_LAB_EXPORTER_TRON; do
 	[ -n "${!v:-}" ] || { echo "tron-run: $v is not set (runner .env)" >&2; exit 2; }
 done
+case "$image" in
+stock | hopcap-sfp | timed-dma) ;;
+*) echo "tron-run: unknown image '$image' (stock, hopcap-sfp or timed-dma)" >&2; exit 2 ;;
+esac
 mkdir -p "$out"
 dir="$DATAX_LAB_ARTIFACTS/tron-$image"
 

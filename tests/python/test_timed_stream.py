@@ -128,3 +128,22 @@ def test_with_after_start_at(rig):
 def test_caps_p3b_flags(make_rig, gate_map, flags):
     r = make_rig(fhm=False, dma_fs=FS, gate_map=gate_map)
     assert set(r.dev.caps) == flags
+
+
+def test_timed_rx_ring_refused_over_ip(make_rig):
+    """S4 ruling: over ip: (iiod-emu here) with the libiio block source, a timed
+    RX start_at with more blocks than a v0 iiod's 4-block kernel ring is
+    refused with EINVAL naming it (4 blocks: the C test
+    test_start_at_refuses_rx_ring_beyond_legacy_iiod)."""
+    import ctypes as C
+    rig = make_rig(dma_fs=FS)
+    rig.make_scheduler()
+    fn = rig.lib.datax_internal_stream_bind_source
+    fn.argtypes, fn.restype = [C.c_void_p, C.c_int, C.c_void_p, C.c_void_p], C.c_int
+    assert fn(rig.dev._ptr, 0, None, None) == 0          # RX back on libiio
+    rx = rig.dev.rx_stream(channels=[0], block_samples=BS, block_count=5)
+    with pytest.raises(datax.Error) as ei:
+        rx.start_at(_t(rig, 30))
+    assert ei.value.errno == 22
+    assert "4-block kernel ring" in str(ei.value) and "block_count <= 4" in str(ei.value)
+    rx.close()

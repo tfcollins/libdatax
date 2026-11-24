@@ -42,4 +42,33 @@ def test_images_json_pins_complete_boot_sets():
         assert set(entry["files"]) == {"system_top.bit", "psu_init.tcl", "Image", "system.dtb"}, image
         assert all(len(h) == 64 for h in entry["files"].values()), image
         assert entry["pps"] in ("internal", "none"), image
-    assert set(spec["tron"]) == {"stock", "hopcap-sfp"}
+    assert set(spec["tron"]) == {"stock", "hopcap-sfp", "timed-dma"}
+
+
+def test_images_json_timed_dma_provenance():
+    """timed-dma (P3b) is pinned to exact upstream revisions and names its gate map."""
+    import sys
+    sys.path.insert(0, str(ROOT / "tests" / "hardware"))
+    import hwtimed as ht
+    e = json.loads((ROOT / "tests" / "hardware" / "images.json").read_text())["tron"]["timed-dma"]
+    assert e["pps"] == "internal" and len(e["xsa"]) == 64
+    for repo in ("hopcap", "tick", "vrt49"):
+        rev = e["provenance"][repo]["revision"]
+        assert len(rev) == 40 and int(rev, 16) >= 0, (repo, rev)
+    for k in ("built_from", "bit_xsa_built_from"):       # boot set, and the bit/XSA build
+        assert len(e["provenance"]["hopcap"][k]) == 40, k
+    assert ht.gate_map_roles(e["stream_gate_map"]) == [
+        "rx-dma", "tx-dma", "rx-mode", "tx-mode", "fhm-b", "tx-start-fullmask-only"]
+    assert "timed-dma" in ht.IMAGES
+
+
+def test_tron_scripts_and_workflow_know_timed_dma():
+    """tron-run.sh's usage, tron_session.py's trace and hw-test.yml's image input
+    all carry timed-dma; the workflow keeps workflow_dispatch and schedule only."""
+    run = (ROOT / "scripts" / "hw" / "tron-run.sh").read_text()
+    assert "<stock|hopcap-sfp|timed-dma>" in run
+    wf = (ROOT / ".github" / "workflows" / "hw-test.yml").read_text()
+    assert "options: [both, stock, hopcap-sfp, timed-dma]" in wf
+    assert "scripts/hw/tron-run.sh timed-dma" in wf
+    on = wf[wf.index("\non:"):wf.index("\npermissions:")]
+    assert "pull_request" not in on and "push" not in on

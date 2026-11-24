@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
-"""P3a timed control on the ADRV9009-ZU11EG hopcap SFP image (Tick + FHM).
+"""P3a timed control on the ADRV9009-ZU11EG hopcap SFP image (Tick + FHM), and
+the same suite as the regression on the timed-dma image.
 
-Run with DATAX_HW_URI=<uri> DATAX_HW_IMAGE=hopcap-sfp (see README.md); on the
-stock image every test here skips. There is no scope on the rig: timing
+Run with DATAX_HW_URI=<uri> DATAX_HW_IMAGE=hopcap-sfp or timed-dma (see
+README.md); on the stock image every test here skips. There is no scope on the rig: timing
 evidence is the completion records (every reported command reports on time,
 see the C API page, "Scheduler semantics") plus independent PLL readback of
 chip A through the phy's own FHM attribute.
@@ -184,7 +185,7 @@ def test_late_dropped(dev, hw_ctx, record):
     s = park_pll(dev, hw_ctx, PARK_HZ, table=[PARK_HZ, FULL_TABLE[0]])
     record("limits", dict(dev.caps.limits))
     # (a) a reported GPIO 1 ms in the past is refused at commit
-    s.at(dev.time.now - ms(dev, 1)).gpio(0x2, 0x2, report=True)
+    s.at(dev.time.now - ms(dev, 1)).gpio(ht.LATE_GPIO, ht.LATE_GPIO, report=True)
     with pytest.raises(datax.LateError) as ei:
         s.commit()
     assert ei.value.errno == errno.ETIME

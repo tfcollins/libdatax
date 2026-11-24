@@ -69,6 +69,10 @@ struct datax_device {
 	struct datax_stream *stream[2];
 	/* Status-register detection seen by streams: 0 unknown, 1 yes, 2 no. */
 	unsigned char status_detect[2];
+	/* RX ring depth the server keeps whatever block_count asks for: -1
+	 * probe (stream_timed.c server_ring), 0 none, n a fixed n. Tests set
+	 * it (datax_internal_device_set_server_ring). */
+	int server_ring;
 	/* Stream block-I/O seam (stream_src.h), per direction: NULL ops mean
 	 * libiio. A stream copies them at create; tests bind a fake DMA
 	 * (datax_internal_stream_bind_source), under ctx->lock. */

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 """P3a multi-chip sync on the ADRV9009-ZU11EG: verification only, and why
-PHASE_COHERENT stays false (hopcap-sfp image)."""
+PHASE_COHERENT stays false (hopcap-sfp and timed-dma images)."""
 import ctypes as C
 
 import pytest

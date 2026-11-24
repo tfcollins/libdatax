@@ -52,6 +52,16 @@ def tick_vendor():
 
 # ---- Strict mode: DATAX_REQUIRE_EMU=1 turns every skip into a failure --------
 
+def pytest_configure(config):
+    # The hardware suite's markers: Tier 1 imports its modules to test their
+    # pure parts (test_hw_burst_analysis.py); tests/hardware/conftest.py
+    # registers and applies them there.
+    for m in ("p3a: P3a timed-control test (hopcap-sfp or timed-dma image)",
+              "p3b: P3b timed-stream test (timed-dma image)",
+              "needs_tx: uses the TX DMA (not on hopcap-sfp)"):
+        config.addinivalue_line("markers", m)
+
+
 def _strict():
     return os.environ.get("DATAX_REQUIRE_EMU") == "1"
 
@@ -167,6 +177,7 @@ def fake_lib():
         ("fake_tick_inject_error", None, [vp, C.c_char_p, C.c_int]),
         ("fake_fhm_new", vp, [u64]), ("fake_fhm_free", None, [vp]),
         ("fake_fhm_attach", None, [vp, vp]), ("fake_fhm_pll_hz", u64, [vp]),
+        ("fake_fhm_attach_bit", C.c_int, [vp, vp, C.c_uint]),
         ("fake_fhm_edges", C.c_uint, [vp]),
         ("fake_tick_set_gate_map", None, [vp, C.c_char_p]),
         ("fake_tick_stream_gate", C.c_uint32, [vp]),
@@ -195,7 +206,7 @@ class FakeRig:
     """A Context on an emulator fixture with the fake Tick (and Talise FHM)
     bound to device 0."""
 
-    def __init__(self, uri, fhm, dma_fs=None, gate_map=STD_MAP):
+    def __init__(self, uri, fhm, dma_fs=None, gate_map=STD_MAP, chip_b=False):
         import datax
         from datax._lib import get_lib
         self.fk = fake_lib()
@@ -203,6 +214,8 @@ class FakeRig:
         self.dma = None
         for name, args in [("datax_internal_tick_bind_fake", [C.c_void_p, C.c_void_p, C.c_void_p]),
                            ("datax_internal_fhm_bind_fake", [C.c_void_p, C.c_void_p, C.c_void_p]),
+                           ("datax_internal_fhm_bind_fake_chip",
+                            [C.c_void_p, C.c_uint, C.c_void_p, C.c_void_p]),
                            ("datax_internal_sched_pause", [C.c_void_p, C.c_bool])]:
             fn = getattr(self.lib, name)
             fn.restype, fn.argtypes = C.c_int, args
@@ -215,6 +228,8 @@ class FakeRig:
         else:
             self.tick = self.fk.fake_tick_new(None)
         self.fhm = self.fk.fake_fhm_new(0) if fhm else None
+        # chip B (timed-dma: Tick GPIO bit 1), wired only when the map names fhm-b
+        self.fhm_b = self.fk.fake_fhm_new(0) if chip_b else None
         self.ctx = datax.Context(uri)
         self.dev = self.ctx.devices[0]
         self.bind(self.ctx)
@@ -285,6 +300,10 @@ class FakeRig:
             self.fk.fake_fhm_attach(self.fhm, self.tick)
             assert self.lib.datax_internal_fhm_bind_fake(
                 dev._ptr, _ops_addr(self.fk, "fake_fhm_ops"), self.fhm) == 0
+        if self.fhm_b:
+            assert self.fk.fake_fhm_attach_bit(self.fhm_b, self.tick, 1) == 0
+            assert self.lib.datax_internal_fhm_bind_fake_chip(
+                dev._ptr, 1, _ops_addr(self.fk, "fake_fhm_ops"), self.fhm_b) == 0
         if self.now == 0:
             self.fk.fake_tick_advance(self.tick, 1000 * MS)   # start away from 0
 
@@ -378,6 +397,8 @@ class FakeRig:
             self.ctx.close()
         if self.dma:
             self.fk.fake_dma_free(self.dma)
+        if self.fhm_b:
+            self.fk.fake_fhm_free(self.fhm_b)
         if self.fhm:
             self.fk.fake_fhm_free(self.fhm)
         self.fk.fake_tick_free(self.tick)
@@ -395,11 +416,12 @@ def make_rig():
     from emu import Emulator
     made, emus = [], []
 
-    def factory(fixture="adrv9009-zu11eg", fhm=True, dma_fs=None, gate_map=STD_MAP):
+    def factory(fixture="adrv9009-zu11eg", fhm=True, dma_fs=None, gate_map=STD_MAP,
+                chip_b=False):
         em = Emulator(EMU_DIR / f"{fixture}.xml")
         uri = em.__enter__()
         emus.append(em)
-        rig = FakeRig(uri, fhm, dma_fs, gate_map)
+        rig = FakeRig(uri, fhm, dma_fs, gate_map, chip_b)
         made.append(rig)
         return rig
 

@@ -34,7 +34,7 @@ def main() -> int:
                    DATAX_HW_URI=f"ip:{ip}",
                    DATAX_HW_REQUIRE="1",
                    DATAX_HW_EVIDENCE=str(OUT / f"evidence-tron-{IMAGE}.json"))
-        if IMAGE == "hopcap-sfp":
+        if IMAGE != "stock":                  # the images with Tick and FHM
             env["DATAX_TRACE"] = "fhm"
         rc = subprocess.call([sys.executable, "-m", "pytest", "tests/hardware", "-v", "-rs",
                               f"--junitxml={OUT / f'junit-tron-{IMAGE}.xml'}"],

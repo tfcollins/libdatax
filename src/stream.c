@@ -591,6 +591,7 @@ int datax_stream_start(struct datax_stream *s)
 	/* An overflow seen before a stop() belongs to the old run: the first
 	 * block after a restart must not carry it. */
 	s->disc_pending = false;
+	s->disc_next = false;
 	if (s->cfg.cyclic) {
 		/* Cyclic TX enables at its single send (TX task), or now when
 		 * send() preloaded the buffer. */
@@ -811,6 +812,32 @@ static void rx_block_meta(struct datax_stream *s)
 		rx_block0_tag(s);
 }
 
+/*
+ * After the status check, before the block's time (controller ruling on
+ * S4): every block of a timed, tagged release was enqueued before T, so the
+ * DMA filled blocks 0..nblocks-1 back to back from the release: they are
+ * contiguous by construction, and the first possible gap is in block
+ * nblocks, the first one re-armed after the release. An overflow a poll sees
+ * while the stream still takes those pre-T blocks is therefore attributed to
+ * block nblocks. From there P2's rule (the block taken at the poll) applies,
+ * and the timed stream's sticky "unknown" starts at the block that carries
+ * the discontinuity.
+ */
+static void rx_block_defer(struct datax_stream *s)
+{
+	if (!s->timed || !s->strip_frames)
+		return;
+	if (s->blk < s->nblocks) {
+		if (s->disc_pending) {
+			s->disc_pending = false;
+			s->disc_next = true;
+		}
+	} else if (s->disc_next) {
+		s->disc_pending = true;
+		s->disc_next = false;
+	}
+}
+
 /* After the status check: the block's time, and the count of blocks. */
 static void rx_block_time(struct datax_stream *s)
 {
@@ -919,6 +946,7 @@ hold:
 		s->stats.blocks_done++;
 		rx_block_meta(s);
 		datax_stream_status_check(s, false);
+		rx_block_defer(s);
 		rx_block_time(s);
 		return 0;
 	}

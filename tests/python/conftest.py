@@ -52,6 +52,16 @@ def tick_vendor():
 
 # ---- Strict mode: DATAX_REQUIRE_EMU=1 turns every skip into a failure --------
 
+def pytest_configure(config):
+    # The hardware suite's markers: Tier 1 imports its modules to test their
+    # pure parts (test_hw_burst_analysis.py); tests/hardware/conftest.py
+    # registers and applies them there.
+    for m in ("p3a: P3a timed-control test (hopcap-sfp or timed-dma image)",
+              "p3b: P3b timed-stream test (timed-dma image)",
+              "needs_tx: uses the TX DMA (not on hopcap-sfp)"):
+        config.addinivalue_line("markers", m)
+
+
 def _strict():
     return os.environ.get("DATAX_REQUIRE_EMU") == "1"
 

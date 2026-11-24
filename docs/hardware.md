@@ -217,7 +217,7 @@ and PLL readback; there is no scope, and the evidence says so. See
 Needs the `timed-dma` image and `DATAX_HW_IMAGE=timed-dma` (not yet
 validated). `test_hw_timed_stream.py` checks block 0's hardware timestamp
 against Tick's edge capture, the first-sample offset of a TX pattern through
-the framer loopback over 10 runs (max - min <= 1 sample: REQ-TEST-023, and the
+the framer loopback over 10 runs (each run within +-1 sample of the median: REQ-TEST-023, and the
 image's release latency), a TX burst gated off and on at 20 ms through the
 loopback, and chip B's FHM (timed tunes with PLL readback; enabling FHM must
 not move its LO). Over `ip:` only the blocks enqueued before T carry

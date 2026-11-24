@@ -108,20 +108,29 @@ completion records and chip B's PLL readback. Throughput is never asserted.
   channel start at the same T, 10 times. Recorded per run: the RX index of the
   first non-zero sample, the pattern's lag, both `start_at` call times (the
   `ip:` setup cost) and mismatches against the looped-back pattern (asserted 0
-  after the first 2 samples). The offsets must be identical within +-1 sample: max - min <= 1 over the 10 runs.
+  after the first 2 samples). Every run's offset must be within +-1 sample of the median (spread up
+  to 2): the offset combines two independent gate releases, TX and RX,
+  each a fixed latency +-1 device clock.
   A late `start_at` is retried (at most 3 late runs); (c) uses the median as
   its reference only when this test passed.
   The offset is TX release, DAC path, framer loopback and RX together, against
   the RX release, so the median is recorded as the release-latency measurement
   of this image; the RX-only fabric latency cannot be separated here.
-- `test_gated_burst` (c): a cyclic tone (one cycle per 4096 frames) on every TX
+- `test_gated_burst` (c), run 3 times (the gate latencies must be fixed): a
+  cyclic tone (one cycle per 4096 frames) on every TX
   channel and one RX channel start at T; the TX gate closes at T + 20 ms and
   opens at T + 40 ms (both reported; both must complete OK on time). The
   muted gap's edges must sit at (b)'s offset minus the 3 reads a TX
   `start_at` mutes (G2/G3 ruling 1) plus the commanded offset, +-1 sample;
   the gap length and the two residuals must agree within 1 sample too.
-  Contiguity is proven by matching the whole capture against the tone at one
-  lag (a closed gate mutes, it does not pause). Every block read is one of
+  Contiguity is proven by matching the whole capture exactly against the
+  looped-back tone at one lag (a closed gate mutes, it does not pause). The lag
+  is found by exact equality, not by correlation: every shift of a single
+  complex tone is the tone times a complex gain, so a gain-fitted correlation
+  has no peak (tron run 2 took lag 1135 for a tone at 111 that way). To locate
+  any break, the evidence holds the lag of each audible stretch and of each
+  block's first period, mismatches per block, the first mismatching indices
+  and each block's first and last frames. Every block read is one of
   the 4 enqueued before T (3 Mi frames each: 48 MiB, 51 ms), so each must
   carry libdatax's derived timestamp, not discontinuous, equal to the
   suite's own derivation from block 0's tag. The start mute measured from

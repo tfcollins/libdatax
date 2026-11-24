@@ -123,16 +123,6 @@ def qpsk_raw(n, seed):
     return raw
 
 
-def tone_raw(n, amp=8000):
-    """One cycle per ``n`` frames: constant envelope, never exactly zero, and
-    its lag is unique modulo ``n``."""
-    k = np.arange(n)
-    raw = np.empty((n, 2), dtype=np.int16)
-    raw[:, 0] = np.rint(amp * np.cos(2 * np.pi * k / n))
-    raw[:, 1] = np.rint(amp * np.sin(2 * np.pi * k / n))
-    return raw
-
-
 def as_complex(raw):
     return raw[:, 0].astype(np.float64) + 1j * raw[:, 1]
 
@@ -340,7 +330,9 @@ def test_loopback_alignment(dev, hw_ctx, family, request, record):
     record("lag_spread", lspread)
     fml = ht.spread_ok([r["first_minus_lag"] % PERIOD for r in runs])
     record("first_minus_lag_median", fml[1])
-    assert ok, f"first-sample offsets {firsts} not identical within +-1 sample (max - min)"
+    record("criterion", "every run within +-1 sample of the median (two independent "
+           "gate releases, each fixed +-1 device clock)")
+    assert ok, f"first-sample offsets {firsts} not all within +-1 sample of the median {med}"
     assert lok, f"pattern lags {[r['lag'] for r in runs]} not identical within +-1 sample"
     # (c)'s reference, only from a passing (b)
     ALIGN.update(first=med, lag=lmed, strip=strip, first_minus_lag=fml[1], passed=True)
@@ -348,21 +340,27 @@ def test_loopback_alignment(dev, hw_ctx, family, request, record):
 
 # ---- (c) gated burst: TX gated off and on, observed through the loopback -------------------
 
+BURST_RUNS = 3          # the gate latencies must be fixed: same edges every run
+
+
 @pytest.mark.needs_tx
 def test_gated_burst(dev, hw_ctx, family, request, record):
     """RX runs from a start_at; a constant-tone cyclic TX started at the same T
-    is gated off at T + 20 ms and on at T + 40 ms. The edges must sit at the
-    commanded times plus (b)'s offset, +-1 sample, and both gate commands
-    complete on time.
+    is gated off at T + 20 ms and on at T + 40 ms, BURST_RUNS times. In each
+    run the edges must sit at the commanded times plus (b)'s offset, +-1
+    sample, and both gate commands complete on time.
 
     Times are libdatax's derived block timestamps: every block read here is
     one of the 4 enqueued before T, which libdatax keeps clean even though
     the ring overflows before the host reads it (the overflow is attributed
     to the first re-armed block). They must equal the suite's own derivation
     from block 0's tag (or, if block 0 has none, Tick's edge capture).
-    Contiguity is proven independently by matching the whole capture against
-    the tone at one lag (a closed TX gate mutes, it does not pause, so a lost
-    frame anywhere would break the match after the gate opens again)."""
+    Contiguity is proven independently by matching the whole capture exactly
+    against the looped-back tone at one lag (a closed TX gate mutes, it does
+    not pause, so a lost or repeated frame anywhere breaks the match after
+    it). Per run the evidence also holds, to locate any break: the lag of
+    each audible stretch and of each block's first period, mismatches per
+    block, the first mismatching indices and each block's first/last frames."""
     sched = dev.scheduler                    # before start_at
     fs, hz = fs_of(dev), dev.time.tick_hz
     _, strip = tag_strip(hw_ctx, 1)
@@ -371,32 +369,49 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     d_on = ht.ticks_to_frames(ms(dev, GATE_ON_MS), fs, hz)
     ref_first = ALIGN.get("first") if ALIGN.get("passed") else None   # (b) passed
     need = d_on + (PERIOD if ref_first is None else ref_first) + 3 * PERIOD
-    cover = ht.ring_coverage_s(BIG_BLOCK, NBLOCKS, fs)
-    record("ring_coverage_s", cover)
+    record("ring_coverage_s", ht.ring_coverage_s(BIG_BLOCK, NBLOCKS, fs))
+    record("tx_buffer_frames", PERIOD)
+    record("reference_first", ref_first)
     assert BIG_BLOCK * NBLOCKS - strip >= need, \
         f"the pre-T ring ({BIG_BLOCK} x {NBLOCKS}) cannot hold the {need} frames needed"
-    tone = tone_raw(PERIOD)
-    attempts, r = [], None
-    with digital_loopback(hw_ctx, family, record):
-        for lead in (PAIR_LEAD_MS, 2 * PAIR_LEAD_MS):    # as (a) and (b): one retry when late
-            try:
-                r = _burst_capture(dev, hw_ctx, request, sched, ntx, tone, strip, need, lead)
-                attempts.append({"lead_ms": lead, "result": "ok"})
-                break
-            except datax.LateError as e:
-                attempts.append({"lead_ms": lead, "result": "late", "error": str(e)})
-                for st in request.node.opened:
-                    with contextlib.suppress(Exception):
-                        st.close()
-                with contextlib.suppress(Exception):
-                    sched.flush()
-    record("attempts", attempts)
-    assert r is not None, f"late at every lead: {attempts}"
-    T, cost, t_off, t_on = r["T"], r["cost"], r["t_off"], r["t_on"]
-    blocks, edge, edge_read_at = r["blocks"], r["edge"], r["edge_read_at"]
-    done, stats = r["done"], r["stats"]
-    stream = np.concatenate(r["parts"])
+    tone = ht.tone_raw(PERIOD)
     exp = lb.expected_loopback(family, tone)
+    results, attempts = [], []
+    with digital_loopback(hw_ctx, family, record):
+        for _ in range(BURST_RUNS):
+            r = None
+            for lead in (PAIR_LEAD_MS, 2 * PAIR_LEAD_MS):    # as (a) and (b): one retry when late
+                try:
+                    r = _burst_capture(dev, hw_ctx, request, sched, ntx, tone, strip, need, lead)
+                    attempts.append({"lead_ms": lead, "result": "ok"})
+                    break
+                except datax.LateError as e:
+                    attempts.append({"lead_ms": lead, "result": "late", "error": str(e)})
+                    for st in request.node.opened:
+                        with contextlib.suppress(Exception):
+                            st.close()
+                    with contextlib.suppress(Exception):
+                        sched.flush()
+            record("attempts", attempts)
+            assert r is not None, f"late at every lead: {attempts}"
+            results.append(_burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz,
+                                           d_off, d_on, ref_first, need))
+            record("runs", [{k: v for k, v in x.items() if k != "fails"} for x in results])
+    fails = [f"run {i}: {f}" for i, x in enumerate(results) for f in x["fails"]]
+    record("residuals", [x["edges"]["residuals"] for x in results])
+    for key in ("off", "on", "spacing"):
+        record(f"{key}_residual_spread",
+               ht.spread_ok([x["edges"]["residuals"][key] for x in results])[2])
+    assert not fails, "; ".join(fails)
+
+
+def _burst_analysis(dev, hw_ctx, r, exp, strip, fs, hz, d_off, d_on, ref_first, need):
+    """Edges, contiguity, timestamps and diagnostics of one burst capture.
+    Returns plain data, with ``fails``: the assertion texts that failed."""
+    T, t_off, t_on = r["T"], r["t_off"], r["t_on"]
+    blocks, edge, edge_read_at = r["blocks"], r["edge"], r["edge_read_at"]
+    stream = np.concatenate(r["parts"])
+    fails = []
 
     # The anchor: block 0's tag, else Tick's edge capture of the opening.
     b0 = blocks[0]["timestamp_ticks"]
@@ -413,23 +428,27 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
                for b in blocks]
     lib_vs_derived = [{"block": i, "lib": b["timestamp_ticks"], "derived": derived[i]}
                       for i, b in enumerate(blocks) if b["timestamp_ticks"]]
+    for i, b in enumerate(blocks):              # each block's first and last frames
+        a, z = b["start"], b["start"] + b["frames"] - 1
+        b["first_frame"], b["last_frame"] = stream[a].tolist(), stream[z].tolist()
 
+    out = {"T": T, "t_off": t_off, "t_on": t_on, "start_at_cost": r["cost"],
+           "blocks": blocks, "anchor": {"ticks": anchor, "source": anchor_src,
+                                        "edge_capture": edge},
+           "lib_vs_derived": lib_vs_derived, "completions": ht.completion_log(r["done"]),
+           "stream_stats": r["stats"], "frames": int(stream.shape[0]), "fails": fails}
+    if not ht.all_on_time(r["done"]):
+        fails.append(f"gate commands not on time: {out['completions']}")
+    if stream.shape[0] < need:                  # the edges and the checks need these frames
+        fails.append(f"read only {stream.shape[0]} frames")
+        return out
     aud = ht.audible(stream)
     rs = ht.runs(aud)
-    record("T", T)
-    record("t_off", t_off)
-    record("t_on", t_on)
-    record("start_at_cost", cost)
-    record("blocks", blocks)
-    record("anchor", {"ticks": anchor, "source": anchor_src, "edge_capture": edge})
-    record("lib_vs_derived", lib_vs_derived)
-    record("audible_runs", rs[:6])
-    record("completions", ht.completion_log(done))
-    record("stream_stats", stats)
-    record("reference_first", ref_first)
-    assert stream.shape[0] >= need, f"read {stream.shape[0]} frames, need {need}"
-    assert ht.all_on_time(done), ht.completion_log(done)
-    assert len(rs) >= 2, f"expected an audible run, a muted gap, an audible run: {rs[:6]}"
+    out["audible_runs"] = rs[:6]
+    if len(rs) < 2:
+        fails.append(f"expected an audible run, a muted gap, an audible run: {rs[:6]}")
+        out["edges"] = {"residuals": {"first": None, "off": None, "on": None, "spacing": None}}
+        return out
     first, e_off, e_on = rs[0][0], rs[0][1], rs[1][0]
     ref = ref_first if ref_first is not None else first
     n0 = ht.TX_START_MUTE_READS
@@ -437,44 +456,68 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     res = {"first": first - ref, "off": e_off - want_off, "on": e_on - want_on,
            "spacing": (e_on - e_off) - (d_on - d_off)}
     # The start mute measured here: the gate edges are tied to the time-aligned
-    # read counter, the start edge is late by the muted reads (ruling 1). (b)
-    # alone cannot give it: it has no mid-stream edge, only first - lag, the
-    # pattern words those reads consumed.
-    n_meas = {"off": ref + d_off - e_off, "on": ref + d_on - e_on}
-    record("edges", {"first": first, "off": e_off, "on": e_on,
-                     "want_off": want_off, "want_on": want_on,
-                     "start_mute_reads_assumed": n0, "start_mute_reads_measured": n_meas,
-                     "first_minus_lag_from_b": ALIGN.get("first_minus_lag"),
-                     "residuals": res})
+    # read counter, the start edge is late by the muted reads (ruling 1).
+    out["edges"] = {"first": first, "off": e_off, "on": e_on,
+                    "want_off": want_off, "want_on": want_on,
+                    "start_mute_reads_assumed": n0,
+                    "start_mute_reads_measured": {"off": ref + d_off - e_off,
+                                                  "on": ref + d_on - e_on},
+                    "residuals": res}
     if anchor is not None:
-        record("edge_times", {
-            "off": ht.sample_time(anchor, strip, e_off, fs, hz),
-            "on": ht.sample_time(anchor, strip, e_on, fs, hz),
+        out["edge_times"] = {
             "off_minus_cmd_ticks": ht.sample_time(anchor, strip, e_off, fs, hz) - t_off,
             "on_minus_cmd_ticks": ht.sample_time(anchor, strip, e_on, fs, hz) - t_on,
-            "first_minus_T_ticks": ht.sample_time(anchor, strip, first, fs, hz) - T})
+            "first_minus_T_ticks": ht.sample_time(anchor, strip, first, fs, hz) - T}
 
-    # Contiguity: one lag over the whole capture, away from the edges.
+    # Contiguity: one exact lag over the whole capture, away from the edges.
+    p = exp.shape[0]
     lag = ht.pattern_lag(exp, stream, first + 2)
     keep = np.zeros(stream.shape[0], dtype=bool)
     keep[first + 2:e_off - 2] = True
     keep[e_on + 2:] = True
-    mism = ht.mismatches_at_lag(exp, stream, lag, keep)
+    idx = (np.arange(stream.shape[0]) - lag) % p
+    bad = np.any(stream != exp[idx], axis=1) & keep
+    mism = int(np.count_nonzero(bad))
     muted = int(np.count_nonzero(aud[e_off + 2:e_on - 2]))
-    record("contiguity", {"lag": lag, "mismatches": mism, "muted_nonzero": muted,
-                          "frames": int(stream.shape[0])})
-    assert mism == 0, f"{mism} frames off the tone at lag {lag}: frames lost or repeated"
-    assert muted == 0, f"{muted} non-zero frames while the gate was closed"
+    stretch_lags = {"before_off": lag}
+    if stream.shape[0] - (e_on + 2) >= p:
+        stretch_lags["after_on"] = ht.pattern_lag(exp, stream, e_on + 2)
+    block_lags = []
+    for b in blocks:                            # each block's own first audible period
+        a = max(b["start"], first + 2)
+        if keep[a] and a + p <= stream.shape[0] and keep[a + p - 1]:
+            block_lags.append(ht.pattern_lag(exp, stream, a))
+        else:
+            block_lags.append(None)
+    out["contiguity"] = {
+        "lag": lag, "lag_minus_first": (lag - first) % p, "mismatches": mism,
+        "kept_frames": int(np.count_nonzero(keep)), "muted_nonzero": muted,
+        "stretch_lags": stretch_lags, "block_lags": block_lags,
+        "mismatches_per_block": [int(np.count_nonzero(bad[b["start"]:b["start"] + b["frames"]]))
+                                 for b in blocks],
+        "first_mismatches": np.flatnonzero(bad)[:8].tolist()}
+    if mism:
+        fails.append(f"{mism} of {out['contiguity']['kept_frames']} frames off the tone at "
+                     f"lag {lag}: frames lost or repeated (first at "
+                     f"{out['contiguity']['first_mismatches'][:3]}, per block "
+                     f"{out['contiguity']['mismatches_per_block']})")
+    if muted:
+        fails.append(f"{muted} non-zero frames while the gate was closed")
     for row in lib_vs_derived:
-        assert row["derived"] is None or row["lib"] == row["derived"], row
-    assert all(b["timestamp_ticks"] and not b["discontinuous"] for b in blocks), \
-        f"a pre-T block lost its timestamp or reads discontinuous: {blocks}"
-    assert abs(res["spacing"]) <= 1, res
-    assert abs(res["off"] - res["on"]) <= 1, res
-    if ref_first is not None:
-        assert abs(res["first"]) <= 1, f"start offset {first} vs (b)'s {ref_first}"
-    assert abs(res["off"]) <= 1 and abs(res["on"]) <= 1, \
-        f"gate edges off the commanded times + (b)'s offset - {n0}: {res}"
+        if row["derived"] is not None and row["lib"] != row["derived"]:
+            fails.append(f"libdatax timestamp differs from the derivation: {row}")
+    if not all(b["timestamp_ticks"] and not b["discontinuous"] for b in blocks):
+        fails.append(f"a pre-T block lost its timestamp or reads discontinuous")
+    if abs(res["spacing"]) > 1:
+        fails.append(f"burst length off the commanded {d_on - d_off} frames by "
+                     f"{res['spacing']}: {res}")
+    if abs(res["off"] - res["on"]) > 1:
+        fails.append(f"off and on edges disagree: {res}")
+    if ref_first is not None and abs(res["first"]) > 1:
+        fails.append(f"start offset {first} vs (b)'s {ref_first}")
+    if abs(res["off"]) > 1 or abs(res["on"]) > 1:
+        fails.append(f"gate edges off the commanded times + (b)'s offset - {n0}: {res}")
+    return out
 
 
 def _burst_capture(dev, hw_ctx, request, sched, ntx, tone, strip, need, lead_ms):

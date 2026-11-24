@@ -209,9 +209,11 @@ def test_pattern_lag_and_mismatches():
 
 def test_spread_ok():
     assert ht.spread_ok([10, 10, 11, 10]) == (True, 10, 1)
-    assert ht.spread_ok([9, 10, 11]) == (False, 10, 2)         # max - min must be <= 1
+    assert ht.spread_ok([9, 10, 11]) == (True, 10, 2)          # +-1 of the median
     assert ht.spread_ok([7, 7, 7]) == (True, 7, 0)
     assert ht.spread_ok([9, 10, 12])[0] is False
+    # tron run 2's offsets: within +-1 of the median 110, spread 2
+    assert ht.spread_ok([111, 111, 110, 109, 111, 110, 110, 110, 110, 110]) == (True, 110, 2)
     assert ht.spread_ok([])[0] is False
 
 
@@ -220,3 +222,23 @@ def test_ring_coverage_and_gate_map_roles():
     assert ht.gate_map_roles("rx-dma,tx-dma, rx-mode ,tx-mode,fhm-b\n") == \
         ["rx-dma", "tx-dma", "rx-mode", "tx-mode", "fhm-b"]
     assert ht.gate_map_roles(None) == []
+
+
+def test_pattern_lag_exact_for_a_tone():
+    """Regression, tron run 2 (a35e212): for a single complex tone every
+    circular shift is the tone times a complex gain, so a gain-fitted
+    correlation has no peak (it picked lag 1135 for a tone at 111 on the
+    board, and every frame then 'mismatched'). The lag is the one with exact
+    sample equality, as the framer loopback is bit-exact."""
+    import numpy as np
+    tone = ht.tone_raw(4096)
+    exp = lb.expected_loopback("adrv9009", tone)
+    first = 111
+    raw = np.zeros((first + 5 * 4096, 2), dtype=np.int16)
+    raw[first:] = exp[(np.arange(first, raw.shape[0]) - first) % 4096]
+    assert ht.pattern_lag(exp, raw, first + 2) == first
+    keep = np.arange(raw.shape[0]) >= first
+    assert ht.mismatches_at_lag(exp, raw, first, keep) == 0
+    # a one-frame slip later on is still seen at that lag
+    slipped = np.concatenate([raw[:3000], raw[3001:]])
+    assert ht.mismatches_at_lag(exp, slipped, first, keep[:-1]) > 0

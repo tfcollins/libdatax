@@ -227,19 +227,43 @@ def runs(mask):
     return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist()))
 
 
-def pattern_lag(expected, raw, start):
+def tone_raw(n, amp=8000):
+    """int16 ``(n, 2)`` I/Q of one complex cycle per ``n`` frames: constant
+    envelope, never exactly zero, every frame distinct (so its lag is unique
+    under exact matching, though not under a gain-fitted correlation)."""
+    import numpy as np
+    k = np.arange(n)
+    raw = np.empty((n, 2), dtype=np.int16)
+    raw[:, 0] = np.rint(amp * np.cos(2 * np.pi * k / n))
+    raw[:, 1] = np.rint(amp * np.sin(2 * np.pi * k / n))
+    return raw
+
+
+def pattern_lag(expected, raw, start, chunk=256):
     """The lag ``l`` with ``raw[k] == expected[(k - l) % P]`` (int16 ``(n, 2)``
-    rows), found from the ``P`` frames at ``start``; returns ``l % P``."""
+    rows), from the ``P`` frames at ``start``; returns ``l % P``.
+
+    Chosen by exact sample equality (the fewest mismatching frames over all
+    ``P`` lags), the criterion ``mismatches_at_lag`` then applies: the framer
+    loopback is bit-exact. Not by a gain-fitted correlation, which has no peak
+    for a single complex tone (any shift of it is the tone times a complex
+    gain; tron run 2 found 'lag 1135' for a tone at 111 that way)."""
     import numpy as np
     exp = np.asarray(expected, dtype=np.int16)
     p = exp.shape[0]
     seg = np.asarray(raw, dtype=np.int16)[start:start + p]
     if seg.shape[0] < p:
         raise ValueError(f"need {p} frames from {start}, have {seg.shape[0]}")
-    e = exp[:, 0].astype(np.float64) + 1j * exp[:, 1]
-    r = seg[:, 0].astype(np.float64) + 1j * seg[:, 1]
-    lag, _, _ = lb.align_and_fit(e, r)
-    return (int(start) + int(lag)) % p
+    k = (int(start) + np.arange(p)) % p          # absolute index of each segment frame, mod P
+    best, best_bad = 0, p + 1
+    for l0 in range(0, p, chunk):                # lags l0..l0+chunk-1 at once
+        lags = np.arange(l0, min(l0 + chunk, p))
+        idx = (k[None, :] - lags[:, None]) % p
+        bad = np.any(exp[idx] != seg[None, :, :], axis=2).sum(axis=1)
+        i = int(np.argmin(bad))
+        if bad[i] < best_bad:
+            best, best_bad = int(lags[i]), int(bad[i])
+    return best
 
 
 def mismatches_at_lag(expected, raw, lag, mask=None):
@@ -256,12 +280,16 @@ def mismatches_at_lag(expected, raw, lag, mask=None):
 
 
 def spread_ok(values, tol=1):
-    """The "identical within +-1 sample" rule (controller ruling, S4): the
-    spread max - min is at most ``tol``. Returns ``(ok, median, max - min)``."""
+    """The "identical within +-1 sample" rule: every value within ``tol`` of
+    the median, so the spread may reach 2 * tol. Controller ruling after tron
+    run 2: a loopback offset combines two independent gate releases (TX and
+    RX), each a fixed latency +-1 device clock, so +-1 is about the median,
+    not max - min <= 1. Returns ``(ok, median, max - min)``."""
     v = sorted(int(x) for x in values)
     if not v:
         return False, None, None
-    return v[-1] - v[0] <= tol, v[len(v) // 2], v[-1] - v[0]
+    med = v[len(v) // 2]
+    return all(abs(x - med) <= tol for x in v), med, v[-1] - v[0]
 
 
 def ring_coverage_s(block_samples, block_count, fs):

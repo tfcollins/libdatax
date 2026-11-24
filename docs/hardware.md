@@ -82,7 +82,7 @@ known-bad.
   This asks labgrid for part `adrv9009` on carrier `zc706`. The place powers the
   board and waits for it to autoboot from SD, then exports its IIO URI. By hand,
   boot the board, then follow [Run it](#run-it) with `DATAX_HW_IMAGE=stock`.
-- **Expected.** 10 passed and 15 skipped (the P3a tests): RX on both channels,
+- **Expected.** 10 passed and 21 skipped (the 15 P3a and 6 P3b tests): RX on both channels,
   receive-timeout recovery, one-shot and cyclic TX, start/stop cycles, RX
   throughput, and digital loopback bit-exact on ch0 and ch1.
 - **Board facts.** A single ADRV9009, so 2 RX / 2 TX, no MCS, and chip B absent.
@@ -100,7 +100,7 @@ known-bad.
 
   By hand, boot the board, then follow [Run it](#run-it) with
   `DATAX_HW_IMAGE=stock`. The board takes about 3 minutes to boot.
-- **Expected.** 10 passed and 15 skipped: the same set as the ZC706. Digital loopback
+- **Expected.** 10 passed and 21 skipped (P3a and P3b): the same set as the ZC706. Digital loopback
   (`loopback`=1 on `ad9361-phy`) is bit-exact as RX = TX >> 4.
 - **Board facts.** The carrier's USB console (CP2103) is powered by the board,
   so it appears only a few seconds after power-on. labgrid-plugins `ec8bf30`

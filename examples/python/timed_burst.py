@@ -2,7 +2,9 @@
 """A timed TX burst: preload a cyclic tone, start it at a device time, mute it
 for 20 ms with the scheduler's stream gate, then let it play again.
 
-Needs a board with the P3b stream gate (the ``stream_gate`` capability).
+Needs a board with the P3b stream gate (the ``stream_gate`` capability). The
+burst uses every TX channel: images with ``tx-start-fullmask-only`` (doctor)
+refuse a timed TX start on fewer.
 Usage: timed_burst.py [uri] (or DATAX_TEST_URI).
 """
 import os
@@ -21,13 +23,18 @@ with datax.Context(uri) as ctx:
         sys.exit(f"{dev.name}: no stream gate on this device")
     sched = dev.scheduler
     n = 1024
+    nch = dev.caps.limits["max_channels"]  # RX count; the families have as many TX
     tone = 8000 * np.exp(2j * np.pi * 0.05 * np.arange(n)).astype(np.complex64)
-    tx = dev.tx_stream(channels=[0], block_samples=n, cyclic=True)
-    tx.send(tone)                          # unstarted: preloads, transmits nothing
+    tx = dev.tx_stream(channels=range(nch), block_samples=n, cyclic=True)
+    tx.send(np.tile(tone, (nch, 1)))       # unstarted: preloads, transmits nothing
     t1 = dev.time.now + dev.time.seconds(LEAD_S)
     t_off = t1 + dev.time.seconds(MUTE_AT_S)
     t_on = t_off + dev.time.seconds(MUTE_S)
-    with tx.start_at(t1):
+    try:
+        tx.start_at(t1)
+    except datax.CapabilityError as e:
+        sys.exit(f"{dev.name}: no timed TX start on all {nch} channels: {e}")
+    with tx:
         sched.at(t_off).gate_off(tx, report=True)
         sched.at(t_on).gate_on(tx, report=True)
         sched.commit()

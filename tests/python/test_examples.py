@@ -62,11 +62,16 @@ def test_timed_example_runs(script, expect, make_rig, monkeypatch, capsys):
     assert expect in out, out
 
 
-def test_timed_burst_example_runs(make_rig, monkeypatch, capsys):
+@pytest.mark.parametrize("gate_map", [
+    "rx-dma,tx-dma,rx-mode,tx-mode",
+    # an image with the util_upack2 residue: TX start_at needs every TX channel
+    "rx-dma,tx-dma,rx-mode,tx-mode,tx-start-fullmask-only",
+], ids=["std", "fullmask-only"])
+def test_timed_burst_example_runs(gate_map, make_rig, monkeypatch, capsys):
     """timed_burst.py in-process against the fake Tick and fake DMA."""
     import runpy
     import datax
-    rig = make_rig(dma_fs=1_000_000)
+    rig = make_rig(dma_fs=1_000_000, gate_map=gate_map)
     rig.make_scheduler()
     rig.start_clock(hz_ratio=0.25)
     monkeypatch.setattr(datax, "Context", lambda uri=None: rig.ctx)

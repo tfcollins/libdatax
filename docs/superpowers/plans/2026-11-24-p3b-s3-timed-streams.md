@@ -509,3 +509,73 @@ REQ-DOC-001. One SDK PR against 7e74f25:
   - the release-latency measurement;
   - checking on `tron` whether enabling chip B's FHM moves its LO (gap 4).
 - **S4's timed-capture check must change.** It now asserts `timestamp_ticks == T + round((1 + strip_frames) × tick_hz / fs)`, not `== T`.
+
+## Execution record (2026-11-24)
+
+Executed by subagent-driven development on `feat/p3b-s3-timed-streams` (bcb2075..a141190): Tasks 1–7 each reviewed (spec + quality), fix rounds where needed, a whole-branch final review on the most capable model and one fix wave, all clean. Final tree: ctest 116/116 (ASan clean on the timed and FHM suites), pytest 155 with the emulator required, hardware suite collects 25, docs-symbol gate green.
+
+### Rulings made during execution
+
+- Ruling: one branch (feat/p3b-s3-timed-streams) for all S3 tasks, committed in order, instead of task/p3b-<n> branches per task — tasks are a strict chain (T1→T2→T3→{T4,T5}→T7) so per-task branches only add merges — costs: per-task revert is by commit range, not branch.
+- Ruling: T3's `test_start_at_rx_first_frame_at_T` asserts on frames past the tag region (block 0's first ceil(32/frame_bytes) frames carry the header until T4 strips them) — T3 precedes T4 — costs: T4 must update that test when stripping lands.
+- Ruling: models — T1, T2, T4, T5, T7 sonnet; T3, T6 opus (cancel/refeed concurrency; fhm.c refactor) — costs: extra fix rounds if a sonnet task was harder than it looked.
+- Ruling: vector coverage — encoder-level check of stale/gate2/tick_max/hz_and_burst accepted; they are unreachable through real Tick commands and Task 4's parser test covers every vector — costs: an encoder/writer mismatch only on those flags would slip to T4.
+- Ruling: fake_dma bit positions — Tasks 2+ build fake_dma's config from dev->caps.gate_map, not fake_dma_default_config's literals — costs: none if carried.
+- Ruling: TX hold — fake must match hardware: reads start at the first pass regardless of enqueue; an empty FIFO then is an underflow segment (start_at itself refuses an empty preload) — costs: P2-style fake tests may now show a brief start underflow, which is honest.
+- Ruling: every TX opening STREAM_GATE is sent UNREPORTED (not only at a shared T); TX lateness = host-late via the feeder + late_count sampled under io immediately before/after that push (LATE_DROPPED on submit); RX openings stay reported with open_done; same-T order still via lead + refeed — why: unreported commands never occupy the completion slot so they cannot be held late, and "always" avoids rewriting an already-written reported TX open — costs: TX start_at leaves no Tick completion record (S4 evidence for TX start is the loopback alignment); a coincident unrelated late_count rise during the push window fails the TX stream spuriously (safe direction).
+- Ruling: accept implementer defaults 1–8 (stop's own cancel raises no event via a `cancelled` flag; partial-only TX preload → -EINVAL; unreadable fs → 0 = timestamps unknown; unreported WRITTEN with hw_ts < t1 pruned as executed; step-3 wait re-evaluated vs estimated device time, bounded by guard_ms; tag bit only when caps.tag_attrs; untimed start forcing open gated on RX_ARM/TX_ARM; per-test ctest layout + fake_dma_config_from_map/fake_dma_set_wait_ms) — costs: small; each reversible in review.
+- Ruling: stop() on a TX stream armed but never opened cancels the TX DMA buffer (seam cancel, no drain) BEFORE forcing the gate open, so the cancelled preload never reaches the DAC — why: forcing open then draining transmits data the user cancelled — costs: the stop path differs by direction and open state (one more branch to test). Carried into Task 3's fix round.
+- Ruling: TX held-slot lateness — ruling 1's premise (unreported never held) is false: a held reported head blocks Tick's whole queue. Adopt the reviewer's mechanism: when the poller classes a reported command LATE "poller lagged", also finish LATE every WRITTEN late_probe (TX open) command with hw_ts in [that command's hw_ts, ack time] — costs: a TX open may be failed when the hold ended just before its time (safe direction).
+- Ruling: "never opened" for TX is decided on device time (open hw_ts vs a fresh time read / t2), never on table presence — an unreported open stays WRITTEN after running until prune.
+- Ruling: promote reviewer Minor "stop() -EDEADLK then destroy frees stream with hook pending" into fix round 1 — use-after-free risk; destroy/stop from the poller thread must refuse (-EDEADLK, last-error) without freeing — costs: callers destroying streams from event callbacks get an error instead of a crash.
+- Ruling: ⚠️ mode-bit tag end-to-end — fake_dma builds block 0's header from the RX level gate's own latch (fake_dma.c:180), modelling S2's tick-domain tag filter, so no gate-2 header can reach block 0; rejection is covered by the datax_tag_anchors unit rules (gate check is defence in depth) and S4 checks on hardware — costs: a hardware tagger without the S2 filter would be caught only by the unit rule, not an end-to-end fake test.
+- Ruling: Task 6 concern 1 — accept "a chip-B tune requires the last stage to have enabled FHM on that chip" — safe direction (refuses rather than mis-hops) — costs: a user binding chip B after staging must re-stage.
+- Ruling: Task 6 concern 2 — accept chip A re-priming after a partial stage failure — safer than assuming chip A's engine state — costs: one extra priming edge in that rare case.
+- Ruling: Task 6 fix — armed is cleared once a stage passes its busy checks and starts touching hardware, not on entry (a refused stage writes nothing, so arming is unchanged) — costs: none found.
+- Ruling: LateError e.requested/e.margin (api-python.md:180-181) is a pre-existing doc/code gap (absent at 4442be0, never implemented in P3a) — fix the SDK doc example at wrap-up rather than add API surface — costs: users of the doc example lose two attributes they never had.
+- Ruling: one fix dispatch also folds these minors: bind chip phys by name (a→0, b→1); timed_burst.py uses every TX channel (tx-start-fullmask-only images); refeed failure in start_at stops+undoes the stream; Task 5 stale comments; Task 7 dead `_timed`; ci.yml test job timeout-minutes 5→10 (suite grew ~50 tests; a 5m13s cancellation already seen 2026-11-23) — costs: slightly larger fix diff.
+- Ruling: the five changed P2/P3a assertions (test_stream_tx, test_stream_rx, test_sched:1005, test_stubs x2) are confirmed as justified by the stubs going live and the TX preload amendment — costs: none.
+- Ruling: EDEADLK-from-callback refusal and LateError attrs are SDK doc fixes done by the controller at wrap-up.
+
+### Deferred minors (shipped; candidates for follow-up)
+
+- Task 1: minor (deferred): fake_dma realloc failure silently drops gate history (make it abort/sticky)
+- Task 1: minor (deferred): dma_close does not reset tag_pending/drop_pending/prev_pass
+- Task 1: minor (deferred): injected overflow covering the first stored frame discards the tag (undocumented)
+- Task 1: minor (deferred): test_fake_tick.c:684 comment says arm-release pulse, code pushes STREAM_GATE
+- Task 1: minor (deferred): seam_stream_source silently returns without an RX device (should CHECK)
+- Task 1: minor (deferred): stream.c:850 NULL data() reports -EIO instead of libiio code
+- Task 1: minor (deferred): process — seam/fakes written before tests (mutation RED evidence)
+- Task 1: minor (deferred): fake_dma.h comment over-long line; task-1-report "Decisions" bullet on TX hold is stale (superseded by fix section)
+- Task 2: minor (deferred): probe_streams treats any -EINVAL read error as "rejected" (doctor wording for I/O errors)
+- Task 2: minor (deferred): no parse test for a gate role at position >= 8 (the -2 branch)
+- Task 2: minor (deferred): process — implementation before red run (mutation check instead)
+- Task 3: minor (deferred): repeat-late late_count rise inside the TX probe window is blamed on the TX open; late_seen re-baseline swallows the real culprit's event
+- Task 3: minor (deferred): flush_and_repend skips step 5 if a read/drain fails after flush_queue succeeded (same pattern as datax_sched_flush)
+- Task 3: minor (deferred): undo() frees TX preload; returned error does not say to preload again
+- Task 3: minor (deferred): bound-expiry paths (cancel DROPPED fallback, refeed skipped warning) untested
+- Task 3: minor (deferred): stop() from an event callback always hits the step-3 bound (document or detect datax_poller_is_self)
+- Task 3: minor (deferred): start() enqueue_held failure calls hw_close without src->stop
+- Task 3: minor (deferred): process — code before tests (RED by running new tests on old code)
+- Task 3: minor (deferred): prune() can remove a lagged-behind TX open before held_behind sees it (drain at depth+1 cap) — tighten: prune skips late_probe at/after a lagged WRITTEN reported head
+- Task 3: minor (deferred): sched.c:1102 "past due" ≠ executed under a held head; stale level=1 could fire after a restart inside the lag
+- Task 3: minor (deferred): nothing_played() checks at most 64 segments
+- Task 3: minor (deferred): stop-at-T race is inherent (no forced-closed gate state); RTL fix (forced-closed mode or atomic cancel-if-not-run) noted on tick#43; cheap mitigation = re-read time/TX level after hw_close and warn
+- Task 4: minor (deferred): rx_take -EPERM re-arm loses a block silently on a timed stream; blk not advanced, unknown not set → derived timestamps off by whole blocks (set unknown on re-arm when timed)
+- Task 4: minor (deferred): rx_block0_tag dead clamp (tb > bb, tb<32) and fs==0 message overwrite
+- Task 4: minor (deferred): recv mid-block returns the touched block's info, not the first returned sample's — document in SDK
+- Task 4: minor (deferred): blocks dequeued before the rate-limited status poll sees an overflow keep valid timestamps (inherent to polling)
+- Task 5: minor (deferred): stale comments test_sched.c:997-998, test_stubs.c:26-27 ("stream gates stay -ENOTSUP")
+- Task 5: minor (deferred): queue_stream_gate reads started/timed/t_open unlocked (benign race vs concurrent stop)
+- Task 5: minor (deferred): test_gate_rx_enotsup nc>=1 assert weak; test_gate_no_cap_enotsup checks only non-empty last-error
+- Task 6: minor (deferred): platform/table.c binds by phy index, not chip identity — a context with only adrv9009-phy-b binds chip B as chip A on GPIO bit 0 (bind a→0, b→1 explicitly)
+- Task 6: minor (deferred): same-T ch0+ch2 tune untested (both accepted; 2nd rise unreported; S4: check second GPIO_WRITE at same timestamp is not LATE_EXECUTED noise)
+- Task 6: minor (deferred): fake_fhm_attach(NULL)/fake_fhm_free clear every gpio hook, incl. the other chip's and count_rises
+- Task 6: minor (deferred): measure_stage failure after both readbacks leaves both chips armed on the old table (arguably correct; add a comment)
+- Task 7: minor (deferred): stream.py `_timed` written, never read (dead state)
+- Task 7: minor (deferred): no test for send() raising LateError, ECANCELED → Error, or start_at raising LateError inside the guard margin
+- Task 7: minor (deferred): TX `with` after start_at not checked for double start (RX test covers)
+- Final: minor (deferred): no CI sanitizer job — test_start_at_commit_fail_destroy only catches the UAF under ASan; add it to the VALGRIND block
+- Final: minor (deferred): refeed-failure path forces the gate open twice (redundant writes)
+- Final: minor (deferred): timed_burst.py uses max_channels (RX count) for TX
+- Final: minor (deferred): concurrent-commit window — another thread's commit between start_at's failed commit and drop_uncommitted promotes the opening to PENDING; hook can outlive the stream (same race class as the step-3 uncommitted-batch check; needs multi-threaded API use)

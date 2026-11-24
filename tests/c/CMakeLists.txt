@@ -337,7 +337,7 @@ if(DATAX_LIBIIO_BUILD)
     TIMEOUT 120)
   # FHM timed tunes (Task 4): fake Tick + fake Talise FHM on the adrv9009 pair.
   add_executable(test_fhm test_fhm.c)
-  target_link_libraries(test_fhm PRIVATE datax datax_fake_tick Threads::Threads)
+  target_link_libraries(test_fhm PRIVATE datax datax_fake_tick iio_dep Threads::Threads)
   target_include_directories(test_fhm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/src)
   target_compile_options(test_fhm PRIVATE ${DATAX_WARNINGS})
@@ -348,6 +348,21 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_fhm PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # A context with only adrv9009-phy-b (the single-phy fixture, renamed at
+  # configure time): chip B's FHM seam binds by name, chip A's stays unbound.
+  file(READ ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-single.xml DATAX_PHYB_XML_TEXT)
+  string(REPLACE "name=\"adrv9009-phy\"" "name=\"adrv9009-phy-b\""
+    DATAX_PHYB_XML_TEXT "${DATAX_PHYB_XML_TEXT}")
+  set(DATAX_PHYB_XML ${CMAKE_CURRENT_BINARY_DIR}/adrv9009-phyb-only.xml)
+  file(WRITE ${DATAX_PHYB_XML} "${DATAX_PHYB_XML_TEXT}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-single.xml)
+  add_test(NAME test_fhm_phyb
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${DATAX_PHYB_XML} $<TARGET_FILE:test_fhm> phyb)
+  set_tests_properties(test_fhm_phyb PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 60)
   # Tron-like timing (wall-clock fake clock, 200 us per Tick access, 460 us
   # per FHM access): no tune of the hardware hop schedules completes late.
   add_test(NAME test_fhm_realtime

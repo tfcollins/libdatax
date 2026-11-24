@@ -30,6 +30,8 @@
 #include <datax/datax.h>
 #include <datax/datax_internal.h>
 
+#include <iio/iio.h>
+
 #include "check.h"
 #include "fake_tick.h"
 #include "internal.h"      /* dev->single_chip_tuned (Task 5 reads it) */
@@ -2446,6 +2448,41 @@ static void test_realtime_no_stage_late(void)
 	printf("test_realtime_no_stage_late: ok\n");
 }
 
+/* Final review fix 5: the FHM seams bind by phy name. pair: chip A on
+ * adrv9009-phy's TRX LO, chip B on adrv9009-phy-b's. phyb (a context with
+ * only adrv9009-phy-b, its own ctest test_fhm_phyb): chip B bound, chip A
+ * never bound to phy-b's LO. */
+static void check_fhm_binding(bool phyb_only)
+{
+	const char *uri = getenv("DATAX_TEST_URI");
+	struct datax_context *ctx = NULL;
+	struct datax_device *dev = NULL;
+	struct iio_device *a, *b;
+
+	CHECK(uri != NULL);
+	CHECK(datax_context_create_from_uri(uri, &ctx) == 0);
+	CHECK(datax_context_get_device(ctx, 0, &dev) == 0);
+	a = iio_context_find_device(ctx->iio, "adrv9009-phy");
+	b = iio_context_find_device(ctx->iio, "adrv9009-phy-b");
+	CHECK(b != NULL);
+	CHECK(dev->fhm_ops[1] != NULL);
+	CHECK(dev->fhm_h[1] == iio_device_find_channel(b, "altvoltage0", true));
+	if (phyb_only) {
+		CHECK(a == NULL);
+		CHECK(dev->fhm_ops[0] == NULL && dev->fhm_h[0] == NULL);
+	} else {
+		CHECK(a != NULL && dev->fhm_ops[0] != NULL);
+		CHECK(dev->fhm_h[0] == iio_device_find_channel(a, "altvoltage0", true));
+	}
+	datax_context_destroy(ctx);
+	printf("fhm_binding(%s): ok\n", phyb_only ? "phy-b only" : "pair");
+}
+
+static void test_fhm_binding_by_name(void)
+{
+	check_fhm_binding(false);
+}
+
 int main(int argc, char **argv)
 {
 	static const struct { const char *name; void (*fn)(void); } t[] = {
@@ -2482,6 +2519,7 @@ int main(int argc, char **argv)
 		{ "park_when_rise_unseen", test_park_when_rise_unseen },
 		{ "stage_busy_while_fall_pending", test_stage_busy_while_fall_pending },
 		{ "shortened_fall_inside_guard_quiet", test_shortened_fall_inside_guard_quiet },
+		{ "fhm_binding_by_name", test_fhm_binding_by_name },
 	};
 
 	static const struct { const char *name; void (*fn)(void); } tb[] = {
@@ -2495,6 +2533,11 @@ int main(int argc, char **argv)
 		{ "failed_restage_disarms", test_failed_restage_disarms },
 	};
 
+	/* phy-b-only mode (its own ctest on a generated fixture). */
+	if (argc > 1 && !strcmp(argv[1], "phyb")) {
+		check_fhm_binding(true);
+		return 0;
+	}
 	/* Real-time mode (its own ctest, test_fhm_realtime): tron-like timing
 	 * with a wall-clock fake and per-access latency. */
 	if (argc > 1 && !strcmp(argv[1], "realtime")) {

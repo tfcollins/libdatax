@@ -995,7 +995,7 @@ static void test_reserved_gpio_bit(bool adrv9009)
 	CHECK(datax_sched_queue_marker(x.s, t, 8, 10) == -EINVAL);
 	CHECK(datax_sched_queue_marker(NULL, t, 0, 1) == -EINVAL);
 	/* FHM tunes need a staged table (adrv9009); ad936x fastlock is P4.
-	 * Stream gates are P3b. */
+	 * A stream gate needs a started timed stream (NULL: -EINVAL). */
 	if (adrv9009) {
 		CHECK(datax_sched_queue_tune(x.s, t, 0, 2450000000ULL) == -EINVAL);
 		CHECK(strstr(lasterr(&x), "frequency not staged") != NULL);

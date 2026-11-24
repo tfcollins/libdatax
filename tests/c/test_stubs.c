@@ -22,8 +22,8 @@ int main(void)
 	CHECK(datax_stream_send(NULL, NULL, 0, 0) == -EINVAL);
 	CHECK(datax_stream_get_block(NULL, NULL, NULL, 0) == -EINVAL);
 	CHECK(datax_stream_put_block(NULL, NULL) == -EINVAL);
-	/* The scheduler (P3a) rejects a NULL handle, tunes included; stream
-	 * gates stay -ENOTSUP (P3b timed streams). */
+	/* The scheduler rejects a NULL handle, tunes and stream gates
+	 * included. */
 	CHECK(datax_sched_queue_gpio(NULL, 0, 0, 0) == -EINVAL);
 	CHECK(datax_sched_queue_marker(NULL, 0, 0, 0) == -EINVAL);
 	CHECK(datax_sched_queue_tune(NULL, 0, 0, 0) == -EINVAL);

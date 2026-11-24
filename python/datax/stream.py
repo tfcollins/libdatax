@@ -64,7 +64,6 @@ class _Stream:
         self._ctx = device._ctx
         self._h = None
         self._started = False
-        self._timed = False
         cfg = StreamConfig(self._direction, sum(1 << c for c in self.channels),
                            self.block_samples, self.block_count, self.cyclic)
         h = C.c_void_p()
@@ -99,7 +98,6 @@ class _Stream:
         if rc:
             raise self._ctx._error(rc)
         self._started = True
-        self._timed = False
 
     def start_at(self, when):
         """Start at device time ``when`` (ticks); returns the stream, so
@@ -112,14 +110,12 @@ class _Stream:
         if rc:
             raise self._ctx._error(rc)
         self._started = True
-        self._timed = True
         return self
 
     def stop(self):
         """Stop the stream. One-shot TX drains first and may raise on timeout."""
         h = self._live()
         self._started = False
-        self._timed = False
         rc = get_lib().datax_stream_stop(h)
         if rc:
             raise self._ctx._error(rc)

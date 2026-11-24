@@ -1,0 +1,13 @@
+{
+ "provenance": {"codec": "tests/vendor/tick/capture.py", "codec_sha256": "49328e3f0e50cc42fcab619622cedce27afecad640569994473c9a845608b384", "generator": "tests/vectors/gen_tag_vectors.py", "generator_sha256": "53b9bd6b5382576e4c9627274809261ae92ac2585cdf5d3ea4794d6b5d11dd99", "tick_revision": "ed6c8a4c955d1933eb5da33f3c1fefcb72d32123"},
+ "cases": [
+  {"burst": 0, "bytes": "5449434b0100080140420f0000000000070000000002030000e1f50500000000", "capture_tick": 1000000, "cmd": 3, "flags": 1, "gate": 0, "late": false, "name": "on_time_gate0", "positive": true, "seq": 7, "stale": false, "target": 512, "tick_hz": 100000000},
+  {"burst": 1, "bytes": "5449434b01000805c409000000000000080000000002030000e1f50501000000", "capture_tick": 2500, "cmd": 3, "flags": 5, "gate": 0, "late": true, "name": "late_executed", "positive": true, "seq": 8, "stale": false, "target": 512, "tick_hz": 100000000},
+  {"burst": 2, "bytes": "5449434b0100080340420f0000000000070000000002030000e1f50502000000", "capture_tick": 1000000, "cmd": 3, "flags": 3, "gate": 0, "late": false, "name": "stale", "positive": true, "seq": 7, "stale": true, "target": 512, "tick_hz": 100000000},
+  {"burst": 3, "bytes": "5449434b0100082515cd5b0700000000341200000202030000e1f50503000000", "capture_tick": 123456789, "cmd": 3, "flags": 37, "gate": 2, "late": true, "name": "gate2_late", "positive": true, "seq": 4660, "stale": false, "target": 514, "tick_hz": 100000000},
+  {"burst": 0, "bytes": "5449434b01000801ffffffffffffffff010000000002030000e1f50500000000", "capture_tick": 18446744073709551615, "cmd": 3, "flags": 1, "gate": 0, "late": false, "name": "tick_max", "positive": true, "seq": 1, "stale": false, "target": 512, "tick_hz": 100000000},
+  {"burst": 11259375, "bytes": "5449434b01000811efcdab8967452301ffffffff010203000000a60eefcdab00", "capture_tick": 81985529216486895, "cmd": 3, "flags": 17, "gate": 1, "late": false, "name": "hz_and_burst", "positive": true, "seq": 4294967295, "stale": false, "target": 513, "tick_hz": 245760000},
+  {"bytes": "ab49434b010008010100000000000000000000000002030000e1f50500000000", "error": "bad capture header magic 0x4b4349ab, expected 0x4b434954", "name": "bad_magic", "positive": false},
+  {"bytes": "5449434b020008010100000000000000000000000002030000e1f50500000000", "error": "unsupported capture header version 2, expected 1", "name": "bad_version", "positive": false}
+ ]
+}

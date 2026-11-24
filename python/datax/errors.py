@@ -23,8 +23,9 @@ class CapabilityError(Error):
 class LateError(Error):
     """A deadline could not be met (``DATAX_ERR_LATE``, ETIME): ``Scheduler.commit``
     for a command already inside the guard margin, or ``Scheduler.wait_all``
-    when a command completed late. ``completions`` (``wait_all``) lists what
-    was collected."""
+    when a command completed late; also ``recv`` / ``send`` on a timed stream
+    whose opening command was late (the capture never starts shifted).
+    ``completions`` (``wait_all``) lists what was collected."""
 
 
 class BusyError(Error):

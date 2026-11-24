@@ -44,6 +44,18 @@ static struct datax_device *new_device(struct datax_context *ctx,
 	return dev;
 }
 
+/* chip's FHM seam on phy's TRX LO (chip 0: adrv9009-phy, chip 1:
+ * adrv9009-phy-b). Nothing for a NULL phy or one without the LO. */
+static void bind_fhm(struct datax_device *dev, unsigned int chip, struct iio_device *phy)
+{
+	struct iio_channel *lo = phy ? iio_device_find_channel(phy, "altvoltage0", true) : NULL;
+
+	if (lo) {
+		dev->fhm_ops[chip] = &datax_fhm_iio_ops;
+		dev->fhm_h[chip] = lo;
+	}
+}
+
 static void free_devices(struct datax_context *ctx)
 {
 	for (unsigned int i = 0; i < ctx->ndevices; i++)
@@ -94,17 +106,13 @@ int datax_fold_devices(struct datax_context *ctx)
 			if (b)
 				dev->phy[dev->nphy++] = b;
 			have_adrv = true;
-			/* FHM seam: chip A's TRX LO (only its FHM GPIO is wired to
-			 * Tick on the ZU11EG image, spec decision 7). */
-			if (a) {
-				struct iio_channel *lo =
-					iio_device_find_channel(a, "altvoltage0", true);
-
-				if (lo) {
-					dev->fhm_ops = &datax_fhm_iio_ops;
-					dev->fhm_h = lo;
-				}
-			}
+			/* FHM seams: each chip's TRX LO, bound by name, not by
+			 * phy[] position (a context with only phy-b has it at
+			 * phy[0]). Chip B's is used only when the Tick's gate
+			 * map names fhm-b (its FHM GPIO on Tick GPIO bit 1, P3b
+			 * spec decision 7; fhm.c). */
+			bind_fhm(dev, 0, a);
+			bind_fhm(dev, 1, b);
 		}
 		/* One source of truth: the family ops carry the per-phy counts. */
 		ops = datax_family_ops(fam);

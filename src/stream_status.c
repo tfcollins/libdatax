@@ -92,6 +92,16 @@ int datax_stream_status_poll(struct datax_stream *s, bool *overflow, bool *under
 		*overflow = false;
 	if (underflow)
 		*underflow = false;
+	if (s->src && s->src->status) {
+		bool ovf = false, unf = false;
+		int ret = s->src->status(s->src_h, &ovf, &unf);
+
+		if (overflow)
+			*overflow = ovf && dir == DATAX_RX;
+		if (underflow)
+			*underflow = unf && dir == DATAX_TX;
+		return ret;
+	}
 	attr = iio_device_find_debug_attr(s->iio_dev, ATTR);
 	if (!attr)
 		return -ENOENT;
@@ -162,6 +172,21 @@ void datax_stream_status_check(struct datax_stream *s, bool discard)
 	s->stats.status_polls++;
 	ret = datax_stream_status_poll(s, &ovf, &unf);
 	datax_stream_status_apply(s, ret, ovf, unf, discard);
+}
+
+void datax_stream_status_clear(struct datax_stream *s)
+{
+	bool ovf = false, unf = false;
+	int ret;
+
+	s->disc_pending = false;
+	if (s->detect_off)
+		return;
+	s->stats.status_polls++;
+	ret = datax_stream_status_poll(s, &ovf, &unf);
+	datax_stream_status_apply(s, ret, ovf, unf, true);
+	s->polled_once = true;
+	s->last_poll_us = mono_us();
 }
 
 int datax_internal_device_stream_info(const struct datax_device *dev,

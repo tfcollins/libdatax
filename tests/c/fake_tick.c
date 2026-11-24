@@ -101,15 +101,25 @@ struct fake_tick {
 	uint32_t cap_seq, cap_count;
 	uint16_t cap_target, cap_cmd;
 	uint8_t cap_gate;
-	bool cap_unread, cap_overrun;
+	bool cap_unread, cap_overrun, cap_late;
 	uint32_t tag_enable;
+	/* The same latch kept per gate, for a fake DMA that tags from one gate. */
+	struct fake_tick_tag gate_tag[STREAM_GATE_COUNT];
+	/* stream_gate_map attribute text (NULL: absent) and tag attribute hiding. */
+	char *gate_map;
+	bool tag_attrs_hidden;
+	fake_tick_gate_hook gate_hook;
+	void *gate_hook_user;
 
-	fake_tick_gpio_hook hook;
-	void *hook_user;
+	/* gpio hooks: set_gpio_hook replaces them all, add_gpio_hook appends */
+	fake_tick_gpio_hook hook[FAKE_TICK_MAX_GPIO_HOOKS];
+	void *hook_user[FAKE_TICK_MAX_GPIO_HOOKS];
+	unsigned int nhook;
 	uint64_t access_cost;
 	bool inj_set;
 	char inj_attr[48];         /* "" matches any attribute */
 	int inj_err;
+	unsigned int inj_skip;     /* matching accesses to let through first */
 
 	struct fake_tick_exec *log;
 	size_t nlog, caplog;
@@ -253,27 +263,47 @@ static void set_gpio(struct fake_tick *f, uint32_t v)
 	uint32_t old = f->gpio;
 
 	f->gpio = v;
-	if (old != v && f->hook)
-		f->hook(f->hook_user, old, v, f->now);
+	for (unsigned int i = 0; old != v && i < f->nhook; i++)
+		f->hook[i](f->hook_user[i], old, v, f->now);
 }
 
 /* Capture-tag latch: gate and arm commands only (RTL lines 790-801, 813-826,
  * 958-969, 983-995); GPIO never latches. */
-static void latch_tag(struct fake_tick *f, const struct q_entry *e, uint64_t at)
+static void latch_tag(struct fake_tick *f, const struct q_entry *e, uint64_t at, bool late)
 {
+	struct fake_tick_tag *g = &f->gate_tag[e->a[0] % STREAM_GATE_COUNT];
+
 	f->cap_ticks = at;
 	f->cap_seq = e->seq;
 	f->cap_target = e->target;
 	f->cap_cmd = e->cmd;
 	f->cap_gate = (uint8_t)(e->a[0] & 0xf);
+	f->cap_late = late;
 	f->cap_count = (f->cap_count + 1) & 0xffffffu;   /* 24-bit counter */
 	f->cap_overrun = f->cap_overrun || f->cap_unread;
 	f->cap_unread = true;
+	g->ticks = at;
+	g->seq = e->seq;
+	g->target = e->target;
+	g->cmd = e->cmd;
+	g->late = late;
+	g->count++;
+}
+
+/* A change of the stream gate levels, reported to the gate hook. */
+static void set_gate(struct fake_tick *f, uint32_t v)
+{
+	uint32_t old = f->gate;
+
+	f->gate = v;
+	if (old != v && f->gate_hook)
+		f->gate_hook(f->gate_hook_user, old, v, f->now);
 }
 
 /* Target side effects (RTL dispatch case, lines 947-1000; late execute-now
- * case, lines 779-835). at is the tick the effect is recorded with. */
-static void apply(struct fake_tick *f, const struct q_entry *e, uint64_t at)
+ * case, lines 779-835). at is the tick the effect is recorded with; late is
+ * set when the command ran late (late on submit, or dispatched late). */
+static void apply(struct fake_tick *f, const struct q_entry *e, uint64_t at, bool late)
 {
 	switch (e->cmd) {
 	case CMD_GPIO:
@@ -285,18 +315,19 @@ static void apply(struct fake_tick *f, const struct q_entry *e, uint64_t at)
 		f->marker |= 1u << (e->a[0] % MARKER_COUNT);
 		break;
 	case CMD_GATE:
+		/* Latch first: the gate hook may read the latch. */
 		if (e->a[1] & 1) {
-			f->gate |= 1u << (e->a[0] % STREAM_GATE_COUNT);
-			latch_tag(f, e, at);
+			latch_tag(f, e, at, late);
+			set_gate(f, f->gate | (1u << (e->a[0] % STREAM_GATE_COUNT)));
 		} else {
-			f->gate &= ~(1u << (e->a[0] % STREAM_GATE_COUNT));
+			set_gate(f, f->gate & ~(1u << (e->a[0] % STREAM_GATE_COUNT)));
 		}
 		break;
 	case CMD_CAPTURE:
 	case CMD_TRANSMIT:
 		/* One-shot pulse; like hdl_model it only ever sets the bit. */
-		f->gate |= 1u << (e->a[0] % STREAM_GATE_COUNT);
-		latch_tag(f, e, at);
+		latch_tag(f, e, at, late);
+		set_gate(f, f->gate | (1u << (e->a[0] % STREAM_GATE_COUNT)));
 		break;
 	default:   /* TDD sync, SPI: no state the attribute surface shows */
 		break;
@@ -336,7 +367,7 @@ static bool dispatch_head(struct fake_tick *f)
 	if (f->comp_valid && produces)
 		return false;
 	if (!drop)
-		apply(f, &e, exec);
+		apply(f, &e, exec, late);
 	if (rlate && !e.late_on_submit)                              /* line 1008 */
 		f->late = sat_inc(f->late);
 	status = rovf ? ST_REPEAT_OVERFLOW : drop ? ST_LATE_DROPPED :
@@ -430,7 +461,7 @@ static void push(struct fake_tick *f, const uint32_t w[12])
 				record(f, e.seq, e.cmd, e.target, e.ts, 0, ST_OVERFLOW, 0);
 			log_exec(f, e.seq, e.cmd, e.target, e.ts, 0, ST_OVERFLOW, 0, rep);
 		} else if (e.flags & F_LATE_NOW) {                       /* lines 778-846 */
-			apply(f, &e, f->now);
+			apply(f, &e, f->now, true);
 			if (e.flags & F_REPORT)
 				record(f, e.seq, e.cmd, e.target, e.ts, f->now, ST_LATE_EXECUTED, 0);
 			log_exec(f, e.seq, e.cmd, e.target, e.ts, f->now, ST_LATE_EXECUTED, 0,
@@ -500,7 +531,17 @@ static const struct {
 	{ "edge_capture_target_id", A_RO }, { "edge_capture_command_id", A_RO },
 	{ "edge_capture_ack", A_WO }, { "capture_tag_enable", A_RW },
 	{ "capture_tag_header_bytes", A_RO }, { "capture_tag_magic", A_RO },
+	{ "stream_gate_map", A_RO },
 };
+
+/* An attribute the configured fake does not have: the gate map unless set,
+ * the capture-tag attributes when hidden (an image without the tagger). */
+static bool attr_absent(const struct fake_tick *f, const char *name)
+{
+	if (!strcmp(name, "stream_gate_map"))
+		return !f->gate_map;
+	return f->tag_attrs_hidden && !strncmp(name, "capture_tag_", 12);
+}
 
 static int attr_mode(const char *name)
 {
@@ -567,6 +608,11 @@ static int read_locked(struct fake_tick *f, const char *a, char *buf, size_t len
 		return emit(buf, len, u, f->cap_target);
 	if (!strcmp(a, "edge_capture_command_id"))
 		return emit(buf, len, u, f->cap_cmd);
+	if (!strcmp(a, "stream_gate_map")) {
+		int n = snprintf(buf, len, "%s\n", f->gate_map);
+
+		return n < 0 ? -EIO : (size_t)n >= len ? (int)(len - 1) : n;
+	}
 	if (!strcmp(a, "capture_tag_enable"))
 		return emit(buf, len, u, f->tag_enable);
 	if (!strcmp(a, "capture_tag_header_bytes"))
@@ -642,11 +688,15 @@ static int tick_access(struct fake_tick *f, const char *attr, bool write, char *
 	if (f->access_cost)
 		advance_locked(f, f->access_cost);
 	if (f->inj_set && (!f->inj_attr[0] || !strcmp(f->inj_attr, attr))) {
-		f->inj_set = false;
-		ret = f->inj_err;
-		goto out;
+		if (f->inj_skip) {
+			f->inj_skip--;          /* this one goes through */
+		} else {
+			f->inj_set = false;
+			ret = f->inj_err;
+			goto out;
+		}
 	}
-	mode = attr_mode(attr);
+	mode = attr_absent(f, attr) ? 0 : attr_mode(attr);
 	if (!mode) {
 		ret = -ENOENT;
 		goto out;
@@ -708,6 +758,7 @@ void fake_tick_free(struct fake_tick *f)
 	if (!f)
 		return;
 	pthread_mutex_destroy(&f->lock);
+	free(f->gate_map);
 	free(f->log);
 	free(f->counts);
 	free(f);
@@ -762,9 +813,78 @@ GETTER(fake_tick_stream_gate, gate)
 void fake_tick_set_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user)
 {
 	pthread_mutex_lock(&f->lock);
-	f->hook = hook;
-	f->hook_user = user;
+	f->nhook = 0;
+	if (hook) {
+		f->hook[0] = hook;
+		f->hook_user[0] = user;
+		f->nhook = 1;
+	}
 	pthread_mutex_unlock(&f->lock);
+}
+
+int fake_tick_add_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user)
+{
+	int ret = -ENOSPC;
+
+	if (!hook)
+		return -EINVAL;
+	pthread_mutex_lock(&f->lock);
+	if (f->nhook < FAKE_TICK_MAX_GPIO_HOOKS) {
+		f->hook[f->nhook] = hook;
+		f->hook_user[f->nhook] = user;
+		f->nhook++;
+		ret = 0;
+	}
+	pthread_mutex_unlock(&f->lock);
+	return ret;
+}
+
+void fake_tick_set_gate_hook(struct fake_tick *f, fake_tick_gate_hook hook, void *user)
+{
+	pthread_mutex_lock(&f->lock);
+	f->gate_hook = hook;
+	f->gate_hook_user = user;
+	pthread_mutex_unlock(&f->lock);
+}
+
+void fake_tick_set_gate_map(struct fake_tick *f, const char *text)
+{
+	char *copy = text ? strdup(text) : NULL;
+
+	pthread_mutex_lock(&f->lock);
+	free(f->gate_map);
+	f->gate_map = copy;
+	pthread_mutex_unlock(&f->lock);
+}
+
+void fake_tick_hide_tag_attrs(struct fake_tick *f, bool hide)
+{
+	pthread_mutex_lock(&f->lock);
+	f->tag_attrs_hidden = hide;
+	pthread_mutex_unlock(&f->lock);
+}
+
+int fake_tick_gate_tag_locked(struct fake_tick *f, unsigned int gate, struct fake_tick_tag *out)
+{
+	if (gate >= STREAM_GATE_COUNT || !out)
+		return -EINVAL;
+	*out = f->gate_tag[gate];
+	return 0;
+}
+
+uint32_t fake_tick_tag_enable_locked(struct fake_tick *f)
+{
+	return f->tag_enable;
+}
+
+int fake_tick_gate_tag(struct fake_tick *f, unsigned int gate, struct fake_tick_tag *out)
+{
+	int ret;
+
+	pthread_mutex_lock(&f->lock);
+	ret = fake_tick_gate_tag_locked(f, gate, out);
+	pthread_mutex_unlock(&f->lock);
+	return ret;
 }
 
 size_t fake_tick_exec_log(struct fake_tick *f, size_t first, struct fake_tick_exec *out,
@@ -789,8 +909,14 @@ void fake_tick_set_access_cost(struct fake_tick *f, uint64_t ticks)
 
 void fake_tick_inject_error(struct fake_tick *f, const char *attr, int err)
 {
+	fake_tick_inject_error_nth(f, attr, err, 1);
+}
+
+void fake_tick_inject_error_nth(struct fake_tick *f, const char *attr, int err, unsigned int nth)
+{
 	pthread_mutex_lock(&f->lock);
-	f->inj_set = true;
+	f->inj_set = nth > 0;
+	f->inj_skip = nth ? nth - 1 : 0;
 	f->inj_err = err;
 	snprintf(f->inj_attr, sizeof(f->inj_attr), "%s", attr ? attr : "");
 	pthread_mutex_unlock(&f->lock);
@@ -825,6 +951,7 @@ struct fake_fhm {
 	uint64_t corrupt_hz;
 	uint64_t access_cost;
 	struct fake_tick *tick;
+	unsigned int bit;     /* the Tick GPIO bit followed (TAL_GPIO_0) */
 };
 
 struct fake_fhm *fake_fhm_new(uint64_t init_hz)
@@ -856,9 +983,11 @@ static void fhm_on_gpio(void *user, uint32_t old_gpio, uint32_t new_gpio, uint64
 {
 	struct fake_fhm *m = user;
 
+	uint32_t b = 1u << m->bit;   /* set before the hook was installed */
+
 	(void)ticks;
-	if ((old_gpio & 1u) || !(new_gpio & 1u))
-		return;   /* not a rising edge on bit 0 (TAL_GPIO_0) */
+	if ((old_gpio & b) || !(new_gpio & b))
+		return;   /* not a rising edge on the followed bit (TAL_GPIO_0) */
 	pthread_mutex_lock(&m->lock);
 	if (m->enabled) {
 		/* One stage deep (fhm-pipeline.md; plan.FhmPipelineModel.on_edge):
@@ -877,11 +1006,23 @@ void fake_fhm_attach(struct fake_fhm *m, struct fake_tick *f)
 	pthread_mutex_lock(&m->lock);
 	old = m->tick;
 	m->tick = f;
+	m->bit = 0;
 	pthread_mutex_unlock(&m->lock);
 	if (old && old != f)
 		fake_tick_set_gpio_hook(old, NULL, NULL);
 	if (f)
 		fake_tick_set_gpio_hook(f, fhm_on_gpio, m);
+}
+
+int fake_fhm_attach_bit(struct fake_fhm *m, struct fake_tick *f, unsigned int bit)
+{
+	if (!m || !f || bit >= 32)
+		return -EINVAL;
+	pthread_mutex_lock(&m->lock);
+	m->tick = f;
+	m->bit = bit;
+	pthread_mutex_unlock(&m->lock);
+	return fake_tick_add_gpio_hook(f, fhm_on_gpio, m);
 }
 
 /* The access cost advances the Tick without the FHM lock held, since the

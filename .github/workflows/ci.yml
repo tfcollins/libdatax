@@ -45,7 +45,7 @@ jobs:
   test:
     needs: libiio
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       DATAX_LIBIIO_BUILD: ${{ github.workspace }}/libiio/build
       # conftest.py turns every skipped test into a failure.

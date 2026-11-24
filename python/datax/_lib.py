@@ -95,11 +95,13 @@ def get_lib():
     _sig(lib, "datax_internal_pps_present", C.c_int, c_void_p)
     _sig(lib, "datax_internal_mcs_info", C.c_int, c_void_p, C.c_char_p, C.c_size_t,
          C.c_char_p, C.c_size_t)
+    _sig(lib, "datax_internal_gate_info", C.c_int, c_void_p, C.c_char_p, C.c_size_t)
     _sig(lib, "datax_internal_device_stream_info", C.c_int, c_void_p, C.c_int,
          C.c_char_p, C.c_size_t, P(C.c_int))
     _sig(lib, "datax_stream_create", C.c_int, c_void_p, P(StreamConfig), P(c_void_p))
     _sig(lib, "datax_stream_destroy", None, c_void_p)
     _sig(lib, "datax_stream_start", C.c_int, c_void_p)
+    _sig(lib, "datax_stream_start_at", C.c_int, c_void_p, c_ull)
     _sig(lib, "datax_stream_stop", C.c_int, c_void_p)
     _sig(lib, "datax_stream_recv", C.c_int, c_void_p, c_void_p, C.c_size_t,
          P(BlockInfoC), C.c_int)
@@ -109,6 +111,7 @@ def get_lib():
     _sig(lib, "datax_sched_queue_gpio", C.c_long, c_void_p, c_ull, c_uint, c_uint)
     _sig(lib, "datax_sched_queue_marker", C.c_long, c_void_p, c_ull, c_uint, c_uint)
     _sig(lib, "datax_sched_queue_tune", C.c_long, c_void_p, c_ull, c_uint, c_ull)
+    _sig(lib, "datax_sched_queue_stream_gate", C.c_long, c_void_p, c_ull, c_void_p, C.c_bool)
     _sig(lib, "datax_sched_report", C.c_int, c_void_p, C.c_long)
     _sig(lib, "datax_sched_commit", C.c_int, c_void_p)
     _sig(lib, "datax_sched_flush", C.c_int, c_void_p)

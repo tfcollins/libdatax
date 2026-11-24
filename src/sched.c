@@ -18,6 +18,7 @@
 #include "error.h"
 #include "fhm.h"
 #include "scheduler.h"
+#include "stream.h"
 #include "tick_descriptor.h"
 #include "tick_ops.h"
 
@@ -142,8 +143,9 @@ void datax_sched_finish(struct datax_sched *s, struct sched_cmd *c,
 	 * (DROPPED, FLUSHED) would vanish: report it the same way (controller
 	 * ruling; there is no DROPPED event type). Except FLUSHED by destroy:
 	 * nobody asked, and its delivery would race the teardown (the event
-	 * queue may or may not be delivered before the poller is joined). */
-	else if (c->consume && res->status != DATAX_COMPLETION_OK &&
+	 * queue may or may not be delivered before the poller is joined).
+	 * Nor one its owner cancelled (a stream's stop()). */
+	else if (c->consume && res->status != DATAX_COMPLETION_OK && !res->cancelled &&
 		 !(res->status == DATAX_COMPLETION_FLUSHED && s->stop))
 		datax_sched_emit_locked(s, DATAX_EVT_LATE_COMMAND,
 					datax_devtime_to_hw(s->dev, res->requested_ticks), seq,
@@ -374,17 +376,17 @@ static void seed_seq(struct datax_device *dev)
 				       (SEQ_MAX / 2)) + 1u;
 }
 
-int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
-			uint32_t value)
+int datax_tick_cmd_now(struct datax_device *dev, struct datax_sched *s, uint16_t command_id,
+		       uint16_t target_id, const uint32_t args[4])
 {
 	struct datax_tick_descriptor d = {
 		.version = DATAX_TICK_DESC_VERSION,
 		.size_bytes = DATAX_TICK_DESC_SIZE,
-		.command_id = DATAX_TICK_COMMAND_ID_GPIO_WRITE,
-		.target_id = DATAX_TICK_TARGET_FAMILY_GPIO,
+		.command_id = command_id,
+		.target_id = target_id,
 		.timestamp_ticks = 0,                 /* always in the past */
 		.flags = DATAX_TICK_FLAG_LATE_EXECUTE_NOW,
-		.args = { mask, value & mask, 0, 0 },
+		.args = { args[0], args[1], args[2], args[3] },
 	};
 	char buf[160];
 	int ret;
@@ -408,6 +410,25 @@ int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_
 		pthread_mutex_unlock(&s->lock);
 	}
 	return ret;
+}
+
+int datax_tick_gpio_now(struct datax_device *dev, struct datax_sched *s, uint32_t mask,
+			uint32_t value)
+{
+	const uint32_t args[4] = { mask, value & mask, 0, 0 };
+
+	return datax_tick_cmd_now(dev, s, DATAX_TICK_COMMAND_ID_GPIO_WRITE,
+				  DATAX_TICK_TARGET_FAMILY_GPIO, args);
+}
+
+int datax_tick_gate_now(struct datax_device *dev, struct datax_sched *s, unsigned int bit,
+			unsigned int level)
+{
+	const uint32_t args[4] = { bit, level ? 1u : 0u, 0, 0 };
+
+	return datax_tick_cmd_now(dev, s, DATAX_TICK_COMMAND_ID_STREAM_GATE,
+				  (uint16_t)(DATAX_TICK_TARGET_FAMILY_STREAM_GATE | (bit & 0xffu)),
+				  args);
 }
 
 int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
@@ -434,9 +455,13 @@ int datax_sched_create(struct datax_device *dev, struct datax_sched **out)
 	s->dev = dev;
 	s->ctx = ctx;
 	s->poll_us = DATAX_SCHED_DEFAULT_POLL_US;
-	/* GPIO bit 0 drives TAL_GPIO_0, the FHM hop trigger, on the adrv9009
-	 * (ZU11EG) image: only queue_tune may drive it. */
-	s->reserved_mask = dev->family == DATAX_FAMILY_ADRV9009 ? 0x1u : 0u;
+	/* The FHM hop triggers (fhm.h) on the adrv9009 (ZU11EG) image: chip
+	 * A's TAL_GPIO_0 on GPIO bit 0, and chip B's on bit 1 when the gate map
+	 * names fhm-b. Only queue_tune may drive them. */
+	s->reserved_mask = 0u;
+	if (dev->family == DATAX_FAMILY_ADRV9009)
+		s->reserved_mask = DATAX_FHM_TRIGGER_A |
+				   (dev->caps.gate_map.fhm_b ? DATAX_FHM_TRIGGER_B : 0u);
 	s->next_order = 1;
 	s->next_done = 1;
 	/* Locks first: once published, get_time may take a reference and io. */
@@ -587,6 +612,8 @@ long datax_sched_enqueue(struct datax_sched *s, const struct datax_sched_cmd_spe
 	memcpy(c->args, spec->args, sizeof(c->args));
 	c->report = spec->report;
 	c->consume = spec->consume;
+	c->lead = spec->lead;
+	c->late_probe = spec->late_probe;
 	c->on_complete = spec->on_complete;
 	c->user = spec->user;
 	pthread_mutex_unlock(&s->lock);
@@ -644,12 +671,51 @@ long datax_sched_queue_tune(struct datax_sched *s, datax_time when,
 long datax_sched_queue_stream_gate(struct datax_sched *s, datax_time when,
 				   struct datax_stream *stream, bool enable)
 {
-	(void)when; (void)stream; (void)enable;
-	if (s)
+	struct datax_sched_cmd_spec spec;
+	unsigned int lv;
+	bool cap;
+	int ret;
+
+	if (!s)
+		return -EINVAL;
+	if (!stream)
+		return datax_error_ret(s->ctx, EINVAL, "sched", "queue_stream_gate: NULL stream");
+	if (stream->dev != s->dev)
+		return datax_error_ret(s->ctx, EINVAL, "sched",
+				       "queue_stream_gate: the stream is on another device than "
+				       "the scheduler");
+	pthread_mutex_lock(&s->dev->ctx->lock);
+	cap = s->dev->caps.flags & (1u << DATAX_CAP_STREAM_GATE);
+	pthread_mutex_unlock(&s->dev->ctx->lock);
+	if (!cap)
 		return datax_error_ret(s->ctx, ENOTSUP, "sched",
-				       "queue_stream_gate: no timed-stream hardware on this "
-				       "platform yet (P3b)");
-	return -ENOTSUP;
+				       "queue_stream_gate: no STREAM_GATE target on this device's Tick");
+	if (stream->cfg.direction == DATAX_RX)
+		return datax_error_ret(s->ctx, ENOTSUP, "sched",
+				       "queue_stream_gate: RX gating needs a DMA with end-of-burst "
+				       "(tlast) on this image");
+	if (!stream->started || !stream->timed)
+		return datax_error_ret(s->ctx, EINVAL, "sched",
+				       "queue_stream_gate: stream is not in timed mode; use start_at");
+	if (when < stream->t_open)
+		return datax_error_ret(s->ctx, EINVAL, "sched",
+				       "queue_stream_gate: when %llu is before the stream's T %llu",
+				       (unsigned long long)when,
+				       (unsigned long long)stream->t_open);
+	ret = datax_stream_timed_failed(stream, "queue_stream_gate", false);
+	if (ret)
+		return ret;
+	if (stream->dev->caps.gate_map.tx_level < 0)
+		return datax_error_ret(s->ctx, ENOTSUP, "sched",
+				       "queue_stream_gate: the Tick stream_gate_map has no tx-dma role");
+	lv = (unsigned int)stream->dev->caps.gate_map.tx_level;
+	memset(&spec, 0, sizeof(spec));
+	spec.when = when;
+	spec.command_id = DATAX_TICK_COMMAND_ID_STREAM_GATE;
+	spec.target_id = (uint16_t)(DATAX_TICK_TARGET_FAMILY_STREAM_GATE | lv);
+	spec.args[0] = lv;
+	spec.args[1] = enable ? 1u : 0u;
+	return datax_sched_enqueue(s, &spec);
 }
 
 int datax_sched_report(struct datax_sched *s, long seq)
@@ -896,6 +962,235 @@ int datax_sched_flush(struct datax_sched *s)
 	pthread_mutex_unlock(&s->lock);
 	datax_sched_io_unlock(s, &h);
 	return ret ? datax_error_ret(s->ctx, -ret, "sched", "out of memory") : 0;
+}
+
+/* ---- targeted cancel and re-feed (timed streams) ----------------------------- */
+
+static unsigned long long ns_ticks(unsigned long long ns, unsigned long long hz)
+{
+	return ns / 1000000000ULL * hz + ns % 1000000000ULL * hz / 1000000000ULL;
+}
+
+/* A written command not yet passed (hw_ts after the last device-time read)
+ * is due before now + guard, now being the device-time estimate. s->lock. */
+static bool written_due_soon(const struct datax_sched *s)
+{
+	unsigned long long now = s->last_hw + ns_ticks(datax_mono_ns() - s->last_hw_mono,
+						       s->tick_hz);
+
+	for (size_t i = 0; i < s->ncmds; i++) {
+		const struct sched_cmd *c = &s->cmds[i];
+
+		if (c->state == CMD_WRITTEN && c->hw_ts > s->last_hw &&
+		    c->hw_ts < now + s->guard_ticks)
+			return true;
+	}
+	return false;
+}
+
+static bool any_written(const struct datax_sched *s)
+{
+	for (size_t i = 0; i < s->ncmds; i++)
+		if (s->cmds[i].state == CMD_WRITTEN)
+			return true;
+	return false;
+}
+
+/*
+ * Steps 3-5 of datax_sched_cancel_gates (scheduler.h). io held on entry and
+ * on return (h is the caller's hold); it is released only for the wait.
+ * why names the cause in a dropped command's detail. skip: when the wait's
+ * bound expires, change nothing and return 1 (refeed). 0, 1, or -errno
+ * (last error not set).
+ */
+static int flush_and_repend(struct datax_sched *s, struct datax_io_hold *h, const char *why,
+			    bool skip)
+{
+	const struct timespec step = { 0, 200000L };
+	unsigned long long dl, t1, t2;
+	bool soon;
+	int ret;
+
+	/*
+	 * 3. A hop edge or GPIO due in the flush round trip must run, not be
+	 * classed as dropped, and one re-fed inside the guard margin would
+	 * complete host-late: wait (io released, so the poller feeds, drains
+	 * and moves last_hw) for at most one guard margin of host time until
+	 * no written command is due before now + guard.
+	 */
+	pthread_mutex_lock(&s->lock);
+	soon = written_due_soon(s);
+	pthread_mutex_unlock(&s->lock);
+	if (soon) {
+		dl = datax_mono_ns() + s->guard_ticks * 1000000000ULL / s->tick_hz;
+		datax_sched_io_unlock(s, h);
+		for (;;) {
+			nanosleep(&step, NULL);
+			pthread_mutex_lock(&s->lock);
+			soon = !s->stop && written_due_soon(s);
+			pthread_mutex_unlock(&s->lock);
+			if (!soon || datax_mono_ns() >= dl)
+				break;
+		}
+		datax_sched_io_lock(s, h);
+		pthread_mutex_lock(&s->lock);
+		soon = written_due_soon(s);
+		if (s->stop) {
+			pthread_mutex_unlock(&s->lock);
+			return -ECANCELED;
+		}
+		pthread_mutex_unlock(&s->lock);
+		if (soon && skip)
+			return 1;
+	}
+	/* 4. Keep what ran, empty Tick's queue, keep what ran since. */
+	ret = datax_poller_read_time(s);
+	pthread_mutex_lock(&s->lock);
+	t1 = s->last_hw;
+	pthread_mutex_unlock(&s->lock);
+	if (!ret)
+		ret = datax_poller_drain(s);
+	if (!ret)
+		ret = datax_tick_write_str(s->dev, "flush_queue", "1");
+	if (!ret)
+		ret = datax_poller_read_time(s);
+	pthread_mutex_lock(&s->lock);
+	t2 = s->last_hw;
+	pthread_mutex_unlock(&s->lock);
+	if (!ret)
+		ret = datax_poller_drain(s);
+	if (ret)
+		return ret;
+	/* 5. What Tick no longer holds. */
+	pthread_mutex_lock(&s->lock);
+	for (size_t i = 0; i < s->ncmds;) {
+		struct sched_cmd *c = &s->cmds[i];
+
+		if (c->state == CMD_WRITTEN && !c->report && c->hw_ts < t1) {
+			datax_sched_remove(s, c);     /* ran before t1, as prune() */
+			continue;
+		}
+		if (c->state == CMD_WRITTEN && c->hw_ts > t2) {
+			c->state = CMD_PENDING;       /* the feeder writes it again */
+			c->lagged = false;
+			c->lag_t = 0;
+		}
+		i++;
+	}
+	for (size_t i = 0; i < s->ncmds; i++) {
+		struct sched_cmd *c = &s->cmds[i];
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_DROPPED,
+			.tick_status = UINT32_MAX,
+			.queue_emptied = true,
+		};
+
+		if (c->state != CMD_WRITTEN)
+			continue;
+		res.requested_ticks = c->api_ts;
+		if (c->report)
+			snprintf(res.detail, sizeof(res.detail), "flushed by %s before it ran", why);
+		else
+			snprintf(res.detail, sizeof(res.detail), "flushed by %s; it may have run",
+				 why);
+		datax_sched_finish(s, c, &res);   /* may drop s->lock for a hook */
+		i = (size_t)-1;                   /* the table may have moved: rescan */
+	}
+	s->kick = true;
+	pthread_cond_signal(&s->wake);
+	pthread_mutex_unlock(&s->lock);
+	return 0;
+}
+
+static bool gate_match(const struct sched_cmd *c, uint32_t gate_mask)
+{
+	unsigned int bit = c->target_id & 0xffu;
+
+	return c->state != CMD_DONE && c->command_id == DATAX_TICK_COMMAND_ID_STREAM_GATE &&
+	       (c->target_id & 0xff00u) == DATAX_TICK_TARGET_FAMILY_STREAM_GATE && bit < 32 &&
+	       (gate_mask >> bit & 1u);
+}
+
+int datax_sched_cancel_gates(struct datax_sched *s, uint32_t gate_mask, const char *detail)
+{
+	struct datax_io_hold h;
+	bool written = false, fresh, any = false;
+	unsigned long long now;
+	int ret;
+
+	if (!s)
+		return -EINVAL;
+	if (datax_sched_holds_io(s))
+		return io_busy(s, "cancel_gates");
+	datax_sched_io_lock(s, &h);
+	pthread_mutex_lock(&s->lock);
+	for (size_t i = 0; i < s->ncmds && !any; i++)
+		any = gate_match(&s->cmds[i], gate_mask) && s->cmds[i].state == CMD_WRITTEN;
+	pthread_mutex_unlock(&s->lock);
+	/* Device time now, to tell a written command that already ran (an
+	 * unreported one stays WRITTEN until prune) from one still in Tick. */
+	fresh = any && !datax_poller_read_time(s);
+	pthread_mutex_lock(&s->lock);
+	now = s->last_hw;
+	/* 1. Finish them, one at a time: a hook may move the table. */
+	for (size_t i = 0; i < s->ncmds; i++) {
+		struct sched_cmd *c = &s->cmds[i];
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_FLUSHED,
+			.tick_status = UINT32_MAX,
+			.cancelled = true,
+		};
+
+		if (!gate_match(c, gate_mask))
+			continue;
+		if (c->state == CMD_WRITTEN && !c->report && fresh && c->hw_ts <= now) {
+			datax_sched_remove(s, c);     /* it ran: as prune() would */
+			i = (size_t)-1;
+			continue;
+		}
+		written = written || c->state == CMD_WRITTEN;
+		res.requested_ticks = c->api_ts;
+		snprintf(res.detail, sizeof(res.detail), "%s", detail ? detail : "cancelled");
+		datax_sched_finish(s, c, &res);
+		i = (size_t)-1;
+	}
+	pthread_mutex_unlock(&s->lock);
+	/* 2. Nothing of theirs is in Tick: no flush. */
+	ret = written ? flush_and_repend(s, &h, "a stream stop", false) : 0;
+	datax_sched_io_unlock(s, &h);
+	if (ret < 0)
+		return datax_error_ret(s->ctx, -ret, "sched",
+				       "cancel_gates: emptying the Tick queue failed (%d)", ret);
+	return 0;
+}
+
+int datax_sched_refeed(struct datax_sched *s)
+{
+	struct datax_io_hold h;
+	bool written;
+	int ret;
+
+	if (!s)
+		return -EINVAL;
+	if (datax_sched_holds_io(s))
+		return io_busy(s, "refeed");
+	datax_sched_io_lock(s, &h);
+	pthread_mutex_lock(&s->lock);
+	written = any_written(s);
+	pthread_mutex_unlock(&s->lock);
+	ret = written ? flush_and_repend(s, &h, "a same-T stream reorder", true) : 0;
+	datax_sched_io_unlock(s, &h);
+	if (ret == 1) {
+		datax_error_set(s->ctx, "sched",
+				"warning: refeed skipped: a written command stayed due within the "
+				"guard margin, so Tick's queue keeps its order (an RX opening may "
+				"follow a TX one at the same T)");
+		return 0;
+	}
+	if (ret < 0)
+		return datax_error_ret(s->ctx, -ret, "sched",
+				       "refeed: emptying the Tick queue failed (%d)", ret);
+	return 0;
 }
 
 /* ---- results ------------------------------------------------------------------ */

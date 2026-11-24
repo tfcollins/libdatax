@@ -12,13 +12,27 @@
 #include "internal.h"
 #include "tick_ops.h"
 
+/* Chips with an FHM pipeline: 0 is chip A (adrv9009-phy), 1 chip B
+ * (adrv9009-phy-b); dev->fhm_ops/fhm_h are indexed by it. */
+#define DATAX_FHM_CHIPS 2u
+
+/* The Tick GPIO bit driving each chip's FHM trigger (Talise TAL_GPIO_0):
+ * chip A's on bit 0 (P3a), chip B's on bit 1 when the Tick's
+ * stream_gate_map names fhm-b (P3b spec decision 7). These are fixed GPIO
+ * lines, not stream gate bits. Only queue_tune drives them (the scheduler
+ * reserves them, sched.c). */
+#define DATAX_FHM_TRIGGER_A 0x1u
+#define DATAX_FHM_TRIGGER_B 0x2u
+#define DATAX_FHM_TRIGGER(chip) ((chip) ? DATAX_FHM_TRIGGER_B : DATAX_FHM_TRIGGER_A)
+
 /* The real phy ops: channel attributes; h is the struct iio_channel *
- * (adrv9009-phy output altvoltage0, the TRX LO). */
+ * (the chip's adrv9009-phy output altvoltage0, the TRX LO). */
 extern const struct datax_tick_ops datax_fhm_iio_ops;
 
-/* Bind ops/h as dev's FHM phy seam (NULL ops detaches). 0, -EINVAL, or
+/* Bind ops/h as chip's FHM phy seam (NULL ops detaches). 0, -EINVAL, or
  * -EBUSY while dev has a scheduler (its hooks use the seam unlocked). */
-int datax_fhm_bind(struct datax_device *dev, const struct datax_tick_ops *ops, void *h);
+int datax_fhm_bind(struct datax_device *dev, unsigned int chip,
+		   const struct datax_tick_ops *ops, void *h);
 
 /* Free dev->fhm (context destroy, after the schedulers are gone). */
 void datax_fhm_free(struct datax_device *dev);

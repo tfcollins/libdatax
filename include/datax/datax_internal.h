@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include <datax/datax.h>
 
@@ -21,6 +22,7 @@ struct datax_internal_stream_stats {
 	unsigned long long overflows, underflows;
 	unsigned long long status_polls; /* status-register polls */
 	bool overflow_detect;            /* the status register is readable */
+	unsigned long long tag_errors;   /* timed RX: block 0 tags that did not parse or anchor */
 };
 
 /* Snapshot of a stream's counters. 0, or -EINVAL for a NULL argument. */
@@ -34,6 +36,16 @@ int datax_internal_stream_stats(const struct datax_stream *s,
 int datax_internal_device_stream_info(const struct datax_device *dev,
 				      enum datax_direction dir, char *name,
 				      size_t len, int *detect);
+
+/* Stream block-I/O seam (ops in src/stream_src.h): replace the libiio
+ * buffer and blocks of a direction's streams with ops/h, for tests driving
+ * a fake DMA; NULL ops restore libiio. Streams copy the binding at create;
+ * the mask, channel lookup and sample-size check still use the device's IIO
+ * streaming device. 0, -EINVAL (bad direction, or ops missing a function
+ * other than status) or -EBUSY while a stream exists in that direction. */
+struct datax_stream_src_ops;
+int datax_internal_stream_bind_source(struct datax_device *dev, enum datax_direction dir,
+				      const struct datax_stream_src_ops *ops, void *h);
 
 /* Tick ops seam (layout in src/tick_ops.h: two function pointers, read then
  * write). Replace the Tick access of a live device with ops/h, for tests
@@ -50,6 +62,12 @@ int datax_internal_tick_bind_fake(struct datax_device *dev,
  * -EBUSY while the device has a scheduler. */
 int datax_internal_fhm_bind_fake(struct datax_device *dev,
 				 const struct datax_tick_ops *ops, void *h);
+/* The same for either chip: chip 0 is chip A (datax_internal_fhm_bind_fake),
+ * chip 1 chip B (adrv9009-phy-b's TRX LO, triggered on Tick GPIO bit 1 when
+ * the Tick's stream_gate_map names fhm-b). 0, -EINVAL (chip > 1, or ops
+ * missing a function), or -EBUSY while the device has a scheduler. */
+int datax_internal_fhm_bind_fake_chip(struct datax_device *dev, unsigned int chip,
+				      const struct datax_tick_ops *ops, void *h);
 
 /* Pause (true) or resume (false) the scheduler's poller: while paused it
  * neither feeds the Tick queue nor drains completions (commit still accepts
@@ -81,6 +99,37 @@ void datax_internal_mcs_force_phase_sync(struct datax_device *dev, bool on);
 /* Whether the Tick reports a fabric PPS: 1, 0, or -errno (-ENODEV without a
  * Tick). */
 int datax_internal_pps_present(const struct datax_device *dev);
+
+/* Parse a Tick stream_gate_map text into out = {present, rx_level, tx_level,
+ * rx_mode, tx_mode, fhm_b, tx_fullmask_only} (-1: role absent). 0, or
+ * -EINVAL for a NULL text or a duplicated role (out then reads as absent). */
+int datax_internal_gate_map_parse(const char *text, int out[7]);
+
+/* Doctor: the stream gate map as parsed, which timed flags are set and why
+ * the others are not, and the capture tag header size, as one line without a
+ * prefix. 0, or -EINVAL. */
+int datax_internal_gate_info(const struct datax_device *dev, char *buf, size_t len);
+
+/* The in-band capture tag (Tick capture.py CaptureHeader), 32 bytes. */
+struct datax_tag {
+	uint32_t magic;
+	uint16_t version;
+	uint8_t header_words, flags;
+	uint64_t capture_tick;
+	uint32_t seq;
+	uint16_t target, command;
+	uint32_t tick_hz, burst;
+};
+
+/* Parse a capture tag. 0, or -EINVAL for a short buffer, a wrong magic or
+ * an unsupported version. */
+int datax_internal_tag_parse(const void *buf, size_t len, struct datax_tag *out);
+
+/* Whole ticks of n sample frames at fs frames/s on a hz Hz timebase:
+ * round-half-up of n * hz / fs, without overflowing 64 bits for the n of a
+ * long capture. */
+unsigned long long datax_internal_frames_to_ticks(unsigned long long n, unsigned long long fs,
+						  unsigned long long hz);
 
 #ifdef __cplusplus
 }

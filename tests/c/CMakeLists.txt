@@ -238,12 +238,30 @@ endif()
 
 # Fake Tick + fake Talise FHM: a test-only shared library (never installed)
 # so C tests link it and Python tests can load it through ctypes.
-add_library(datax_fake_tick SHARED fake_tick.c)
+add_library(datax_fake_tick SHARED fake_tick.c fake_dma.c)
 target_include_directories(datax_fake_tick PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(datax_fake_tick PRIVATE ${DATAX_WARNINGS})
 target_compile_definitions(datax_fake_tick PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(datax_fake_tick PRIVATE Threads::Threads)
+
+# P3b capability probe: the gate-map grammar (no emulator) and the flag matrix
+# on the fake Tick bound to the adrv9009-zu11eg fixture.
+add_executable(test_caps_p3b test_caps_p3b.c)
+target_link_libraries(test_caps_p3b PRIVATE datax datax_fake_tick)
+target_include_directories(test_caps_p3b PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_caps_p3b PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(test_caps_p3b PRIVATE _POSIX_C_SOURCE=200809L)
+add_test(NAME test_gate_map_parse COMMAND test_caps_p3b parse)
+if(DATAX_LIBIIO_BUILD)
+  add_test(NAME test_caps_p3b_matrix
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_caps_p3b> matrix)
+  set_tests_properties(test_caps_p3b_matrix PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 60)
+endif()
 
 # The fake against every golden hdl_model trace (one test per trace), and
 # its own surface/PPS/FHM checks. No emulator needed.
@@ -262,6 +280,17 @@ foreach(tr ${DATAX_TRACES})
   add_test(NAME test_fake_tick_${tn} COMMAND test_fake_tick trace ${tr})
 endforeach()
 add_test(NAME test_fake_tick_unit COMMAND test_fake_tick unit)
+
+# The fake DMA (stream block seam endpoint gated by the fake Tick) and the
+# golden capture-tag vectors it is checked against. No emulator needed.
+add_executable(test_fake_dma test_fake_dma.c)
+target_link_libraries(test_fake_dma PRIVATE datax_fake_tick Threads::Threads)
+target_include_directories(test_fake_dma PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_fake_dma PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(test_fake_dma PRIVATE _POSIX_C_SOURCE=200809L
+  DATAX_TAG_VECTORS="${PROJECT_SOURCE_DIR}/tests/vectors/capture_tags.json")
+add_test(NAME test_fake_dma COMMAND test_fake_dma)
 if(DATAX_LIBIIO_BUILD)
   # The seam: bind the fake to a live device of a fixture without Tick.
   foreach(fx ad936x adrv9009-zu11eg)
@@ -308,7 +337,7 @@ if(DATAX_LIBIIO_BUILD)
     TIMEOUT 120)
   # FHM timed tunes (Task 4): fake Tick + fake Talise FHM on the adrv9009 pair.
   add_executable(test_fhm test_fhm.c)
-  target_link_libraries(test_fhm PRIVATE datax datax_fake_tick Threads::Threads)
+  target_link_libraries(test_fhm PRIVATE datax datax_fake_tick iio_dep Threads::Threads)
   target_include_directories(test_fhm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/src)
   target_compile_options(test_fhm PRIVATE ${DATAX_WARNINGS})
@@ -319,6 +348,21 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_fhm PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # A context with only adrv9009-phy-b (the single-phy fixture, renamed at
+  # configure time): chip B's FHM seam binds by name, chip A's stays unbound.
+  file(READ ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-single.xml DATAX_PHYB_XML_TEXT)
+  string(REPLACE "name=\"adrv9009-phy\"" "name=\"adrv9009-phy-b\""
+    DATAX_PHYB_XML_TEXT "${DATAX_PHYB_XML_TEXT}")
+  set(DATAX_PHYB_XML ${CMAKE_CURRENT_BINARY_DIR}/adrv9009-phyb-only.xml)
+  file(WRITE ${DATAX_PHYB_XML} "${DATAX_PHYB_XML_TEXT}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-single.xml)
+  add_test(NAME test_fhm_phyb
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${DATAX_PHYB_XML} $<TARGET_FILE:test_fhm> phyb)
+  set_tests_properties(test_fhm_phyb PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 60)
   # Tron-like timing (wall-clock fake clock, 200 us per Tick access, 460 us
   # per FHM access): no tune of the hardware hop schedules completes late.
   add_test(NAME test_fhm_realtime
@@ -327,6 +371,14 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_fhm_realtime PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 180)
+  # P3b Task 6: chip B's FHM on Tick GPIO bit 1 (fhm-b in the gate map),
+  # one pipeline per chip.
+  add_test(NAME test_fhm_chipb
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_fhm> chipb)
+  set_tests_properties(test_fhm_chipb PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 120)
   # The opt-in FHM trace: off by default, one line per event with
   # DATAX_TRACE=fhm (hardware diagnosis of stage-late tunes).
   add_test(NAME test_fhm_trace
@@ -351,6 +403,63 @@ if(DATAX_LIBIIO_BUILD)
   set_tests_properties(test_sched_hooks PROPERTIES
     ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
     TIMEOUT 120)
+  # Timed streams (P3b Task 3): start_at, the targeted cancel and re-feed,
+  # forced open, TX preload, on the fake Tick and the fake DMA at 1 MSPS.
+  # Compiled from the library sources (it reads the scheduler's table and
+  # enqueues raw commands); one ctest per test.
+  add_executable(test_stream_timed test_stream_timed.c ${DATAX_SOURCES})
+  target_link_libraries(test_stream_timed PRIVATE iio_dep datax_fake_tick Threads::Threads)
+  target_include_directories(test_stream_timed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
+  target_compile_options(test_stream_timed PRIVATE ${DATAX_WARNINGS})
+  target_compile_definitions(test_stream_timed PRIVATE _POSIX_C_SOURCE=200809L
+    DATAX_TAG_VECTORS="${PROJECT_SOURCE_DIR}/tests/vectors/capture_tags.json")
+  set(DATAX_STREAM_TIMED_TESTS
+    test_start_at_guard_margin_late test_start_at_order test_start_at_rx_first_frame_at_T
+    test_start_at_late_at_dispatch_fails test_start_at_tx_late_on_submit
+    test_start_at_tx_host_late
+    test_held_slot_open_never_delivers_shifted test_refeed_keeps_near_edge
+    test_stop_cancels_open test_cancel_keeps_others test_stop_armed_rx_bounded
+    test_start_after_aborted_start_at_open test_start_forces_open
+    test_start_no_map_no_tick_writes test_start_at_enotsup_without_map
+    test_start_at_ealready test_start_at_refuses_uncommitted_batch
+    test_start_at_report_spacing_restores_gate test_spacing_ignores_unreported
+    test_start_at_tx_partial_mask_enotsup test_start_at_clears_idle_overflow
+    test_same_t_rx_open_before_tx test_start_at_tx_cyclic test_start_at_tx_stream_preload
+    test_tx_preload_rules test_sched_flush_fails_armed test_sched_destroy_while_armed
+    test_stop_armed_tx_bounded test_start_at_tx_failed_commit_transmits_nothing
+    test_held_slot_tx_open_fails test_stop_after_tx_open_ran_no_flush
+    test_destroy_from_event_callback_refused
+    test_tag_vectors test_mode_bit_tag_ignored test_frames_to_ticks_no_overflow
+    test_block0_tag_parsed_stripped test_strip_by_channel_count test_derived_timestamps
+    test_overflow_zeroes_timestamps test_tag_bad_magic_unanchored test_tag_flags_rejected
+    test_untimed_ts_zero test_zero_copy_block0 test_soft_offset_timestamps
+    test_gate_tx_burst test_gate_rx_enotsup test_gate_untimed_einval
+    test_gate_before_open_einval test_gate_other_device_einval test_gate_no_cap_enotsup
+    test_gate_guard_margin_late test_gate_cancelled_by_stop
+    test_start_at_commit_fail_destroy test_start_at_commit_fail_retry
+    test_lost_block_unknown_timestamps test_no_timestamp_cap_no_tag
+    test_start_at_refeed_fail_undone)
+  foreach(tt ${DATAX_STREAM_TIMED_TESTS})
+    add_test(NAME stream_timed_${tt}
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml
+              $<TARGET_FILE:test_stream_timed> ${tt})
+    set_tests_properties(stream_timed_${tt} PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      LABELS stream_timed TIMEOUT 120)
+  endforeach()
+  if(VALGRIND)
+    add_test(NAME stream_timed_destroy_valgrind
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+              ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml
+              ${VALGRIND} --error-exitcode=1 --leak-check=full
+              --errors-for-leak-kinds=definite $<TARGET_FILE:test_stream_timed>
+              test_sched_destroy_while_armed)
+    set_tests_properties(stream_timed_destroy_valgrind PROPERTIES
+      ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+      TIMEOUT 300)
+  endif()
   # MCS verification and PHASE_COHERENT (Task 5): the fsm fixture, attributes
   # edited through libiio to put a phy in each failing state. Compiled from
   # the library sources: it calls the unexported flag refresh.

@@ -29,7 +29,9 @@ def _np():
 
 @dataclass(frozen=True)
 class BlockInfo:
-    """Describes the first block a ``recv`` touched."""
+    """Describes the first block a ``recv`` touched. ``timestamp_ticks`` is the
+    device time of its first delivered sample, 0 when unknown (an untimed
+    stream, or any block after an overflow until the next ``start_at``)."""
     timestamp_ticks: int
     discontinuous: bool
     valid_samples: int
@@ -97,6 +99,19 @@ class _Stream:
             raise self._ctx._error(rc)
         self._started = True
 
+    def start_at(self, when):
+        """Start at device time ``when`` (ticks); returns the stream, so
+        ``with rx.start_at(t):`` works (entering a started stream does not
+        start it again). ``LateError`` when ``when`` is inside the guard margin,
+        ``CapabilityError`` without the P3b gate capabilities. A late opening
+        is reported by a later ``recv()`` / ``send()`` (``LateError``)."""
+        h = self._live()
+        rc = get_lib().datax_stream_start_at(h, int(when))
+        if rc:
+            raise self._ctx._error(rc)
+        self._started = True
+        return self
+
     def stop(self):
         """Stop the stream. One-shot TX drains first and may raise on timeout."""
         h = self._live()
@@ -125,7 +140,8 @@ class _Stream:
             raise err
 
     def __enter__(self):
-        self.start()
+        if not self._started:
+            self.start()
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -224,7 +240,9 @@ class TxStream(_Stream):
         Values are rounded to int16; out-of-range values or a wrong shape
         raise ``ValueError``. Returns the number of instants accepted (a
         partial count if the wait for a free block timed out after some data
-        was taken)."""
+        was taken). On an unstarted stream this preloads: nothing is
+        transmitted until ``start()`` / ``start_at()``. A failed timed stream
+        raises ``LateError`` (opening late) or ``Error`` (ECANCELED)."""
         h = self._live()
         raw = self._to_raw(samples)
         rc = get_lib().datax_stream_send(h, raw.ctypes.data, raw.shape[0],

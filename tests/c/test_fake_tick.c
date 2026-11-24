@@ -17,6 +17,7 @@
 #include <datax/datax_internal.h>
 
 #include "check.h"
+#include "fake_dma.h"
 #include "fake_tick.h"
 #include "internal.h"
 
@@ -589,11 +590,157 @@ static void unit_fhm(void)
 	fake_tick_free(f);
 }
 
+/* A STREAM_GATE command: target 0x0200 | bit, args {bit, level, 0, 0}. */
+static void push_gate(struct fake_tick *f, uint32_t seq, uint64_t ts, uint32_t flags,
+		      uint32_t bit, uint32_t level)
+{
+	char b[256];
+
+	csv(b, sizeof(b), 3, (uint16_t)(0x200 | bit), ts, flags, seq, bit, level, 0, 0);
+	wr(f, "command_descriptor", b);
+}
+
+static int rd_err(struct fake_tick *f, const char *attr)
+{
+	char buf[128];
+
+	return fake_tick_ops.read(f, attr, buf, sizeof(buf));
+}
+
+static void unit_gate_map_attr(void)
+{
+	struct fake_tick *f = fake_tick_new(NULL);
+	const char *map = "rx-dma,tx-dma,rx-mode,tx-mode";
+	char buf[128];
+
+	/* absent by default: -ENOENT on read and write, no access counted */
+	CHECK(rd_err(f, "stream_gate_map") == -ENOENT);
+	CHECK(fake_tick_ops.write(f, "stream_gate_map", "x") == -ENOENT);
+	fake_tick_set_gate_map(f, map);
+	CHECK(fake_tick_ops.read(f, "stream_gate_map", buf, sizeof(buf)) == (int)strlen(map) + 1);
+	CHECK(!strcmp(buf, "rx-dma,tx-dma,rx-mode,tx-mode\n"));
+	CHECK(fake_tick_ops.write(f, "stream_gate_map", "x") == -EACCES);   /* read-only */
+	/* the map is copied */
+	fake_tick_set_gate_map(f, "rx-dma,tx-dma,rx-mode,tx-mode,fhm-b");
+	CHECK(fake_tick_ops.read(f, "stream_gate_map", buf, sizeof(buf)) > 0);
+	CHECK(strstr(buf, ",fhm-b\n") != NULL);
+	fake_tick_set_gate_map(f, NULL);
+	CHECK(rd_err(f, "stream_gate_map") == -ENOENT);
+
+	/* the tag attributes can be hidden, as on an image without the tagger */
+	CHECK(rd(f, "capture_tag_header_bytes") == 32 && rd(f, "capture_tag_enable") == 0);
+	fake_tick_hide_tag_attrs(f, true);
+	CHECK(rd_err(f, "capture_tag_enable") == -ENOENT);
+	CHECK(rd_err(f, "capture_tag_header_bytes") == -ENOENT);
+	CHECK(rd_err(f, "capture_tag_magic") == -ENOENT);
+	CHECK(fake_tick_ops.write(f, "capture_tag_enable", "1") == -ENOENT);
+	CHECK(rd(f, "queue_depth") == 16);                       /* the rest is untouched */
+	fake_tick_hide_tag_attrs(f, false);
+	wr(f, "capture_tag_enable", "1");
+	CHECK(rd(f, "capture_tag_enable") == 1);
+	fake_tick_free(f);
+}
+
+struct gate_log {
+	struct fake_tick *f;
+	unsigned int n;
+	uint32_t old[8], nw[8];
+	uint64_t at[8];
+	uint32_t tag_count[8];
+};
+
+static void on_gate(void *user, uint32_t old_level, uint32_t new_level, uint64_t ticks)
+{
+	struct gate_log *g = user;
+	struct fake_tick_tag t;
+
+	CHECK(g->n < 8);
+	g->old[g->n] = old_level;
+	g->nw[g->n] = new_level;
+	g->at[g->n] = ticks;
+	/* lock held: the locked accessors work, and the latch is already new */
+	CHECK(fake_tick_gate_tag_locked(g->f, 2, &t) == 0);
+	g->tag_count[g->n++] = t.count;
+}
+
+static void unit_gate_hook(void)
+{
+	struct fake_tick *f = fake_tick_new(NULL);
+	struct gate_log g = { .f = f };
+
+	fake_tick_set_gate_hook(f, on_gate, &g);
+	push_gate(f, 1, 50, F_DROP, 0, 1);
+	push_gate(f, 2, 60, F_DROP, 2, 1);
+	push_gate(f, 3, 70, F_DROP, 0, 0);
+	push_gate(f, 4, 80, F_DROP, 2, 1);      /* no change: no call */
+	push_gate(f, 5, 90, F_DROP, 0, 0);      /* no change: no call */
+	fake_tick_advance(f, 200);
+	CHECK(g.n == 3);
+	CHECK(g.old[0] == 0 && g.nw[0] == 1 && g.at[0] == 50);
+	CHECK(g.old[1] == 1 && g.nw[1] == 5 && g.at[1] == 60);
+	CHECK(g.old[2] == 5 && g.nw[2] == 4 && g.at[2] == 70);
+	CHECK(g.tag_count[0] == 0 && g.tag_count[1] == 1 && g.tag_count[2] == 1);
+	CHECK(fake_tick_stream_gate(f) == 4);
+	/* an arm-release pulse raises its gate too */
+	fake_tick_set_gate_hook(f, NULL, NULL);
+	push_gate(f, 6, 300, F_DROP, 1, 1);
+	fake_tick_advance(f, 200);
+	CHECK(g.n == 3 && fake_tick_stream_gate(f) == 6);
+	fake_tick_free(f);
+}
+
+static void unit_per_gate_tag_late_flag(void)
+{
+	struct fake_tick *f = fake_tick_new(NULL);
+	struct fake_tick_tag t;
+
+	CHECK(fake_tick_gate_tag(f, 8, &t) == -EINVAL);
+	CHECK(fake_tick_gate_tag(f, 0, &t) == 0 && t.count == 0 && t.ticks == 0 && !t.late);
+	/* on time: gate 0 */
+	push_gate(f, 9, 50, F_DROP, 0, 1);
+	fake_tick_advance(f, 100);
+	CHECK(fake_tick_gate_tag(f, 0, &t) == 0);
+	CHECK(t.count == 1 && t.ticks == 50 && t.seq == 9 && t.target == 0x200 && t.cmd == 3);
+	CHECK(!t.late);
+	/* late on submit, LATE_EXECUTE_NOW: gate 2 latches the tick it ran at */
+	push_gate(f, 10, 40, F_NOW, 2, 1);
+	CHECK(fake_tick_gate_tag(f, 2, &t) == 0);
+	CHECK(t.count == 1 && t.ticks == 100 && t.seq == 10 && t.target == 0x202 && t.late);
+	/* the latches are per gate: gate 0 kept its own */
+	CHECK(fake_tick_gate_tag(f, 0, &t) == 0);
+	CHECK(t.count == 1 && t.seq == 9 && !t.late);
+	CHECK(fake_tick_gate_tag(f, 1, &t) == 0 && t.count == 0);
+	/* the shared registers follow the last latch */
+	CHECK(rd(f, "edge_capture_ticks") == 100 && rd(f, "edge_capture_target_id") == 0x202);
+	/* a second on-time latch on gate 0 clears late and counts */
+	push_gate(f, 11, 300, F_DROP, 0, 1);       /* already high: still latches */
+	fake_tick_advance(f, 300);
+	CHECK(fake_tick_gate_tag(f, 0, &t) == 0);
+	CHECK(t.count == 2 && t.ticks == 300 && t.seq == 11 && !t.late);
+	/* a repeat dispatched late is late; its next occurrence on time is not */
+	{
+		char b[256];
+
+		CHECK(fake_tick_now(f) == 400);
+		csv(b, sizeof(b), 3, 0x200, 300, F_REPEAT | F_NOW, 12, 0, 1, 2, 100);
+		wr(f, "command_descriptor", b);
+		CHECK(fake_tick_gate_tag(f, 0, &t) == 0);
+		CHECK(t.count == 3 && t.seq == 12 && t.ticks == 400 && t.late);
+		fake_tick_advance(f, 100);
+		CHECK(fake_tick_gate_tag(f, 0, &t) == 0);
+		CHECK(t.count == 4 && t.seq == 12 && t.ticks == 500 && !t.late);
+	}
+	fake_tick_free(f);
+}
+
 static int unit(void)
 {
 	unit_surface();
 	unit_bad_and_unsupported();
 	unit_stream_gate_capture();
+	unit_gate_map_attr();
+	unit_gate_hook();
+	unit_per_gate_tag_late_flag();
 	unit_pps();
 	unit_hooks();
 	unit_marker();
@@ -603,6 +750,73 @@ static int unit(void)
 }
 
 /* ---- the libdatax seam on a live device ----------------------------------- */
+
+/* The stream block seam on a live device: a fake DMA stands in for libiio. */
+static void seam_stream_source(struct datax_device *dev)
+{
+	struct fake_tick *t = fake_tick_new(NULL);
+	struct fake_dma_config dc = fake_dma_default_config(1000000);
+	struct fake_dma *d;
+	struct datax_stream_config sc = { .direction = DATAX_RX, .channel_mask = 1,
+					  .block_samples = 16, .block_count = 4 };
+	struct datax_stream *s = NULL;
+	struct datax_stream_src_ops bad = fake_dma_rx_ops;
+	int16_t buf[16 * 2];
+	char name[64];
+
+	/* a device without a streaming device has no seam to bind */
+	if (datax_internal_device_stream_info(dev, DATAX_RX, name, sizeof(name), NULL))
+		goto out;
+	fake_tick_set_gate_map(t, "rx-dma,tx-dma,rx-mode,tx-mode");
+	d = fake_dma_new(t, &dc);
+	CHECK(d != NULL);
+
+	CHECK(datax_internal_stream_bind_source(NULL, DATAX_RX, &fake_dma_rx_ops, d) == -EINVAL);
+	CHECK(datax_internal_stream_bind_source(dev, (enum datax_direction)5, &fake_dma_rx_ops,
+						d) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(dev->ctx),
+		     "bad direction") != NULL);
+	bad.dequeue = NULL;
+	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, &bad, d) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(dev->ctx),
+		     "ops need open") != NULL);
+	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, &fake_dma_rx_ops, d) == 0);
+
+	/* the mask and sample-size check still use the emulator device */
+	CHECK(datax_stream_create(dev, &sc, &s) == 0);
+	/* a bound stream keeps its binding; rebinding is refused while one exists */
+	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, NULL, NULL) == -EBUSY);
+	CHECK(strstr(datax_context_get_last_error(dev->ctx),
+		     "RX stream exists; destroy it first") != NULL);
+	CHECK(datax_stream_start(s) == 0);
+	{
+		struct fake_dma_op op[8];
+		size_t n = fake_dma_log(d, 0, op, 8);
+
+		CHECK(n == 6 && op[0].kind == FAKE_DMA_OPEN && op[0].block_bytes == 16 * 4 &&
+		      op[0].nblocks == 4);
+		CHECK(op[1].kind == FAKE_DMA_ENQUEUE && op[4].kind == FAKE_DMA_ENQUEUE &&
+		      op[5].kind == FAKE_DMA_START);
+	}
+	fake_tick_advance(t, 2000);                       /* frames 0..20: 1..16 fill block 0 */
+	CHECK(datax_stream_recv(s, buf, 16, NULL, 1000) == 16);
+	for (int k = 0; k < 16; k++)
+		CHECK(buf[2 * k] == k + 1 && buf[2 * k + 1] == 0);
+	fake_tick_advance(t, 7000);                       /* every block full again: the drain ends */
+	CHECK(datax_stream_stop(s) == 0);
+	{
+		struct fake_dma_op op[16];
+		size_t n = fake_dma_log(d, 0, op, 16);
+
+		CHECK(op[n - 1].kind == FAKE_DMA_STOP);
+	}
+	datax_stream_destroy(s);
+	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, NULL, NULL) == 0);
+	fake_dma_free(d);
+	printf("seam: stream source ok\n");
+out:
+	fake_tick_free(t);
+}
 
 static int seam(void)
 {
@@ -659,6 +873,8 @@ static int seam(void)
 	CHECK(strstr(datax_context_get_last_error(ctx), "no Tick scheduler") != NULL);
 	CHECK(datax_caps_get_limit(datax_device_get_caps(dev), DATAX_LIMIT_TICK_HZ, &v) == 0);
 	CHECK(v == 0);
+
+	seam_stream_source(dev);
 
 	datax_context_destroy(ctx);
 	fake_tick_free(f);

@@ -7,9 +7,12 @@
 
 #include <datax/datax.h>
 
+#include "tick_ops.h"
+
 struct iio_device;
 struct datax_stream;
 struct datax_tick_ops;
+struct datax_stream_src_ops;
 
 enum datax_family {
 	DATAX_FAMILY_UNKNOWN,
@@ -29,6 +32,15 @@ struct datax_caps {
 	 * has the GPIO target and a usable queue; the phy has the FHM
 	 * attributes; both phys have jesd204_fsm_ctrl. */
 	bool tick_usable, fhm_attrs, mcs_attrs;
+	/* P3b inputs (caps.c): the Tick capability bitmap, its stream gate map
+	 * (gate_map_rejected: the attribute was there but did not parse),
+	 * capture_tag_header_bytes, and whether capture_tag_enable, _header_bytes
+	 * and _magic are all readable. */
+	unsigned int tick_bitmap;
+	struct datax_gate_map gate_map;
+	bool gate_map_rejected;
+	unsigned long long tag_bytes;
+	bool tag_attrs;
 };
 
 struct datax_context {
@@ -57,23 +69,30 @@ struct datax_device {
 	struct datax_stream *stream[2];
 	/* Status-register detection seen by streams: 0 unknown, 1 yes, 2 no. */
 	unsigned char status_detect[2];
+	/* Stream block-I/O seam (stream_src.h), per direction: NULL ops mean
+	 * libiio. A stream copies them at create; tests bind a fake DMA
+	 * (datax_internal_stream_bind_source), under ctx->lock. */
+	const struct datax_stream_src_ops *src_ops[2];
+	void *src_h[2];
 	/* Tick seam (tick_ops.h): every Tick access goes through tick_ops with
 	 * tick_h. Bound at fold time to the libiio ops on the context's Tick
 	 * device; NULL ops when there is none. Tests rebind a fake. */
 	const struct datax_tick_ops *tick_ops;
 	void *tick_h;
-	/* FHM phy seam (fhm.c): the adrv9009-phy (chip A) TRX LO channel
-	 * attributes, through ops of the Tick seam's shape. Bound at fold time
-	 * to the libiio ops on phy[0]'s output channel altvoltage0; NULL when
-	 * there is none. Tests rebind a fake (datax_internal_fhm_bind_fake).
-	 * Like tick_ops, never rebound while a scheduler exists. */
-	const struct datax_tick_ops *fhm_ops;
-	void *fhm_h;
-	/* Hop staging and the tune pipeline (fhm.c), created by the first
-	 * stage_hop_table, freed with the device. */
+	/* FHM phy seams (fhm.c), indexed by chip (0 chip A, 1 chip B): each
+	 * phy's TRX LO channel attributes, through ops of the Tick seam's
+	 * shape. Bound at fold time to the libiio ops on phy[chip]'s output
+	 * channel altvoltage0; NULL when there is none. Chip B's is used only
+	 * when the Tick's gate map names fhm-b. Tests rebind a fake
+	 * (datax_internal_fhm_bind_fake{,_chip}). Like tick_ops, never rebound
+	 * while a scheduler exists. */
+	const struct datax_tick_ops *fhm_ops[2];
+	void *fhm_h[2];
+	/* Hop staging and the tune pipelines, one per chip (fhm.c), created by
+	 * the first stage_hop_table, freed with the device. */
 	struct datax_fhm *fhm;
-	/* A single-chip (chip A) tune has executed: PHASE_COHERENT no longer
-	 * holds (spec decision 7; Task 5 reads it). Under ctx->lock. */
+	/* A single-chip tune (either chip) has executed: PHASE_COHERENT no
+	 * longer holds (P3a spec decision 7; Task 5 reads it). Under ctx->lock. */
 	bool single_chip_tuned;
 	/* The device's one scheduler (sched.c), or NULL; set and cleared under
 	 * ctx->lock. While it exists the Tick seam cannot be rebound. */

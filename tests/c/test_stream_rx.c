@@ -173,7 +173,8 @@ static void test_start_stop_rules(void)
 	CHECK(datax_internal_stream_stats(s, &st) == 0 && !st.enabled);
 	CHECK(datax_stream_stop(s) == 0);
 	CHECK(datax_stream_start_at(s, 1000) == -ENOTSUP);
-	CHECK(strcmp(err(ctx), "timed start arrives with the scheduler (P3)") == 0);
+	/* P3b: no Tick stream gate map on this fixture */
+	CHECK(strstr(err(ctx), "needs DATAX_CAP_RX_ARM") != NULL);
 	CHECK(datax_internal_stream_stats(NULL, &st) == -EINVAL);
 	CHECK(datax_internal_stream_stats(s, NULL) == -EINVAL);
 	datax_stream_destroy(s);

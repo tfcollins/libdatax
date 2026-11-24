@@ -8,6 +8,11 @@ Upstream: Tick repository, revision `ed6c8a4c955d1933eb5da33f3c1fefcb72d32123`.
 Licence: MIT (declared in Tick's `pyproject.toml`; the UAPI header carries
 `SPDX-License-Identifier: MIT`; the two Python files carry no per-file header).
 
+- `tests/vendor/tick/capture.py`
+  - upstream: `src/tick/capture.py`
+  - revision: `ed6c8a4c955d1933eb5da33f3c1fefcb72d32123`
+  - licence: MIT (SPDX header in file)
+  - sha256: `49328e3f0e50cc42fcab619622cedce27afecad640569994473c9a845608b384`
 - `tests/vendor/tick/descriptor.py`
   - upstream: `src/tick/descriptor.py`
   - revision: `ed6c8a4c955d1933eb5da33f3c1fefcb72d32123`
@@ -36,7 +41,9 @@ Licence: MIT (declared in Tick's `pyproject.toml`; the UAPI header carries
 
 `tests/vendor/tick/__init__.py` is a local, empty addition that does not come
 from upstream; it only makes the directory importable and is not hashed.
-`scheduler.py` is vendored only because `hdl_model.py` imports it.
+`scheduler.py` is vendored only because `hdl_model.py` imports it. `capture.py`
+is the capture-tag header codec; `tests/vectors/gen_tag_vectors.py` drives it
+to write the golden `tests/vectors/capture_tags.json` (see below).
 
 ## Golden Tick traces
 
@@ -53,6 +60,17 @@ step says `"source": "rtl"` with the RTL line it follows, and the trace's
 top-level `source` is `rtl`. The generator's register-visibility rules (also
 listed in each trace) are not model changes: they map model state onto what
 the Tick driver's attributes show.
+
+## Golden capture-tag vectors
+
+`tests/vectors/capture_tags.json` is generated, not copied:
+`tests/vectors/gen_tag_vectors.py` drives the vendored `capture.py`
+(`build_capture_header`, `parse_capture_header`) and records each case's
+inputs and the 32 header bytes. It lives outside `tests/traces/`, whose
+`*.json` glob registers every file as a fake-Tick trace. The fake DMA's tag
+encoder (`tests/c/fake_dma.c`) is checked byte for byte against every positive
+case; `tests/python/test_tag_vectors.py` regenerates the file and fails if it
+is stale.
 
 The emulator fixture `tests/emu/ad936x.xml` comes from pyadi-iio (see
 `tests/emu/README.md`) under pyadi-iio's licence: the `LICENSE` file at the

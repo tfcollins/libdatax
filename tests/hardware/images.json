@@ -24,21 +24,26 @@
       }
     },
     "timed-dma": {
-      "description": "hopcap timed-dma profile (P3b): hopcap-sfp plus the Tick DMA gates, the RX capture tagger and the chip-B FHM route, with the stock TX DMA to the DAC restored (vrt49 VRT_DAC_TX_ENABLE=0); P3b timed streams, P3a timed control, P2 incl. TX and loopback",
+      "description": "hopcap timed-dma profile (P3b): hopcap-sfp plus the Tick DMA gates, the RX capture tagger and the chip-B FHM route, with the stock TX DMA to the DAC restored (vrt49 VRT_DAC_TX_ENABLE=0), Tick clocked from core_clk_a (HMC7044 ch6, 122.88 MHz, locked to the sample clock; datax_sdk_sdr#40 option 1); P3b timed streams, P3a timed control, P2 incl. TX and loopback",
       "pps": "internal",
-      "xsa": "44cce693e651801ea28e82062a1228e0f6114b4f247743fb8762aced6c0ac43a",
+      "xsa": "fca16ba7e70fc0a284292537ce2b995b87b0aa4fd371c57e49e884e2140fe7ca",
       "stream_gate_map": "rx-dma,tx-dma,rx-mode,tx-mode,fhm-b,tx-start-fullmask-only",
       "provenance": {
         "hopcap": {
           "branch": "p3b-timed-dma",
-          "revision": "c342514ed067faf41b851f51af5f854aa0503be4",
-          "built_from": "36a171057711260cc213b8d711b200b78fc60518",
-          "bit_xsa_built_from": "73793f3fd84ab73835487df8e4277f49932c51eb",
-          "profile": "timed-dma"
+          "revision": "daebc8161b82e03f6628fd03d55d6e298ab65a06",
+          "built_from": "daebc8161b82e03f6628fd03d55d6e298ab65a06",
+          "bit_xsa_built_from": "daebc8161b82e03f6628fd03d55d6e298ab65a06",
+          "profile": "timed-dma",
+          "build_env": {
+            "VRT_DAC_TX_ENABLE": "0",
+            "TICK_TIMEBASE_CLK": "core_clk_a"
+          },
+          "timing": "routed WNS +0.110 ns, WHS +0.010 ns"
         },
         "tick": {
           "branch": "p3b-spike-gate",
-          "revision": "1787c33f09c62db66bd93580d52ec81414f2de2f"
+          "revision": "841638f5c92fad5dda26b407c7004d57870361cd"
         },
         "vrt49": {
           "branch": "p3b-vrt-dac-tx-switch",
@@ -48,10 +53,10 @@
         }
       },
       "files": {
-        "system_top.bit": "bdb8f07bf1c84fdc9ea34c6ec3012c072cbae9bf3ffe6bade8e046e5105ef94e",
+        "system_top.bit": "ee81f0697ee3d5920ace8dd82836b0f04aefcf49fc27f831b4fd77cb4c8ff204",
         "psu_init.tcl": "529576b333b069aaaf159c96a1ece594f1722cdea7a07a3ea5f6d4d0eef5f8f8",
-        "Image": "24b15fc776050d03df0fac927b53f914240b278fb04e9256ce8bb6d818f1e03b",
-        "system.dtb": "2ca39993a80e9e1351a3ce0756f756dafb45a706392a15a73c89eb957cffdc7c"
+        "Image": "69c3a381e6bf924ce4864abb800abe4bf8f66f90437719f7d4ea8ee922718aa7",
+        "system.dtb": "2d42cb5fb8627e4eb882f9c80aebc334519b57802adb407c3b947b73924278f8"
       }
     }
   }

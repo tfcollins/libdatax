@@ -119,11 +119,11 @@ completion records and chip B's PLL readback. Throughput is never asserted.
   `start_at` mutes (G2/G3 ruling 1) plus the commanded offset, +-1 sample;
   the gap length and the two residuals must agree within 1 sample too.
   Contiguity is proven by matching the whole capture against the tone at one
-  lag (a closed gate mutes, it does not pause). Edge times are derived from
-  block 0's hardware-anchored timestamp plus the sample index; libdatax's own
-  later timestamps read 0 there (see below) and are only checked where
-  nonzero. The RX ring is 4 blocks of 3 Mi frames (48 MiB, 51 ms), all
-  enqueued before T.
+  lag (a closed gate mutes, it does not pause). Every block read is one of
+  the 4 enqueued before T (3 Mi frames each: 48 MiB, 51 ms), so each must
+  carry libdatax's derived timestamp, not discontinuous, equal to the
+  suite's own derivation from block 0's tag. The start mute measured from
+  the edges is recorded beside the assumed 3.
 - `test_chip_b_lo_unmoved_by_fhm_enable` (plan gap 4): with chip B's FHM off
   and its LO parked at 2.43 GHz, `stage_hop_table` (which enables FHM on both
   chips when the map names `fhm-b`) must leave chip B's live PLL there.
@@ -132,9 +132,10 @@ completion records and chip B's PLL readback. Throughput is never asserted.
   move.
 
 Over `ip:` the host cannot drain 245.76 MSPS: the ring enqueued before T fills
-and the DMA overflows before the host reads block 0. libdatax keeps block 0's
-timestamp (its tag anchors it and nothing precedes it) and marks block 1
-discontinuous with every later timestamp 0, so only block 0 (and sample
-positions derived from it) carry time here. On a v0 iiod the kernel ring is 4
+and the DMA overflows before the host reads block 0. Every block enqueued
+before T is filled back to back from the release, so libdatax attributes an
+overflow seen while those blocks are taken to the first re-armed block
+(block `block_count`): the pre-T blocks keep their timestamps, and that block
+and every later one read discontinuous with `timestamp_ticks = 0`. On a v0 iiod the kernel ring is 4
 x `block_samples` whatever `block_count` asks for, so the suite always uses
 4 blocks.

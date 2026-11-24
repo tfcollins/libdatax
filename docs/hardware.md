@@ -220,9 +220,10 @@ against Tick's edge capture, the first-sample offset of a TX pattern through
 the framer loopback over 10 runs (within +-1 sample: REQ-TEST-023, and the
 image's release latency), a TX burst gated off and on at 20 ms through the
 loopback, and chip B's FHM (timed tunes with PLL readback; enabling FHM must
-not move its LO). Over `ip:` only block 0 carries a timestamp: the ring
-enqueued before T overflows before the host reads it, so later blocks read
-`timestamp_ticks = 0`. See `tests/hardware/README.md` for the details.
+not move its LO). Over `ip:` only the blocks enqueued before T carry
+timestamps: the ring overflows before the host reads it, and libdatax
+attributes that to the first re-armed block, which reads discontinuous with
+`timestamp_ticks = 0` from there on. See `tests/hardware/README.md` for the details.
 
 ## Troubleshooting timed tunes
 

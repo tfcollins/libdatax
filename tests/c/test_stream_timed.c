@@ -1876,13 +1876,25 @@ static void test_overflow_zeroes_timestamps(void)
 	s = stream(&x, DATAX_RX, 0x1, false);
 	T = at(&x, 20);
 	CHECK(datax_stream_start_at(s, T) == 0);
-	step_to(&x, T + 2 * BS * FT, 1 * MS);
+	/* take the pre-T blocks as they fill (no ring-full overflow) */
+	step_to(&x, T + 2 * BS * FT + BS * FT / 2, 1 * MS);
 	recv_n(s, BS - 8, 1, &info);
 	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
-	fake_dma_inject_overflow(x.d, 2);
+	recv_n(s, BS, 1, &info);
+	CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + BS) * FT);
+	step_to(&x, now(&x) + 2 * BS * FT, 1 * MS);
+	for (unsigned int b = 2; b < NB; b++) {
+		recv_n(s, BS, 1, &info);
+		CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + b * BS) * FT);
+	}
+	fake_dma_inject_overflow(x.d, 2);             /* lands in block NB, a re-armed one */
 	step_to(&x, now(&x) + 4 * BS * FT, 1 * MS);
 	msleep(150);                                  /* past the status rate limit */
-	recv_n(s, BS, 1, &info);
+	{
+		static int16_t gap[BS * 2];               /* block NB holds the gap itself */
+
+		CHECK(datax_stream_recv(s, gap, BS, &info, 3000) == (int)BS);
+	}
 	CHECK(info.discontinuous && info.timestamp_ticks == 0);
 	recv_n(s, BS, 1, &info);                      /* sticky: no new overflow */
 	CHECK(info.discontinuous && info.timestamp_ticks == 0);
@@ -1902,13 +1914,29 @@ static void test_overflow_zeroes_timestamps(void)
 	fx_close(&x);
 }
 
-/* S4: the ring fills after T and the DMA overflows before the host takes
- * block 0 (always so at native rates over ip:, where the status poll runs
- * after the block's transfer, well past the 100 ms rate limit of the clear
- * in start_at). Block 0 is anchored by its own tag and nothing precedes it,
- * so it keeps its timestamp; the overflow its poll saw makes block 1
- * discontinuous, and the timestamps unknown from there (sticky). */
-static void test_ring_overflow_before_block0_keeps_its_timestamp(void)
+/* Take the NB pre-T blocks of a release (block 0 tagged): each keeps its
+ * derived timestamp and is not discontinuous, whatever the polls saw. */
+static void pre_t_blocks_clean(struct datax_stream *s, unsigned long long T)
+{
+	struct datax_block_info info;
+
+	CHECK(recv_n(s, BS - 8, 1, &info) == T / FT + 9);
+	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
+	CHECK(info.valid_samples == BS - 8);
+	for (unsigned int b = 1; b < NB; b++) {
+		CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + b * BS);
+		CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + b * BS) * FT);
+	}
+}
+
+/* S4 ruling: every block enqueued before T is filled back to back from the
+ * release, so blocks 0..NB-1 are contiguous by construction. An overflow
+ * seen while they are taken (here the natural one: the ring fills and the
+ * DMA overflows before the host takes block 0, as at native rates over ip:,
+ * where the poll runs past the 100 ms rate limit of start_at's clear) is
+ * attributed to block NB, the first re-armed one: it is discontinuous with
+ * timestamp 0, and so is every later block (sticky). */
+static void test_ring_overflow_attributed_to_first_rearmed_block(void)
 {
 	struct fx x;
 	struct datax_stream *s;
@@ -1922,14 +1950,34 @@ static void test_ring_overflow_before_block0_keeps_its_timestamp(void)
 	CHECK(datax_stream_start_at(s, T) == 0);
 	step_to(&x, T + (NB + 2) * BS * FT, 1 * MS);  /* the ring is full: frames lost */
 	msleep(150);                                  /* past the status rate limit */
+	pre_t_blocks_clean(s, T);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.overflows == 1);
+	step_to(&x, now(&x) + 3 * BS * FT, 1 * MS);  /* the re-armed blocks fill */
+	recv_n(s, BS, 1, &info);                      /* block NB */
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);   /* sticky */
+	CHECK(datax_stream_stop(s) == 0);
+
+	/* An overflow first seen mid-ring (at block 2's poll) is attributed to
+	 * block NB too. */
+	step_to(&x, now(&x) + 5 * MS, 1 * MS);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + NB * BS * FT + BS * FT / 2, 1 * MS);
 	CHECK(recv_n(s, BS - 8, 1, &info) == T / FT + 9);
 	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
-	CHECK(info.valid_samples == BS - 8);
-	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.overflows == 1);
 	CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + BS);
+	CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + BS) * FT);
+	fake_dma_inject_overflow(x.d, 0);             /* the flag only: no frame lost */
+	msleep(150);
+	for (unsigned int b = 2; b < NB; b++) {
+		CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + b * BS);
+		CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + b * BS) * FT);
+	}
+	step_to(&x, now(&x) + 3 * BS * FT, 1 * MS);
+	recv_n(s, BS, 1, &info);
 	CHECK(info.discontinuous && info.timestamp_ticks == 0);
-	CHECK(recv_n(s, BS, 1, &info) == T / FT + 1 + 2 * BS);
-	CHECK(info.discontinuous && info.timestamp_ticks == 0);   /* sticky */
 	CHECK(datax_stream_stop(s) == 0);
 
 	/* zero-copy (a stream of its own: the mode latches): the same for get_block */
@@ -1940,17 +1988,22 @@ static void test_ring_overflow_before_block0_keeps_its_timestamp(void)
 	CHECK(datax_stream_start_at(s, T) == 0);
 	step_to(&x, T + (NB + 2) * BS * FT, 1 * MS);
 	msleep(150);
-	{
-		void *p0 = NULL, *p1 = NULL;
+	for (unsigned int b = 0; b < NB; b++) {
+		void *p = NULL;
 
-		CHECK(datax_stream_get_block(s, &p0, &info, 3000) == 0);
-		CHECK(fake_dma_frame_index(p0) == T / FT + 9);
-		CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
-		CHECK(info.valid_samples == BS - 8);
-		CHECK(datax_stream_get_block(s, &p1, &info, 3000) == 0);
+		CHECK(datax_stream_get_block(s, &p, &info, 3000) == 0);
+		CHECK(!info.discontinuous);
+		CHECK(info.timestamp_ticks == T + (b ? 1 + b * BS : 9) * FT);
+		CHECK(fake_dma_frame_index(p) == T / FT + (b ? 1 + b * BS : 9));
+		CHECK(datax_stream_put_block(s, p) == 0);
+	}
+	step_to(&x, now(&x) + 3 * BS * FT, 1 * MS);
+	{
+		void *p = NULL;
+
+		CHECK(datax_stream_get_block(s, &p, &info, 3000) == 0);
 		CHECK(info.discontinuous && info.timestamp_ticks == 0);
-		CHECK(datax_stream_put_block(s, p0) == 0);
-		CHECK(datax_stream_put_block(s, p1) == 0);
+		CHECK(datax_stream_put_block(s, p) == 0);
 	}
 	CHECK(datax_stream_stop(s) == 0);
 	fx_close(&x);
@@ -2492,7 +2545,7 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_strip_by_channel_count),
 	T_(test_derived_timestamps),
 	T_(test_overflow_zeroes_timestamps),
-	T_(test_ring_overflow_before_block0_keeps_its_timestamp),
+	T_(test_ring_overflow_attributed_to_first_rearmed_block),
 	T_(test_tag_bad_magic_unanchored),
 	T_(test_tag_flags_rejected),
 	T_(test_untimed_ts_zero),

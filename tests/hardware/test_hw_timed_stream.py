@@ -338,7 +338,9 @@ def test_loopback_alignment(dev, hw_ctx, family, request, record):
     record("release_latency_ns", (med + 1 + strip) * 1e9 / fs)
     record("lags", [r["lag"] for r in runs])
     record("lag_spread", lspread)
-    ALIGN.update(first=med, lag=lmed, strip=strip)
+    fml = ht.spread_ok([r["first_minus_lag"] % PERIOD for r in runs])
+    record("first_minus_lag_median", fml[1])
+    ALIGN.update(first=med, lag=lmed, strip=strip, first_minus_lag=fml[1])
     assert ok, f"first-sample offsets {firsts} not identical within +-1 sample"
     assert lok, f"pattern lags {[r['lag'] for r in runs]} not identical within +-1 sample"
 
@@ -352,13 +354,14 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     commanded times plus (b)'s offset, +-1 sample, and both gate commands
     complete on time.
 
-    Times come from block 0's hardware-anchored timestamp plus the sample
-    index (libdatax's derivation rule), computed here: libdatax's own later
-    block timestamps read 0 once its next status poll sees the overflow that
-    follows the full ring, which over ip: is always. Contiguity is proven
-    instead by matching the whole capture against the tone at one lag (a
-    closed TX gate mutes, it does not pause, so a lost frame anywhere would
-    break the match after the gate opens again)."""
+    Times are libdatax's derived block timestamps: every block read here is
+    one of the 4 enqueued before T, which libdatax keeps clean even though
+    the ring overflows before the host reads it (the overflow is attributed
+    to the first re-armed block). They must equal the suite's own derivation
+    from block 0's tag (or, if block 0 has none, Tick's edge capture).
+    Contiguity is proven independently by matching the whole capture against
+    the tone at one lag (a closed TX gate mutes, it does not pause, so a lost
+    frame anywhere would break the match after the gate opens again)."""
     sched = dev.scheduler                    # before start_at
     fs, hz = fs_of(dev), dev.time.tick_hz
     _, strip = tag_strip(hw_ctx, 1)
@@ -438,9 +441,16 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     want_off, want_on = ref - n0 + d_off, ref - n0 + d_on
     res = {"first": first - ref, "off": e_off - want_off, "on": e_on - want_on,
            "spacing": (e_on - e_off) - (d_on - d_off)}
+    # The start mute measured here: the gate edges are tied to the time-aligned
+    # read counter, the start edge is late by the muted reads (ruling 1). (b)
+    # alone cannot give it: it has no mid-stream edge, only first - lag, the
+    # pattern words those reads consumed.
+    n_meas = {"off": ref + d_off - e_off, "on": ref + d_on - e_on}
     record("edges", {"first": first, "off": e_off, "on": e_on,
                      "want_off": want_off, "want_on": want_on,
-                     "start_mute_reads_assumed": n0, "residuals": res})
+                     "start_mute_reads_assumed": n0, "start_mute_reads_measured": n_meas,
+                     "first_minus_lag_from_b": ALIGN.get("first_minus_lag"),
+                     "residuals": res})
     if anchor is not None:
         record("edge_times", {
             "off": ht.sample_time(anchor, strip, e_off, fs, hz),
@@ -462,6 +472,8 @@ def test_gated_burst(dev, hw_ctx, family, request, record):
     assert muted == 0, f"{muted} non-zero frames while the gate was closed"
     for row in lib_vs_derived:
         assert row["derived"] is None or row["lib"] == row["derived"], row
+    assert all(b["timestamp_ticks"] and not b["discontinuous"] for b in blocks), \
+        f"a pre-T block lost its timestamp or reads discontinuous: {blocks}"
     assert abs(res["spacing"]) <= 1, res
     assert abs(res["off"] - res["on"]) <= 1, res
     if ref_first is not None:

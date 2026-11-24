@@ -813,23 +813,28 @@ static void rx_block_meta(struct datax_stream *s)
 }
 
 /*
- * After the status check, before the block's time. Block 0 of a timed,
- * tagged release has nothing before it: the gate was closed until T and
- * every block was enqueued before T. Its first sample is anchored by its own
- * tag, so no overflow can make its timestamp wrong. An overflow its poll
- * sees therefore lies after it (at native rates over ip: the ring is always
- * full by the time the host takes block 0): it is deferred to block 1, the
- * "next block is discontinuous" granularity, and is sticky from there.
+ * After the status check, before the block's time (controller ruling on
+ * S4): every block of a timed, tagged release was enqueued before T, so the
+ * DMA filled blocks 0..nblocks-1 back to back from the release: they are
+ * contiguous by construction, and the first possible gap is in block
+ * nblocks, the first one re-armed after the release. An overflow a poll sees
+ * while the stream still takes those pre-T blocks is therefore attributed to
+ * block nblocks. From there P2's rule (the block taken at the poll) applies,
+ * and the timed stream's sticky "unknown" starts at the block that carries
+ * the discontinuity.
  */
 static void rx_block_defer(struct datax_stream *s)
 {
-	if (s->disc_next) {
+	if (!s->timed || !s->strip_frames)
+		return;
+	if (s->blk < s->nblocks) {
+		if (s->disc_pending) {
+			s->disc_pending = false;
+			s->disc_next = true;
+		}
+	} else if (s->disc_next) {
 		s->disc_pending = true;
 		s->disc_next = false;
-	}
-	if (s->timed && s->strip_frames && s->blk == 0 && s->disc_pending) {
-		s->disc_pending = false;
-		s->disc_next = true;
 	}
 }
 

@@ -28,6 +28,8 @@
       "pps": "internal",
       "xsa": "fca16ba7e70fc0a284292537ce2b995b87b0aa4fd371c57e49e884e2140fe7ca",
       "stream_gate_map": "rx-dma,tx-dma,rx-mode,tx-mode,fhm-b,tx-start-fullmask-only",
+      "tx_gate_edge_offset_frames": -7,
+      "tx_gate_edge_offset_note": "Measured on tron 2026-11-24 (libdatax 291fa55, 3 bursts): mid-stream TX gate edges land 7 frames before the commanded time + the loopback offset - TX_START_MUTE_READS, i.e. the TX start_at mutes 10 reads, not 3, relative to the gate edges. Fixed latency of this image's gate path (P3b spec option 1 item 7); re-measure when the image changes.",
       "provenance": {
         "hopcap": {
           "branch": "p3b-timed-dma",

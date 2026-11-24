@@ -121,8 +121,11 @@ completion records and chip B's PLL readback. Throughput is never asserted.
   channel and one RX channel start at T; the TX gate closes at T + 20 ms and
   opens at T + 40 ms (both reported; both must complete OK on time). The
   muted gap's edges must sit at (b)'s offset minus the 3 reads a TX
-  `start_at` mutes (G2/G3 ruling 1) plus the commanded offset, +-1 sample;
-  the gap length and the two residuals must agree within 1 sample too.
+  `start_at` mutes (G2/G3 ruling 1) plus the commanded offset plus the
+  image's edge constant (`tx_gate_edge_offset_frames` in `images.json`, -7 on
+  the timed-dma image: measured, a fixed latency of the gate path), +-1
+  sample; the gap length and the two residuals must agree within 1 sample
+  too, and each edge must be identical +-1 across the 3 bursts.
   Contiguity is proven by matching the whole capture exactly against the
   looped-back tone at one lag (a closed gate mutes, it does not pause). The lag
   is found by exact equality, not by correlation: every shift of a single

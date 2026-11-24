@@ -52,9 +52,9 @@ def _capture(first=11, extra_off=0, extra_on=0, drop_at=None, total=800, nblk=4)
     return r, exp
 
 
-def _run(r, exp, ref_first=11):
+def _run(r, exp, ref_first=11, c=0):
     return ts._burst_analysis(None, None, r, exp, STRIP, FS, HZ, D_OFF, D_ON, ref_first,
-                              need=D_ON + 3 * P)
+                              need=D_ON + 3 * P, c=c)
 
 
 def test_ideal_burst_passes():
@@ -83,3 +83,21 @@ def test_edge_latency_reported(extra_off, extra_on, why):
     out = _run(*_capture(extra_off=extra_off, extra_on=extra_on))
     assert out["contiguity"]["mismatches"] == 0     # the tone itself is intact
     assert any(why in f for f in out["fails"]), out["fails"]
+
+
+def test_image_edge_constant_is_folded_into_the_expected_edges():
+    """Option 1 item 7: tron's timed-dma edges land 7 frames early every burst
+    (spacing 0). With the image's constant they pass; the raw residual stays in
+    the evidence. Without it, they fail as before."""
+    r, exp = _capture(extra_off=-7, extra_on=-7)
+    out = _run(r, exp, c=-7)
+    assert out["fails"] == [], out["fails"]
+    assert out["edges"]["residuals"] == {"first": 0, "off": 0, "on": 0, "spacing": 0}
+    assert out["edges"]["raw_residuals"] == {"off": -7, "on": -7}
+    assert out["edges"]["edge_offset_frames"] == -7
+    out = _run(*_capture(extra_off=-7, extra_on=-7), c=0)
+    assert any("gate edges off the commanded times" in f for f in out["fails"]), out["fails"]
+
+
+def test_image_edge_constant_pinned_for_timed_dma():
+    assert ts.gate_edge_offset_frames() == -7

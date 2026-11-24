@@ -578,3 +578,14 @@ multiple of a sample and derived timestamps and gate edges need no calibration. 
      - the test then requires every edge to sit at the same constant ±1 sample across bursts and
        runs.
    - The full P2, P3a and P3b suites, and Tick's own tron checks, must pass on the new image.
+   - **Result (2026-11-24, tron, libdatax 291fa55 on hopcap daebc81):** the drift is gone and
+     the intercept persists.
+     - In all 3 bursts the spacing residual was 0, and the off and on residuals were both
+       exactly −7 frames. 32 of 33 tests passed; only `test_gated_burst` failed, and only
+       on that constant.
+     - The ruling applies. `images.json` pins `tx_gate_edge_offset_frames = -7` for the
+       timed-dma image. The test folds it into the expected edges and keeps the raw
+       residuals in the evidence. Each edge must sit there ±1 and be identical ±1 across
+       the bursts.
+     - "Across runs" is met by a second boot of the same image against the pinned
+       constant.

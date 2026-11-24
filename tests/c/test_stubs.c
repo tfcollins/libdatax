@@ -27,7 +27,7 @@ int main(void)
 	CHECK(datax_sched_queue_gpio(NULL, 0, 0, 0) == -EINVAL);
 	CHECK(datax_sched_queue_marker(NULL, 0, 0, 0) == -EINVAL);
 	CHECK(datax_sched_queue_tune(NULL, 0, 0, 0) == -EINVAL);
-	CHECK(datax_sched_queue_stream_gate(NULL, 0, NULL, false) == -ENOTSUP);
+	CHECK(datax_sched_queue_stream_gate(NULL, 0, NULL, false) == -EINVAL);
 	CHECK(datax_sched_commit(NULL) == -EINVAL);
 	CHECK(datax_sched_flush(NULL) == -EINVAL);
 	CHECK(datax_sched_wait(NULL, 0, 0, NULL) == -EINVAL);

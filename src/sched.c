@@ -18,6 +18,7 @@
 #include "error.h"
 #include "fhm.h"
 #include "scheduler.h"
+#include "stream.h"
 #include "tick_descriptor.h"
 #include "tick_ops.h"
 
@@ -666,12 +667,51 @@ long datax_sched_queue_tune(struct datax_sched *s, datax_time when,
 long datax_sched_queue_stream_gate(struct datax_sched *s, datax_time when,
 				   struct datax_stream *stream, bool enable)
 {
-	(void)when; (void)stream; (void)enable;
-	if (s)
+	struct datax_sched_cmd_spec spec;
+	unsigned int lv;
+	bool cap;
+	int ret;
+
+	if (!s)
+		return -EINVAL;
+	if (!stream)
+		return datax_error_ret(s->ctx, EINVAL, "sched", "queue_stream_gate: NULL stream");
+	if (stream->dev != s->dev)
+		return datax_error_ret(s->ctx, EINVAL, "sched",
+				       "queue_stream_gate: the stream is on another device than "
+				       "the scheduler");
+	pthread_mutex_lock(&s->dev->ctx->lock);
+	cap = s->dev->caps.flags & (1u << DATAX_CAP_STREAM_GATE);
+	pthread_mutex_unlock(&s->dev->ctx->lock);
+	if (!cap)
 		return datax_error_ret(s->ctx, ENOTSUP, "sched",
-				       "queue_stream_gate: no timed-stream hardware on this "
-				       "platform yet (P3b)");
-	return -ENOTSUP;
+				       "queue_stream_gate: no STREAM_GATE target on this device's Tick");
+	if (stream->cfg.direction == DATAX_RX)
+		return datax_error_ret(s->ctx, ENOTSUP, "sched",
+				       "queue_stream_gate: RX gating needs a DMA with end-of-burst "
+				       "(tlast) on this image");
+	if (!stream->started || !stream->timed)
+		return datax_error_ret(s->ctx, EINVAL, "sched",
+				       "queue_stream_gate: stream is not in timed mode; use start_at");
+	if (when < stream->t_open)
+		return datax_error_ret(s->ctx, EINVAL, "sched",
+				       "queue_stream_gate: when %llu is before the stream's T %llu",
+				       (unsigned long long)when,
+				       (unsigned long long)stream->t_open);
+	ret = datax_stream_timed_failed(stream, "queue_stream_gate", false);
+	if (ret)
+		return ret;
+	if (stream->dev->caps.gate_map.tx_level < 0)
+		return datax_error_ret(s->ctx, ENOTSUP, "sched",
+				       "queue_stream_gate: the Tick stream_gate_map has no tx-dma role");
+	lv = (unsigned int)stream->dev->caps.gate_map.tx_level;
+	memset(&spec, 0, sizeof(spec));
+	spec.when = when;
+	spec.command_id = DATAX_TICK_COMMAND_ID_STREAM_GATE;
+	spec.target_id = (uint16_t)(DATAX_TICK_TARGET_FAMILY_STREAM_GATE | lv);
+	spec.args[0] = lv;
+	spec.args[1] = enable ? 1u : 0u;
+	return datax_sched_enqueue(s, &spec);
 }
 
 int datax_sched_report(struct datax_sched *s, long seq)

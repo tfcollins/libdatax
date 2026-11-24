@@ -1002,7 +1002,7 @@ static void test_reserved_gpio_bit(bool adrv9009)
 	} else {
 		CHECK(datax_sched_queue_tune(x.s, t, 0, 2450000000ULL) == -ENOTSUP);
 	}
-	CHECK(datax_sched_queue_stream_gate(x.s, t, NULL, true) == -ENOTSUP);
+	CHECK(datax_sched_queue_stream_gate(x.s, t, NULL, true) == -EINVAL);
 	CHECK(datax_sched_commit(x.s) == 0);
 	WAIT_FOR(shim_count(&x.sh) == (adrv9009 ? 2u : 3u));
 	run_until(&x, t + MS, 50 * MS);

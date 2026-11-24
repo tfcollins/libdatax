@@ -2032,9 +2032,210 @@ static void test_soft_offset_timestamps(void)
 	fx_close(&x);
 }
 
+/* ---- queue_stream_gate (P3b Task 5, #15) ---------------------------------- */
+
+static void gate_completion_ok(struct fx *x, long seq, unsigned long long req)
+{
+	struct datax_completion c;
+
+	CHECK(datax_sched_wait(x->s, seq, 2000, &c) == 0);
+	CHECK(c.seq == seq && c.status == DATAX_COMPLETION_OK);
+	CHECK(c.requested_ticks == req && c.executed_ticks == req);
+}
+
+static void test_gate_tx_burst(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct fake_dma_tx_segment seg[16];
+	unsigned long long T;
+	size_t n, k = 0;
+	long off, on;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, true);
+	CHECK(preload(s, BS) == (int)BS);
+	T = at(&x, 30);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	off = datax_sched_queue_stream_gate(x.s, T + 20 * MS, s, false);
+	on = datax_sched_queue_stream_gate(x.s, T + 40 * MS, s, true);
+	CHECK(off > 0 && on > 0);
+	CHECK(datax_sched_report(x.s, off) == 0 && datax_sched_report(x.s, on) == 0);
+	CHECK(datax_sched_commit(x.s) == 0);
+	step_to(&x, T + 60 * MS, 1 * MS);
+	gate_completion_ok(&x, off, T + 20 * MS);
+	gate_completion_ok(&x, on, T + 40 * MS);
+	n = fake_dma_tx_segments(x.d, seg, 16);
+	CHECK(n >= 3);
+	CHECK(seg[0].t_start == T && !seg[0].muted && seg[0].first_frame == 0);
+	CHECK(seg[0].t_end == T + 20 * MS);
+	CHECK(seg[1].muted && seg[1].t_start == T + 20 * MS && seg[1].t_end == T + 40 * MS);
+	/* muted, not paused: 40 ms of playback after T, modulo the cyclic length */
+	CHECK(!seg[2].muted && !seg[2].underflow && seg[2].t_start == T + 40 * MS);
+	CHECK(seg[2].first_frame % BS == (40 * MS / FT) % BS);
+	for (size_t i = 0; i < n; i++)
+		k += seg[i].underflow;
+	CHECK(k == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_gate_rx_enotsup(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	unsigned long long T;
+	size_t nc;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 30);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	CHECK(datax_sched_queue_stream_gate(x.s, T + 20 * MS, s, false) == -ENOTSUP);
+	CHECK(strstr(lasterr(&x), "RX gating needs a DMA with end-of-burst (tlast) on this image")
+	      != NULL);
+	nc = datax_device_sched(x.dev)->ncmds;
+	CHECK(sched_count(&x, CMD_BUILD) == 0 && nc >= 1);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_gate_untimed_einval(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, true);
+	CHECK(datax_sched_queue_stream_gate(x.s, at(&x, 50), s, false) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "stream is not in timed mode; use start_at") != NULL);
+	CHECK(preload(s, BS) == (int)BS);
+	CHECK(datax_stream_start(s) == 0);                    /* started, but untimed */
+	CHECK(datax_sched_queue_stream_gate(x.s, at(&x, 50), s, false) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "stream is not in timed mode; use start_at") != NULL);
+	CHECK(datax_sched_queue_stream_gate(x.s, at(&x, 50), NULL, false) == -EINVAL);
+	CHECK(datax_sched_queue_stream_gate(NULL, at(&x, 50), s, false) == -EINVAL);
+	CHECK(datax_stream_stop(s) == 0);
+	CHECK(sched_count(&x, CMD_BUILD) == 0);
+	fx_close(&x);
+}
+
+static void test_gate_before_open_einval(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, true);
+	CHECK(preload(s, BS) == (int)BS);
+	T = at(&x, 30);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	CHECK(datax_sched_queue_stream_gate(x.s, T - 1, s, false) == -EINVAL);
+	CHECK(lasterr(&x) != NULL && strlen(lasterr(&x)) > 0);
+	CHECK(sched_count(&x, CMD_BUILD) == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_gate_other_device_einval(void)
+{
+	struct fx x;
+	struct datax_context *c2 = NULL;
+	struct datax_device *d2 = NULL;
+	struct datax_stream *s2 = NULL;
+	struct datax_stream_config c = { .direction = DATAX_TX, .channel_mask = 0x1,
+					 .block_samples = BS, .block_count = NB, .cyclic = true };
+
+	fx_open(&x, true);
+	/* a stream of another context's device, this device's scheduler */
+	CHECK(datax_context_create_from_uri(getenv("DATAX_TEST_URI"), &c2) == 0);
+	CHECK(datax_context_get_device(c2, 0, &d2) == 0 && d2 != x.dev);
+	CHECK(datax_stream_create(d2, &c, &s2) == 0);
+	CHECK(datax_sched_queue_stream_gate(x.s, at(&x, 50), s2, false) == -EINVAL);
+	CHECK(strstr(lasterr(&x), "another device") != NULL);
+	datax_context_destroy(c2);
+	fx_close(&x);
+}
+
+static void test_gate_no_cap_enotsup(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, true);
+	x.dev->caps.flags &= ~(1u << DATAX_CAP_STREAM_GATE);
+	CHECK(datax_sched_queue_stream_gate(x.s, at(&x, 50), s, false) == -ENOTSUP);
+	CHECK(lasterr(&x) != NULL && strlen(lasterr(&x)) > 0);
+	fx_close(&x);
+}
+
+static void test_gate_guard_margin_late(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	unsigned long long T;
+	long g;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, true);
+	CHECK(preload(s, BS) == (int)BS);
+	T = at(&x, 30);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T, 1 * MS);
+	g = datax_sched_queue_stream_gate(x.s, now(&x) + 5 * MS, s, false);   /* inside the guard */
+	CHECK(g > 0);
+	CHECK(datax_sched_commit(x.s) == DATAX_ERR_LATE);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_gate_cancelled_by_stop(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct fake_dma_tx_segment seg[16];
+	unsigned long long T, T2;
+	size_t e0, n;
+	long g;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, true);
+	CHECK(preload(s, BS) == (int)BS);
+	e0 = fake_tick_exec_log(x.f, 0, NULL, 0);
+	T = at(&x, 30);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	g = datax_sched_queue_stream_gate(x.s, T + 20 * MS, s, true);
+	CHECK(g > 0 && datax_sched_commit(x.s) == 0);
+	settle(&x);
+	CHECK(datax_stream_stop(s) == 0);
+	CHECK(datax_device_sched(x.dev)->ncmds == 0);
+	/* a later start_at on a fresh cyclic send: the old gate never fires */
+	CHECK(preload(s, BS) == (int)BS);
+	T2 = at(&x, 90);
+	CHECK(datax_stream_start_at(s, T2) == 0);
+	step_to(&x, T2 + 40 * MS, 1 * MS);
+	CHECK(gate_execs(&x, e0, x.txl, T + 20 * MS, NULL, NULL) == 0);
+	n = fake_dma_tx_segments(x.d, seg, 16);
+	for (size_t i = 0; i < n; i++)
+		if (seg[i].t_start >= T2)
+			CHECK(!seg[i].muted || seg[i].t_end <= T2);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
 static const struct { const char *name; void (*fn)(void); } tests[] = {
 #define T_(n) { #n, n }
 	T_(test_start_at_guard_margin_late),
+	T_(test_gate_tx_burst),
+	T_(test_gate_rx_enotsup),
+	T_(test_gate_untimed_einval),
+	T_(test_gate_before_open_einval),
+	T_(test_gate_other_device_einval),
+	T_(test_gate_no_cap_enotsup),
+	T_(test_gate_guard_margin_late),
+	T_(test_gate_cancelled_by_stop),
 	T_(test_start_at_order),
 	T_(test_start_at_rx_first_frame_at_T),
 	T_(test_start_at_late_at_dispatch_fails),

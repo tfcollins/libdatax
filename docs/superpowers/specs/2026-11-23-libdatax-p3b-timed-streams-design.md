@@ -556,6 +556,17 @@ multiple of a sample and derived timestamps and gate edges need no calibration. 
      - It is the same locked source, makes the TX gate same-clock, and needs no new clock
        buffer.
      - Gate edges can then only be commanded on even RX samples. Placement stays exact.
+   - **Result (2026-11-24): the fallback is taken.**
+     - At 4.069 ns the scheduler alone gives WNS −3.079 ns, with 10,542 failing endpoints.
+       The worst path runs from `current_time_ticks` through two 64-bit carry chains into the
+       queue-entry enables: 26 logic levels, 7.04 ns.
+     - At 8.138 ns (122.88 MHz) it gives WNS +0.565 ns and WHS +0.042 ns.
+     - The timed-dma image therefore builds with `TICK_TIMEBASE_CLK=core_clk_a`.
+     - Items 4 and 5 apply with channel 6 and 122.88 MHz in place of channel 7 and
+       245.76 MHz. The TX gate is same-clock, and the RX gate and the tagger cross
+       `core_clk_a` → `core_clk_b`, keeping their synchronizer cuts.
+     - Reaching one tick per sample means pipelining the scheduler's due-time compare.
+       That is a Tick RTL change, and vrt49 vendors that RTL. It is left as a follow-up.
 7. **Acceptance.**
    - The gated-burst criterion above stands: edges land at the commanded time plus the loopback
      offset, ±1 sample.

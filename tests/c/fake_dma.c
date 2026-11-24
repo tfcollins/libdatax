@@ -77,7 +77,7 @@ struct fake_dma {
 	uint32_t releases, last_tag_count;
 	enum fake_dma_tag_fault fault;
 	/* TX */
-	bool reading, have_data, unf;
+	bool reading, unf;
 	uint64_t cons;                /* frames consumed since reading began */
 	size_t tx_off;                /* frames consumed of the head block */
 	struct fake_dma_tx_segment *segs;
@@ -318,7 +318,7 @@ static void tx_seg(struct fake_dma *d, uint64_t na, uint64_t nb, uint32_t gate)
 	if (!x->running)
 		return;
 	if (!d->reading) {
-		if (!open || !d->have_data)
+		if (!open)
 			return;          /* held until the first pass */
 		d->reading = true;
 	}
@@ -513,8 +513,6 @@ static int dma_enqueue(void *h, bool tx, unsigned int i, bool cyclic)
 		x->blk[i].tagged = false;
 		x->fifo[(x->head + x->count) % x->nblocks] = i;
 		x->count++;
-		if (tx)
-			d->have_data = true;
 		log_op(d, (struct fake_dma_op){ .kind = FAKE_DMA_ENQUEUE, .tx = tx, .block = i,
 						.cyclic = tx && cyclic });
 	}
@@ -585,7 +583,6 @@ static int dma_start(void *h, bool tx)
 		x->running = true;
 		if (tx) {
 			d->reading = false;
-			d->have_data = x->count > 0;
 		}
 		log_op(d, (struct fake_dma_op){ .kind = FAKE_DMA_START, .tx = tx });
 	}
@@ -601,7 +598,6 @@ static int dma_stop(void *h, bool tx)
 	x->running = false;
 	if (tx) {
 		d->reading = false;
-		d->have_data = false;
 	}
 	log_op(d, (struct fake_dma_op){ .kind = FAKE_DMA_STOP, .tx = tx });
 	leave(d);

@@ -465,17 +465,22 @@ static void tx_underflow_segment(void)
 	CHECK(fake_dma_tx_ops.dequeue(r.d, 0, true) == 0);
 	rig_free(&r);
 
-	/* nothing enqueued yet is not an underflow: reading begins with the data */
+	/* an empty FIFO at the first pass is an underflow from that pass (forced
+	 * open: the first edge after the start), and data enqueued later plays on */
 	r = rig_new(1000000, NULL);
 	CHECK(fake_dma_tx_ops.open(r.d, 8 * FB, 2, FB) == 0);
 	CHECK(fake_dma_tx_ops.start(r.d) == 0);
 	to_tick(&r, 1000);
-	CHECK(fake_dma_tx_segments(r.d, seg, 4) == 0 && !tx_unf(&r));
+	CHECK(fake_dma_tx_segments(r.d, seg, 4) == 1);
+	CHECK(seg[0].underflow && seg[0].t_start == 100 && seg[0].t_end == 1100 &&
+	      seg[0].first_frame == 0);
+	CHECK(tx_unf(&r));
 	CHECK(fake_dma_tx_ops.enqueue(r.d, 0, false) == 0);
 	to_tick(&r, 2499);
-	CHECK(fake_dma_tx_segments(r.d, seg, 4) == 2);
-	CHECK(seg[0].t_start == 1100 && seg[0].t_end == 1900 && seg[0].first_frame == 0);
-	CHECK(seg[1].underflow && seg[1].t_start == 1900 && seg[1].first_frame == 8);
+	CHECK(fake_dma_tx_segments(r.d, seg, 4) == 3);
+	CHECK(!seg[1].underflow && seg[1].t_start == 1100 && seg[1].t_end == 1900 &&
+	      seg[1].first_frame == 0);
+	CHECK(seg[2].underflow && seg[2].t_start == 1900 && seg[2].first_frame == 8);
 	rig_free(&r);
 }
 

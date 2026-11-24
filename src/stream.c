@@ -1086,11 +1086,15 @@ int datax_internal_stream_bind_source(struct datax_device *dev, enum datax_direc
 {
 	int ret = 0;
 
-	if (!dev || (dir != DATAX_RX && dir != DATAX_TX))
+	if (!dev)
 		return -EINVAL;
+	if (dir != DATAX_RX && dir != DATAX_TX)
+		return datax_error_ret(dev->ctx, EINVAL, SUB,
+				       "stream_bind_source: bad direction %d", (int)dir);
 	if (ops && (!ops->open || !ops->close || !ops->data || !ops->enqueue ||
 		    !ops->dequeue || !ops->start || !ops->stop || !ops->cancel))
-		return -EINVAL;
+		return datax_error_ret(dev->ctx, EINVAL, SUB,
+				       "stream_bind_source: ops need open, close, data, enqueue, dequeue, start, stop and cancel");
 	pthread_mutex_lock(&dev->ctx->lock);
 	if (dev->stream[dir]) {
 		ret = -EBUSY;
@@ -1099,6 +1103,10 @@ int datax_internal_stream_bind_source(struct datax_device *dev, enum datax_direc
 		dev->src_h[dir] = ops ? h : NULL;
 	}
 	pthread_mutex_unlock(&dev->ctx->lock);
+	if (ret == -EBUSY)
+		return datax_error_ret(dev->ctx, EBUSY, SUB,
+				       "stream_bind_source: a %s stream exists; destroy it first",
+				       dir_name(dir));
 	return ret;
 }
 

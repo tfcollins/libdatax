@@ -774,14 +774,20 @@ static void seam_stream_source(struct datax_device *dev)
 	CHECK(datax_internal_stream_bind_source(NULL, DATAX_RX, &fake_dma_rx_ops, d) == -EINVAL);
 	CHECK(datax_internal_stream_bind_source(dev, (enum datax_direction)5, &fake_dma_rx_ops,
 						d) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(dev->ctx),
+		     "bad direction") != NULL);
 	bad.dequeue = NULL;
 	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, &bad, d) == -EINVAL);
+	CHECK(strstr(datax_context_get_last_error(dev->ctx),
+		     "ops need open") != NULL);
 	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, &fake_dma_rx_ops, d) == 0);
 
 	/* the mask and sample-size check still use the emulator device */
 	CHECK(datax_stream_create(dev, &sc, &s) == 0);
 	/* a bound stream keeps its binding; rebinding is refused while one exists */
 	CHECK(datax_internal_stream_bind_source(dev, DATAX_RX, NULL, NULL) == -EBUSY);
+	CHECK(strstr(datax_context_get_last_error(dev->ctx),
+		     "RX stream exists; destroy it first") != NULL);
 	CHECK(datax_stream_start(s) == 0);
 	{
 		struct fake_dma_op op[8];

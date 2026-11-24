@@ -30,8 +30,7 @@
  * with no buffer, as on stock).
  *
  * TX. Enqueued blocks form a FIFO (a cyclic block repeats). After start,
- * nothing is read until the gate first passes (and a block was enqueued);
- * from then on one frame is consumed per sample clock, gate open or not:
+ * nothing is read until the gate first passes; from then on one frame is consumed per sample clock, gate open or not:
  * closed, the DAC gets zeros (muted). An empty FIFO while reading is an
  * underflow. Each continuous stretch is reported by fake_dma_tx_segments.
  *

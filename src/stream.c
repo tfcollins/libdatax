@@ -872,6 +872,15 @@ static int rx_take(struct datax_stream *s, int timeout_ms, long long deadline,
 					datax_error_ret(ctx, EIO, SUB,
 							"%s: %s blocks keep coming back unqueued",
 							verb, iio_name(s));
+			/* Timed, past block 0: the lost block's samples shift
+			 * every later block, so the timestamps are unknown
+			 * until the next start_at. Before block 0 a re-arm is
+			 * routine (the gate is closed until T), and a lost
+			 * tag block is already unanchored. */
+			if (s->timed && s->blk > 0) {
+				s->unknown = true;
+				s->disc_pending = true;
+			}
 			ret = datax_stream_enqueue(s, s->cur);
 			if (ret) {
 				snprintf(what, sizeof(what), "%s: re-enqueueing a block", verb);

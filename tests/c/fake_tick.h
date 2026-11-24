@@ -134,6 +134,11 @@ void fake_tick_set_access_cost(struct fake_tick *f, uint64_t ticks);
 /* The next access to attr returns err (a negative errno) and does nothing.
  * attr NULL: the next access to any attribute. */
 void fake_tick_inject_error(struct fake_tick *f, const char *attr, int err);
+/* The same, on the nth matching access from now (1: the next one, as
+ * fake_tick_inject_error; 0 clears a pending injection). The accesses before
+ * it succeed. One injection at a time: a later call replaces it. */
+void fake_tick_inject_error_nth(struct fake_tick *f, const char *attr, int err,
+				unsigned int nth);
 /* Number of successful reads or writes of attr since creation. */
 unsigned long fake_tick_access_count(struct fake_tick *f, const char *attr, bool write);
 

@@ -421,7 +421,10 @@ if(DATAX_LIBIIO_BUILD)
     test_untimed_ts_zero test_zero_copy_block0 test_soft_offset_timestamps
     test_gate_tx_burst test_gate_rx_enotsup test_gate_untimed_einval
     test_gate_before_open_einval test_gate_other_device_einval test_gate_no_cap_enotsup
-    test_gate_guard_margin_late test_gate_cancelled_by_stop)
+    test_gate_guard_margin_late test_gate_cancelled_by_stop
+    test_start_at_commit_fail_destroy test_start_at_commit_fail_retry
+    test_lost_block_unknown_timestamps test_no_timestamp_cap_no_tag
+    test_start_at_refeed_fail_undone)
   foreach(tt ${DATAX_STREAM_TIMED_TESTS})
     add_test(NAME stream_timed_${tt}
       COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh

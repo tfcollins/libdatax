@@ -119,6 +119,7 @@ struct fake_tick {
 	bool inj_set;
 	char inj_attr[48];         /* "" matches any attribute */
 	int inj_err;
+	unsigned int inj_skip;     /* matching accesses to let through first */
 
 	struct fake_tick_exec *log;
 	size_t nlog, caplog;
@@ -687,9 +688,13 @@ static int tick_access(struct fake_tick *f, const char *attr, bool write, char *
 	if (f->access_cost)
 		advance_locked(f, f->access_cost);
 	if (f->inj_set && (!f->inj_attr[0] || !strcmp(f->inj_attr, attr))) {
-		f->inj_set = false;
-		ret = f->inj_err;
-		goto out;
+		if (f->inj_skip) {
+			f->inj_skip--;          /* this one goes through */
+		} else {
+			f->inj_set = false;
+			ret = f->inj_err;
+			goto out;
+		}
 	}
 	mode = attr_absent(f, attr) ? 0 : attr_mode(attr);
 	if (!mode) {
@@ -904,8 +909,14 @@ void fake_tick_set_access_cost(struct fake_tick *f, uint64_t ticks)
 
 void fake_tick_inject_error(struct fake_tick *f, const char *attr, int err)
 {
+	fake_tick_inject_error_nth(f, attr, err, 1);
+}
+
+void fake_tick_inject_error_nth(struct fake_tick *f, const char *attr, int err, unsigned int nth)
+{
 	pthread_mutex_lock(&f->lock);
-	f->inj_set = true;
+	f->inj_set = nth > 0;
+	f->inj_skip = nth ? nth - 1 : 0;
 	f->inj_err = err;
 	snprintf(f->inj_attr, sizeof(f->inj_attr), "%s", attr ? attr : "");
 	pthread_mutex_unlock(&f->lock);

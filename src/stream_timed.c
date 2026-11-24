@@ -112,15 +112,25 @@ static bool tx_mask_ok(const struct datax_stream *s)
 	return !s->dev->caps.gate_map.tx_fullmask_only || s->cfg.channel_mask == all;
 }
 
+/* RX block 0 carries a capture tag that recv strips: DATAX_CAP_TIMESTAMPS
+ * and a header size. One predicate for the tag enable and the strip, so a
+ * tag is never enabled where nothing strips it. */
+static bool tags_on(const struct datax_stream *s)
+{
+	return is_rx(s) && (s->dev->caps.flags & (1u << DATAX_CAP_TIMESTAMPS)) &&
+	       s->dev->caps.tag_bytes > 0;
+}
+
 /* capture_tag_enable read-modify-write of the RX level bit (libdatax owns
- * the attribute, gap 2). Only with the tag attributes. */
+ * the attribute, gap 2). Set only when tags_on(); cleared whenever the tag
+ * attributes exist. */
 static int tag_bit(struct datax_stream *s, bool on)
 {
 	unsigned long long v;
 	unsigned int bit = (unsigned int)level_bit(s);
 	int ret;
 
-	if (!is_rx(s) || !s->dev->caps.tag_attrs)
+	if (!is_rx(s) || !s->dev->caps.tag_attrs || (on && !tags_on(s)))
 		return 0;
 	ret = datax_tick_read_u64(s->dev, "capture_tag_enable", &v);
 	if (ret)
@@ -357,6 +367,26 @@ static void undo(struct datax_stream *s)
 	datax_error_set(s->dev->ctx, SUB, "%s", keep);
 }
 
+/* A commit that failed without discarding its batch (the device-time read
+ * or an allocation failed, or the scheduler is being destroyed) leaves the
+ * opening uncommitted, with this stream as its hook's user: remove it, or
+ * the scheduler's destroy would run open_done on a freed stream and every
+ * later start_at would find an uncommitted batch. A discarded batch has
+ * already removed it. Under io and the lock, as every table change. */
+static void drop_uncommitted(struct datax_sched *sch, long seq)
+{
+	struct datax_io_hold h;
+	struct sched_cmd *c;
+
+	datax_sched_io_lock(sch, &h);
+	pthread_mutex_lock(&sch->lock);
+	c = datax_sched_find(sch, seq);
+	if (c && c->state == CMD_BUILD)
+		datax_sched_remove(sch, c);
+	pthread_mutex_unlock(&sch->lock);
+	datax_sched_io_unlock(sch, &h);
+}
+
 /* For an RX opening: the TX opening of the same hardware time is already in
  * Tick, so it would run first. */
 static bool tx_open_written(struct datax_sched *sch, const struct datax_stream *s,
@@ -471,7 +501,7 @@ int datax_stream_start_at(struct datax_stream *s, datax_time when)
 	s->fs = fs;
 	s->tick_hz = sch->tick_hz;
 	s->strip_frames = 0;
-	if (is_rx(s) && (s->dev->caps.flags & (1u << DATAX_CAP_TIMESTAMPS)) && s->dev->caps.tag_bytes)
+	if (tags_on(s))
 		s->strip_frames = (unsigned int)((s->dev->caps.tag_bytes + s->frame_bytes - 1) /
 						 s->frame_bytes);
 	s->t_open = when;
@@ -505,6 +535,7 @@ int datax_stream_start_at(struct datax_stream *s, datax_time when)
 	ret = datax_sched_commit(sch);
 	if (ret) {
 		s->started = false;
+		drop_uncommitted(sch, seq);
 		goto undo;
 	}
 	/* Same-T order (ruling 6): an RX opening must reach Tick before a TX
@@ -512,8 +543,18 @@ int datax_stream_start_at(struct datax_stream *s, datax_time when)
 	if (is_rx(s) && tx_open_written(sch, s, hw)) {
 		ret = datax_sched_refeed(sch);
 		if (ret) {
-			/* The opening is committed: stop() cancels it. */
+			char why[200];
+
+			/* The opening is committed: cancel it as stop() does,
+			 * then undo. The text is set after the cancel, which
+			 * can overwrite the last error. */
+			snprintf(why, sizeof(why), "%s", datax_context_get_last_error(ctx));
 			datax_sched_put(sch);
+			(void)datax_stream_timed_stop(s);
+			s->started = false;
+			datax_error_set(ctx, SUB, "start_at: the same-T re-feed (RX opening "
+					"before the TX one) failed (%d): %s", ret, why);
+			undo(s);
 			return ret;
 		}
 	}

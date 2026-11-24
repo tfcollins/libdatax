@@ -191,6 +191,7 @@ struct fx {
 
 /* map NULL: no stream_gate_map attribute. fhm: bind the fake Talise FHM. */
 static unsigned long long g_fs = FS;     /* the fake DMA's and the device's sample rate */
+static uint32_t g_bitmap = 0xdf;         /* the fake Tick's capability bitmap */
 
 /* Set the emulated phy's sampling_frequency (what start_at reads). */
 static void set_device_fs(struct fx *x, unsigned long long fs)
@@ -211,7 +212,7 @@ static void fx_open_ex(struct fx *x, const char *map, bool create, bool fhm)
 {
 	const char *uri = getenv("DATAX_TEST_URI");
 	struct fake_tick_config cfg = { .tick_hz = HZ, .queue_depth = 16,
-					.capability_bitmap = 0xdf };
+					.capability_bitmap = g_bitmap };
 	struct fake_dma_config dc;
 
 	memset(x, 0, sizeof(*x));
@@ -2225,6 +2226,166 @@ static void test_gate_cancelled_by_stop(void)
 	fx_close(&x);
 }
 
+/* ---- final review fixes ------------------------------------------------------ */
+
+/* Fix 1: the commit's device-time read fails inside start_at (start_at's
+ * own guard read is the first current_time_ticks access with the poller
+ * paused, the commit's the second). The opening must not stay behind
+ * uncommitted: destroying the stream (not started: stop() returns at once)
+ * and then the scheduler and context must never run its hook on the freed
+ * stream (ASan: heap-use-after-free in open_done). */
+static void test_start_at_commit_fail_destroy(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	fake_tick_inject_error_nth(x.f, "current_time_ticks", -EIO, 2);
+	CHECK(datax_stream_start_at(s, at(&x, 50)) == -EIO);
+	CHECK(strstr(lasterr(&x), "commit: cannot read the device time") != NULL);
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	datax_stream_destroy(s);
+	fx_close(&x);                       /* sched destroy flushes what is left */
+}
+
+/* Fix 1: after that failure nothing of the stream is left uncommitted, the
+ * gate is forced open, and the next start_at is not refused -EBUSY. */
+static void test_start_at_commit_fail_retry(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	fake_tick_inject_error_nth(x.f, "current_time_ticks", -EIO, 2);
+	CHECK(datax_stream_start_at(s, at(&x, 50)) == -EIO);
+	CHECK(strstr(lasterr(&x), "commit: cannot read the device time") != NULL);
+	CHECK(sched_count(&x, CMD_BUILD) == 0);
+	CHECK(!gate_bit(&x, x.rxm) && !gate_bit(&x, x.rxl));
+	CHECK(!(attr_u(&x, "capture_tag_enable") >> x.rxl & 1u));
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 2 * BS * FT + BS * FT / 2, 1 * MS);
+	CHECK(recv_block(&x, s, &info, true) == T / FT + 1);
+	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+/* Fix 2: on the legacy path a lost RX block (libiio no longer holds it:
+ * -EPERM, re-armed as the newest) after block 0 makes the timestamps
+ * unknown and the next block discontinuous, instead of labelling block 2
+ * with block 1's time. */
+static void test_lost_block_unknown_timestamps(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 3 * BS * FT + BS * FT / 2, 1 * MS);
+	CHECK(recv_block(&x, s, &info, true) == T / FT + 1);
+	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
+	/* block 1 is complete: take it behind the stream's back (the state a
+	 * consumed legacy read leaves) */
+	CHECK(s->cur == 1);
+	CHECK(fake_dma_rx_ops.dequeue(x.d, 1, true) == 0);
+	/* one block per recv: info describes the call's first block */
+	CHECK(recv_block(&x, s, &info, false) == T / FT + 1 + 2 * BS);
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);
+	step_to(&x, now(&x) + 2 * BS * FT, 1 * MS);
+	CHECK(recv_block(&x, s, &info, false) == T / FT + 1 + 3 * BS);
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);   /* sticky */
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+/* Fix 3: tag attributes present but no STREAM_TIMESTAMP capability (tron's
+ * bitmap 0x9f): start_at must not enable the capture tag, since nothing
+ * would strip it. Block 0 carries samples from its first frame. */
+static void test_no_timestamp_cap_no_tag(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	unsigned long long T;
+
+	g_bitmap = 0x9f;
+	fx_open(&x, true);
+	g_bitmap = 0xdf;
+	CHECK(x.dev->caps.tag_attrs);
+	CHECK(!(x.dev->caps.flags & (1u << DATAX_CAP_TIMESTAMPS)));
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	CHECK(!(attr_u(&x, "capture_tag_enable") >> x.rxl & 1u));
+	step_to(&x, T + 2 * BS * FT + BS * FT / 2, 1 * MS);
+	CHECK(recv_block(&x, s, &info, false) == T / FT + 1);   /* no tag frames */
+	CHECK(info.valid_samples == BS && info.timestamp_ticks == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	CHECK(!(attr_u(&x, "capture_tag_enable") >> x.rxl & 1u));
+	fx_close(&x);
+}
+
+/* The stream's level-bit STREAM_GATE commands in the table. */
+static size_t gate_cmds(struct fx *x, unsigned int bit)
+{
+	struct datax_sched *s = datax_device_sched(x->dev);
+	size_t n = 0;
+
+	pthread_mutex_lock(&s->lock);
+	for (size_t i = 0; i < s->ncmds; i++)
+		n += s->cmds[i].command_id == DATAX_TICK_COMMAND_ID_STREAM_GATE &&
+		     s->cmds[i].target_id == (DATAX_TICK_TARGET_FAMILY_STREAM_GATE | bit);
+	pthread_mutex_unlock(&s->lock);
+	return n;
+}
+
+/* Fix 4: the same-T re-feed fails (flush_queue write error). start_at
+ * returns the error naming the re-feed, and the stream is stopped and
+ * undone: not started (a retry is not -EALREADY), its opening cancelled,
+ * the RX gate forced open with the tag bit clear. */
+static void test_start_at_refeed_fail_undone(void)
+{
+	struct fx x;
+	struct datax_stream *rx, *tx;
+	unsigned long long T;
+	int16_t b[8];
+
+	fx_open(&x, true);
+	rx = stream(&x, DATAX_RX, 0x1, false);
+	tx = stream(&x, DATAX_TX, 0x1, false);
+	CHECK(preload(tx, NB * BS) == (int)(NB * BS));
+	T = at(&x, 40);
+	CHECK(datax_stream_start_at(tx, T) == 0);
+	settle(&x);
+	CHECK(sched_count(&x, CMD_WRITTEN) == 1);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	fake_tick_inject_error(x.f, "flush_queue", -EIO);
+	CHECK(datax_stream_start_at(rx, T) == -EIO);
+	CHECK(strstr(lasterr(&x), "re-feed") != NULL);
+	CHECK(gate_cmds(&x, x.rxl) == 0);
+	CHECK(!gate_bit(&x, x.rxm) && !gate_bit(&x, x.rxl));
+	CHECK(!(attr_u(&x, "capture_tag_enable") >> x.rxl & 1u));
+	CHECK(datax_stream_recv(rx, b, 1, NULL, 0) == -EINVAL);   /* not started */
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	/* the retry re-feeds and starts */
+	CHECK(datax_stream_start_at(rx, T) == 0);
+	CHECK(datax_stream_stop(rx) == 0);
+	(void)datax_stream_stop(tx);
+	fx_close(&x);
+}
+
 static const struct { const char *name; void (*fn)(void); } tests[] = {
 #define T_(n) { #n, n }
 	T_(test_start_at_guard_margin_late),
@@ -2236,6 +2397,9 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_gate_no_cap_enotsup),
 	T_(test_gate_guard_margin_late),
 	T_(test_gate_cancelled_by_stop),
+	T_(test_start_at_commit_fail_destroy), T_(test_start_at_commit_fail_retry),
+	T_(test_lost_block_unknown_timestamps), T_(test_no_timestamp_cap_no_tag),
+	T_(test_start_at_refeed_fail_undone),
 	T_(test_start_at_order),
 	T_(test_start_at_rx_first_frame_at_T),
 	T_(test_start_at_late_at_dispatch_fails),

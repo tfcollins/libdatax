@@ -281,8 +281,9 @@ the gated burst pattern, on `tron`, with REQ-TEST-023 evidence. The ZU11EG matri
      - every flag false without the map.
 10. **Hardware suite (S4):** a new `images.json` entry, `timed-dma`, and a `p3b` marker skipped on
     every other image.
-    - **Timed capture:** `start_at(now + 200 ms)`. `timestamp_ticks == T` is asserted, but it is
-      not the evidence: by construction it only proves the header was written.
+    - **Timed capture:** `start_at(now + 200 ms)`. The suite asserts that block 0's
+      `timestamp_ticks` equals `T + round((1 + stripped frames) × tick_hz / fs)` (G2/G3 ruling 6).
+      That is not the evidence: by construction it only proves the header was written.
     - **Independent checks for timed capture:**
       - Tick's `edge_capture_ticks` for the opening command equals T.
       - **Loopback alignment:** TX and RX `start_at` at the same T through the Talise framer

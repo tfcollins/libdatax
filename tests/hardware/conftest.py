@@ -4,13 +4,16 @@
 DATAX_HW_URI      libiio URI of the board under test (required to run).
 DATAX_HW_REQUIRE  1: a missing URI fails every test instead of skipping.
 DATAX_HW_EVIDENCE path of the evidence JSON (default ./evidence.json).
-DATAX_HW_IMAGE    hopcap-sfp | stock (default stock): the PL image on the board.
-                  P3a timed-control tests (marker ``p3a``) skip on stock; TX
-                  tests (marker ``needs_tx``) skip on hopcap-sfp, whose TX DMA
-                  feeds vrt49's deframer.
+DATAX_HW_IMAGE    stock | hopcap-sfp | timed-dma (default stock): the PL image on
+                  the board (tests/hardware/images.json). P3a timed-control
+                  tests (marker ``p3a``) skip on stock; P3b timed-stream tests
+                  (marker ``p3b``) run on timed-dma only; TX tests (marker
+                  ``needs_tx``) skip on hopcap-sfp, whose TX DMA feeds vrt49's
+                  deframer (timed-dma restores the stock TX DMA).
 DATAX_HW_PPS      internal | none (default internal): what drives the Tick PPS
-                  input on hopcap-sfp (the selector's Corundum PTP PPS, or
-                  nothing: the soft-alignment fallback is then expected).
+                  input on hopcap-sfp and timed-dma (the selector's Corundum
+                  PTP PPS, or nothing: the soft-alignment fallback is then
+                  expected).
 DATAX_HW_IMAGE_HASHES  free text (e.g. BOOT.BIN sha256) copied to the evidence.
 
 The suite must always *collect* without a board (CI runs
@@ -70,7 +73,9 @@ def _image():
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "p3a: P3a timed-control test (hopcap-sfp image)")
+    config.addinivalue_line("markers",
+                            "p3a: P3a timed-control test (hopcap-sfp or timed-dma image)")
+    config.addinivalue_line("markers", "p3b: P3b timed-stream test (timed-dma image)")
     config.addinivalue_line("markers", "needs_tx: uses the TX DMA (not on hopcap-sfp)")
     try:
         _image()
@@ -174,6 +179,12 @@ def hw_ctx(evidence):
         evidence["iio_context"] = {"error": str(e)}
     yield ctx
     ctx.close()
+
+
+@pytest.fixture(scope="session")
+def image():
+    """The DATAX_HW_IMAGE of this run (normalized)."""
+    return _image()
 
 
 @pytest.fixture(scope="session")

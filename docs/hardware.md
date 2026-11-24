@@ -1,7 +1,7 @@
 # Supported hardware and the hardware suite
 
-`tests/hardware` exercises immediate streaming, digital loopback and (P3a)
-timed control on a real board. It is not part of Tier 1: CI only proves it collects
+`tests/hardware` exercises immediate streaming, digital loopback, (P3a)
+timed control and (P3b) timed streams on a real board. It is not part of Tier 1: CI only proves it collects
 (`pytest tests/hardware --collect-only -q`). The `hw-test.yml` workflow runs it
 on the lab's self-hosted runners, dispatched and twice a week (Sunday and
 Wednesday); recorded results are in [evidence/p2](evidence/p2/README.md),
@@ -16,13 +16,15 @@ evidence is committed here).
 
 | Board | Family | Channels | Image | Validated | Labgrid place | hw-test.yml job | Evidence |
 |---|---|---|---|---|---|---|---|
-| ADRV9009-ZU11EG on ADRV2CRR-FMC (dual ADRV9009) | `adrv9009` | 4 RX / 4 TX | pinned boot sets (`images.json`): `stock`, `hopcap-sfp` | streaming RX/TX; timed GPIO, FHM timed tunes, device time, MCS verification (P3a) | `tron` | `tron` | [2026-11-11](evidence/ci/2026-11-11-tron/README.md) |
+| ADRV9009-ZU11EG on ADRV2CRR-FMC (dual ADRV9009) | `adrv9009` | 4 RX / 4 TX | pinned boot sets (`images.json`): `stock`, `hopcap-sfp`, `timed-dma` | streaming RX/TX; timed GPIO, FHM timed tunes, device time, MCS verification (P3a) | `tron` | `tron` | [2026-11-11](evidence/ci/2026-11-11-tron/README.md) |
 | ADRV9009 on ZC706 (ADRV9009-W/PCBZ) | `adrv9009` | 2 RX / 2 TX | Kuiper 2023_R2_P1 | streaming RX/TX | `nemo` | `kuiper` (`zc706`) | [2026-11-23](evidence/ci/2026-11-23-zc706/README.md) |
 | ADRV9361-Z7035 on ADRV1CRR-FMC | `ad936x` | 2 RX / 2 TX | Kuiper 2023_R2_P1 | streaming RX/TX | `lablp` | `kuiper` (`lablp`) | [2026-11-23](evidence/ci/2026-11-23-lablp/README.md) |
 
 Timed control (P3a) needs Tick in the PL, which only the ZU11EG's `hopcap-sfp`
-image has; on the other boards and images the P3a tests skip. Timed streams
-(P3b) are validated nowhere yet.
+and `timed-dma` images have; on the other boards and images the P3a tests
+skip. Timed streams (P3b) need the `timed-dma` image (Tick's DMA gates, the
+capture tagger, chip B's FHM pin). They are validated nowhere yet: the
+`timed-dma` column below is not yet validated.
 
 **Not supported.** The other lab boards have no libdatax device family, and
 opening them fails with `ENOTSUP` "unsupported device family": AD9081 on ZCU102
@@ -35,29 +37,33 @@ What the validating runs recorded (the evidence JSON's `iio_context` block).
 Use these when reproducing a result; other versions are untested, not
 known-bad.
 
-| | ADRV9009-ZU11EG (`stock`) | ADRV9009-ZU11EG (`hopcap-sfp`) | ADRV9009 / ZC706 | ADRV9361-Z7035 |
-|---|---|---|---|---|
-| PL (`hdl_system_id`) | HDL `main` `085a6ed7` (recovery bitstream) | `adrv9009zu11eg_vrt49` on `corundum` (hopcap `ac07d56`: Tick, FHM trigger, PPS selector; XSA `6292e762`) | `hdl_2023_r2` `2156ac7e`, project `adrv9009` on `zc706` | `hdl_2023_r2` `2156ac7e`, project `adrv9361z7035_ccfmc`, LVDS |
-| Kernel | Kuiper 2023_R2 `6.1.70-284114-g2e8908932dfd` (aarch64) | hopcap's build `6.1.70-g2e8908932dfd-dirty` | Kuiper 2023_R2 `6.1.70-284114-g2e8908932dfd` (armv7l) | same as ZC706 (armv7l) |
-| Device tree | Kuiper 2023_R2 | hopcap's | Kuiper boot folder `zynq-zc706-adv7511-adrv9009` | Kuiper boot folder `zynq-adrv9361-z7035-fmc` |
-| iiod | stock Kuiper `0.26-5e1e9cb` | same | same | same |
-| RX DMA device | `axi-adrv9009-rx-hpc` | same | `axi-adrv9009-rx-hpc` | `cf-ad9361-lpc` |
-| libiio (host) | the pinned v1 fork (`pins.json`) | same | same | same |
-| labgrid-plugins | `pins.json` | same | same | same |
+| | ADRV9009-ZU11EG (`stock`) | ADRV9009-ZU11EG (`hopcap-sfp`) | ADRV9009-ZU11EG (`timed-dma`), not yet validated | ADRV9009 / ZC706 | ADRV9361-Z7035 |
+|---|---|---|---|---|---|
+| PL (`hdl_system_id`) | HDL `main` `085a6ed7` (recovery bitstream) | `adrv9009zu11eg_vrt49` on `corundum` (hopcap `ac07d56`: Tick, FHM trigger, PPS selector; XSA `6292e762`) | hopcap `--profile timed-dma` (hopcap `c342514`, boot set from `36a1710`; tick `1787c33`; vrt49 PR #91 `0c8764d`, `VRT_DAC_TX_ENABLE=0`; XSA `44cce693`): hopcap-sfp plus Tick's DMA gates, the capture tagger, chip B's FHM pin and the stock TX DMA | `hdl_2023_r2` `2156ac7e`, project `adrv9009` on `zc706` | `hdl_2023_r2` `2156ac7e`, project `adrv9361z7035_ccfmc`, LVDS |
+| Kernel | Kuiper 2023_R2 `6.1.70-284114-g2e8908932dfd` (aarch64) | hopcap's build `6.1.70-g2e8908932dfd-dirty` | hopcap's build (ADI linux `2e89089`), to be recorded by the first run | Kuiper 2023_R2 `6.1.70-284114-g2e8908932dfd` (armv7l) | same as ZC706 (armv7l) |
+| Device tree | Kuiper 2023_R2 | hopcap's | hopcap's, with `adi,stream-gate-map` on the Tick node | Kuiper boot folder `zynq-zc706-adv7511-adrv9009` | Kuiper boot folder `zynq-adrv9361-z7035-fmc` |
+| iiod | stock Kuiper `0.26-5e1e9cb` | same | same (expected) | same | same |
+| RX DMA device | `axi-adrv9009-rx-hpc` | same | same (expected) | `axi-adrv9009-rx-hpc` | `cf-ad9361-lpc` |
+| libiio (host) | the pinned v1 fork (`pins.json`) | same | same | same | same |
+| labgrid-plugins | `pins.json` | same | same | same | same |
 
 ### ADRV9009-ZU11EG (`tron`)
 
 - **Image.** Not a stock Kuiper image. `hw-test.yml` JTAG-boots one of the boot
   sets pinned by SHA-256 in `tests/hardware/images.json` (`stock` for P2,
-  `hopcap-sfp` for P3a). The files live on the lab runner, not in this
+  `hopcap-sfp` for P3a, `timed-dma` for P3b with P2 and P3a as its
+  regression). The files live on the lab runner, not in this
   repository, and `scripts/hw/tron-run.sh` refuses any file whose hash differs.
   There is no public download for them yet.
 - **Never reprogram the PL at runtime.** It kills the JESD links; reboot instead.
-- **Run.** In the lab, dispatch `hw-test.yml` with `place=tron`. By hand, boot
-  one of the images, then follow [Run it](#run-it) with
-  `DATAX_HW_IMAGE=stock` or `DATAX_HW_IMAGE=hopcap-sfp`.
-- **Expected.** `stock`: the P2 suite passes, P3a skips. `hopcap-sfp`: P3a and P2 RX
-  pass; the TX tests skip, because TX DMA feeds vrt49's deframer on that image.
+- **Run.** In the lab, dispatch `hw-test.yml` with `place=tron` (`image=both`
+  boots `stock` then `hopcap-sfp`; `image=timed-dma` boots only that one). By
+  hand, boot one of the images, then follow [Run it](#run-it) with
+  `DATAX_HW_IMAGE` set to its name.
+- **Expected.** `stock`: the P2 suite passes, P3a and P3b skip. `hopcap-sfp`: P3a
+  and P2 RX pass; the TX tests skip, because TX DMA feeds vrt49's deframer on
+  that image; P3b skips. `timed-dma` (not yet validated): everything runs, P2
+  with TX and loopback, P3a and P3b; nothing skips.
 - **Board facts.** TX scan channels are `voltage0..7` (interleaved I/Q), and RX
   uses `voltage{n}_i/_q`. The first timed tune must be at least now + 20 ms ahead.
   `PHASE_COHERENT` stays false: the device tree enables no RF PLL phase sync.
@@ -147,7 +153,10 @@ not mean the board is broken.
   (`adi-lg request --mode uri`). The coordinator's board catalog picks the
   Kuiper image, and the place's own boot strategy boots it. The suite then runs
   against the exported URI with `DATAX_HW_IMAGE=stock`.
-- The `place` input picks one leg (`tron`, `zc706`, `lablp`) or `all`.
+- The `place` input picks one leg (`tron`, `zc706`, `lablp`) or `all`. The
+  `image` input picks the tron boot sets: `both` (default, and the schedule:
+  `stock` then `hopcap-sfp`), one of them, or `timed-dma` (dispatch only until
+  its rows are validated).
 - The repository is public, so the lab runners accept only this workflow on
   `main`, dispatched or scheduled by the owner (a job-started hook on the runner
   enforces it), and fork pull requests need approval.
@@ -161,7 +170,7 @@ not mean the board is broken.
     export DATAX_HW_URI=<libiio URI of the booted board>
     export DATAX_HW_REQUIRE=1                       # fail, not skip, without a URI
     export DATAX_HW_EVIDENCE=$PWD/evidence.json     # default ./evidence.json
-    export DATAX_HW_IMAGE=hopcap-sfp                # stock (default) skips the P3a tests
+    export DATAX_HW_IMAGE=timed-dma                 # or hopcap-sfp; stock (default) skips P3a and P3b
     python -m pytest tests/hardware -v --junitxml=junit.xml
 
 The libiio build must be the pinned v1 fork (`pins.json`); it talks to the
@@ -195,12 +204,25 @@ in `finally`, and compares RX to the expected transform of TX:
 ## P3a timed control
 
 Needs the ADRV9009-ZU11EG with hopcap's SFP image (Tick scheduler, FHM trigger
-on chip A, Tick PPS selector) and `DATAX_HW_IMAGE=hopcap-sfp`. On that image the
-TX tests skip (the TX DMA feeds vrt49's deframer) and the P2 RX smoke runs as
-the regression. `DATAX_HW_PPS=internal|none` says what drives Tick's PPS input
+on chip A, Tick PPS selector) and `DATAX_HW_IMAGE=hopcap-sfp`, or the
+`timed-dma` image, which carries the same. On `hopcap-sfp` the TX tests skip
+(the TX DMA feeds vrt49's deframer) and the P2 RX smoke runs as the
+regression. `DATAX_HW_PPS=internal|none` says what drives Tick's PPS input
 (Corundum's internal PTP PPS by default). Timing evidence is completion records
 and PLL readback; there is no scope, and the evidence says so. See
 `tests/hardware/README.md` for the test list.
+
+## P3b timed streams
+
+Needs the `timed-dma` image and `DATAX_HW_IMAGE=timed-dma` (not yet
+validated). `test_hw_timed_stream.py` checks block 0's hardware timestamp
+against Tick's edge capture, the first-sample offset of a TX pattern through
+the framer loopback over 10 runs (within +-1 sample: REQ-TEST-023, and the
+image's release latency), a TX burst gated off and on at 20 ms through the
+loopback, and chip B's FHM (timed tunes with PLL readback; enabling FHM must
+not move its LO). Over `ip:` only block 0 carries a timestamp: the ring
+enqueued before T overflows before the host reads it, so later blocks read
+`timestamp_ticks = 0`. See `tests/hardware/README.md` for the details.
 
 ## Troubleshooting timed tunes
 

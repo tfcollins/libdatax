@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Helpers for the P3a timed-control hardware tests.
+"""Helpers for the P3a timed-control and P3b timed-stream hardware tests.
 
 The first half is pure (no board, no libiio): image gating, tick arithmetic,
 the staircase plan and evidence formatting; Tier 1 tests it
@@ -14,7 +14,7 @@ import loopback as lb
 
 # ---- image gating ------------------------------------------------------------
 
-IMAGES = ("hopcap-sfp", "stock")
+IMAGES = ("hopcap-sfp", "stock", "timed-dma")
 DEFAULT_IMAGE = "stock"
 
 
@@ -47,12 +47,17 @@ def normalize_pps(value):
 def image_skip_reason(image, marker_names):
     """Why a test with these marker names must skip on ``image`` (None: it runs).
 
-    ``p3a``: needs the hopcap SFP image (Tick, FHM trigger, PPS selector).
-    ``needs_tx``: needs the stock TX DMA; on hopcap-sfp it feeds vrt49's deframer.
+    ``p3a``: needs Tick, the FHM trigger and the PPS selector: hopcap-sfp or
+    timed-dma (a superset of hopcap-sfp).
+    ``p3b``: needs the DMA gates, the capture tagger and chip B's FHM pin: timed-dma only.
+    ``needs_tx``: needs the stock TX DMA to the DAC: on hopcap-sfp it feeds
+    vrt49's deframer instead (timed-dma restores it).
     """
     names = set(marker_names)
     if image == "stock" and "p3a" in names:
-        return "P3a timed-control test: needs DATAX_HW_IMAGE=hopcap-sfp"
+        return "P3a timed-control test: needs DATAX_HW_IMAGE=hopcap-sfp or timed-dma"
+    if image != "timed-dma" and "p3b" in names:
+        return "P3b timed-stream test: needs DATAX_HW_IMAGE=timed-dma"
     if image == "hopcap-sfp" and "needs_tx" in names:
         return "TX DMA feeds vrt49's deframer on the hopcap-sfp image"
     return None
@@ -60,7 +65,11 @@ def image_skip_reason(image, marker_names):
 
 # ---- tick arithmetic and plans ---------------------------------------------------
 
-STAIR_MASK = 0xE            # GPIO bits 3:1; bit 0 is reserved for tunes
+# GPIO bits 3:2. Bits 1:0 are reserved for tunes: bit 0 is chip A's FHM
+# trigger, and bit 1 chip B's on the timed-dma image (libdatax refuses a
+# queue_gpio that touches them).
+STAIR_MASK = 0xC
+LATE_GPIO = 0x4             # the one-bit GPIO test_late_dropped commits in the past
 PULSE_MAX_US = 10000        # the proven trigger pulse (src/fhm.c)
 
 
@@ -75,8 +84,8 @@ def ticks_to_s(ticks, hz):
 
 def staircase(t0, n, spacing_ticks):
     """``n`` GPIO edges ``(tick, mask, value)`` from ``t0``, ``spacing_ticks``
-    apart, counting 1..n on bits 3:1 (value wraps after 7)."""
-    return [(int(t0) + i * int(spacing_ticks), STAIR_MASK, ((i + 1) & 7) << 1)
+    apart, counting 1..n on bits 3:2 (value wraps after 3)."""
+    return [(int(t0) + i * int(spacing_ticks), STAIR_MASK, ((i + 1) & 3) << 2)
             for i in range(n)]
 
 
@@ -154,6 +163,118 @@ def all_on_time(done):
                c.executed_ticks == c.requested_ticks for c in done)
 
 
+# ---- P3b timed streams (pure) ------------------------------------------------------
+
+TX_START_MUTE_READS = 3     # G2/G3 ruling 1: a TX start_at mutes its first N reads (8 converters)
+
+
+def frames_to_ticks(n, fs, hz):
+    """Ticks of ``n`` sample frames at ``fs`` frames/s on an ``hz`` timebase,
+    rounded half up (integers only: Python's round() is half-even)."""
+    n, fs, hz = int(n), int(fs), int(hz)
+    if fs <= 0:
+        raise ValueError("fs must be positive")
+    return (2 * n * hz + fs) // (2 * fs)
+
+
+def ticks_to_frames(ticks, fs, hz):
+    """Sample frames in ``ticks`` device ticks, rounded half up."""
+    ticks, fs, hz = int(ticks), int(fs), int(hz)
+    if hz <= 0:
+        raise ValueError("hz must be positive")
+    return (2 * ticks * fs + hz) // (2 * hz)
+
+
+def strip_frames(header_bytes, nch):
+    """Whole frames the capture tag costs: ceil(header_bytes / frame_bytes),
+    frame_bytes = 4 per channel (G2/G3 ruling 6)."""
+    fb = 4 * int(nch)
+    return -(-int(header_bytes) // fb)
+
+
+def block0_timestamp(t_open, strip, fs, hz):
+    """Block 0's ``timestamp_ticks`` for an opening at ``t_open`` (API ticks):
+    util_cpack2 drops the first released sample, the tag costs ``strip``
+    frames, so the first delivered sample is released sample 1 + strip."""
+    return int(t_open) + frames_to_ticks(1 + int(strip), fs, hz)
+
+
+def sample_time(anchor, strip, k, fs, hz):
+    """API time of delivered sample ``k`` (0: block 0's first) of a release
+    whose tag says ``anchor``: libdatax's derived-timestamp rule."""
+    return int(anchor) + frames_to_ticks(1 + int(strip) + int(k), fs, hz)
+
+
+def offset_bracket(api_before, hw, api_after):
+    """(lo, hi) bounds of the soft offset (API = hw + offset) from an API time
+    read, a raw Tick read and another API read, in that order."""
+    return int(api_before) - int(hw), int(api_after) - int(hw)
+
+
+def audible(raw):
+    """Per frame of int16 ``(n, 2)`` I/Q: True where it is not exactly zero
+    (a muted DAC through the digital loopback reads exactly 0)."""
+    import numpy as np
+    raw = np.asarray(raw)
+    return np.any(raw != 0, axis=1)
+
+
+def runs(mask):
+    """``[(start, end)]`` of the True runs of a boolean array (end exclusive)."""
+    import numpy as np
+    m = np.asarray(mask, dtype=np.int8)
+    d = np.diff(np.concatenate(([0], m, [0])))
+    return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist()))
+
+
+def pattern_lag(expected, raw, start):
+    """The lag ``l`` with ``raw[k] == expected[(k - l) % P]`` (int16 ``(n, 2)``
+    rows), found from the ``P`` frames at ``start``; returns ``l % P``."""
+    import numpy as np
+    exp = np.asarray(expected, dtype=np.int16)
+    p = exp.shape[0]
+    seg = np.asarray(raw, dtype=np.int16)[start:start + p]
+    if seg.shape[0] < p:
+        raise ValueError(f"need {p} frames from {start}, have {seg.shape[0]}")
+    e = exp[:, 0].astype(np.float64) + 1j * exp[:, 1]
+    r = seg[:, 0].astype(np.float64) + 1j * seg[:, 1]
+    lag, _, _ = lb.align_and_fit(e, r)
+    return (int(start) + int(lag)) % p
+
+
+def mismatches_at_lag(expected, raw, lag, mask=None):
+    """Frames of ``raw`` (where ``mask`` is True) that differ from
+    ``expected[(k - lag) % P]``."""
+    import numpy as np
+    exp = np.asarray(expected, dtype=np.int16)
+    raw = np.asarray(raw, dtype=np.int16)
+    idx = (np.arange(raw.shape[0]) - int(lag)) % exp.shape[0]
+    bad = np.any(raw != exp[idx], axis=1)
+    if mask is not None:
+        bad &= np.asarray(mask, dtype=bool)
+    return int(np.count_nonzero(bad))
+
+
+def spread_ok(values, tol=1):
+    """Every value within ``tol`` of the median (the "identical within +-1
+    sample" rule); returns ``(ok, median, max - min)``."""
+    v = sorted(int(x) for x in values)
+    if not v:
+        return False, None, None
+    med = v[len(v) // 2]
+    return all(abs(x - med) <= tol for x in v), med, v[-1] - v[0]
+
+
+def ring_coverage_s(block_samples, block_count, fs):
+    """Seconds of samples the blocks enqueued before T hold."""
+    return int(block_samples) * int(block_count) / float(fs)
+
+
+def gate_map_roles(text):
+    """The roles of a stream_gate_map text (commas, surrounding blanks dropped)."""
+    return [r.strip() for r in (text or "").split(",") if r.strip()]
+
+
 # ---- libiio v1 access ---------------------------------------------------------
 
 TICK_DEVICE = "axi-timed-command-scheduler"
@@ -219,6 +340,31 @@ def tick_counters(ctx):
             ("late_count", "overflow_count", "pps_present", "time_aligned")}
 
 
+def tick_attr_str(ctx, attr):
+    """A text attribute of the Tick IIO device, or None when it has none."""
+    dev = lb.find_device(ctx, TICK_DEVICE)
+    if not dev:
+        return None
+    h = _lib().iio_device_find_attr(dev, attr.encode())
+    if not h:
+        return None
+    try:
+        return _read(h)
+    except lb.LoopbackError:
+        return None
+
+
+EDGE_CAPTURE_ATTRS = ("edge_capture_ticks", "edge_capture_valid", "edge_capture_count",
+                      "edge_capture_overrun", "edge_capture_target_id",
+                      "edge_capture_command_id")
+
+
+def edge_capture(ctx):
+    """Tick's capture tag registers: the raw (hardware) tick of the most
+    recent STREAM_GATE assert, and its status (None for a missing attribute)."""
+    return {a[len("edge_capture_"):]: tick_attr(ctx, a) for a in EDGE_CAPTURE_ATTRS}
+
+
 def _lo_attr(ctx, attr, phy=PHY_A):
     dev = lb.find_device(ctx, phy)
     if not dev:
@@ -232,14 +378,39 @@ def _lo_attr(ctx, attr, phy=PHY_A):
     return h
 
 
-def read_pll_hz(ctx):
-    """The live RF PLL frequency of chip A in Hz (``frequency_hopping_mode``
+def read_pll_hz(ctx, phy=PHY_A):
+    """The live RF PLL frequency of a chip in Hz (``frequency_hopping_mode``
     reads TALISE_getFhmRfPllFrequency), independent of libdatax's own check."""
-    return int(_read(_lo_attr(ctx, FHM_HOP_ATTR)))
+    return int(_read(_lo_attr(ctx, FHM_HOP_ATTR, phy)))
 
 
-def read_fhm_enable(ctx):
-    return int(_read(_lo_attr(ctx, FHM_ENABLE_ATTR)))
+def read_fhm_enable(ctx, phy=PHY_A):
+    return int(_read(_lo_attr(ctx, FHM_ENABLE_ATTR, phy)))
+
+
+def write_fhm_enable(ctx, on, phy=PHY_A):
+    """Switch a chip's FHM through its driver (the suite's own escape hatch:
+    libdatax enables FHM at stage_hop_table and disables it at context close)."""
+    rc = _lib().iio_attr_write_string(_lo_attr(ctx, FHM_ENABLE_ATTR, phy),
+                                      b"1" if on else b"0")
+    if rc < 0:
+        raise lb.LoopbackError(f"{phy}: writing {FHM_ENABLE_ATTR}={int(bool(on))} failed "
+                               f"(errno {-rc})")
+
+
+LO_ATTR = "frequency"
+
+
+def read_lo_hz(ctx, phy=PHY_A):
+    """The TRX LO a chip's driver reports (``frequency`` of altvoltage0)."""
+    return int(_read(_lo_attr(ctx, LO_ATTR, phy)))
+
+
+def write_lo_hz(ctx, hz, phy=PHY_A):
+    """Set a chip's TRX LO through its driver (FHM must be off)."""
+    rc = _lib().iio_attr_write_string(_lo_attr(ctx, LO_ATTR, phy), str(int(hz)).encode())
+    if rc < 0:
+        raise lb.LoopbackError(f"{phy}: writing {LO_ATTR}={int(hz)} failed (errno {-rc})")
 
 
 def attribute_names(ctx, device):

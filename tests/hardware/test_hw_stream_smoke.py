@@ -37,10 +37,21 @@ def test_family_and_channels(dev, family, record):
     assert dev.sample_rate > 0
 
 
-def test_caps_row(dev):
-    # P3a flags may appear (Tick, FHM, MCS); the stream and net-offload flags
-    # of later phases and PHASE_COHERENT never do on this setup.
-    assert set(dev.caps) <= {"timed_commands", "fhm_hop", "mcs"}, list(dev.caps)
+P3A_CAPS = {"timed_commands", "fhm_hop", "mcs"}
+P3B_CAPS = {"rx_arm", "tx_arm", "stream_gate", "timestamps"}
+
+
+def test_caps_row(dev, image, record):
+    # P3a flags may appear (Tick, FHM, MCS); the P3b stream flags only on the
+    # timed-dma image, where all four must; the net-offload flags of later
+    # phases and PHASE_COHERENT never do on this setup.
+    caps = set(dev.caps)
+    record("caps", sorted(caps))
+    if image == "timed-dma":
+        assert P3B_CAPS <= caps, f"timed-dma must report {sorted(P3B_CAPS)}: {sorted(caps)}"
+        assert caps <= P3A_CAPS | P3B_CAPS, sorted(caps)
+    else:
+        assert caps <= P3A_CAPS, sorted(caps)
 
 
 def test_rx_block_nonconstant_per_channel(dev, record):

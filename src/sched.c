@@ -1029,6 +1029,7 @@ static int flush_and_repend(struct datax_sched *s, struct datax_io_hold *h, cons
 		if (c->state == CMD_WRITTEN && c->hw_ts > t2) {
 			c->state = CMD_PENDING;       /* the feeder writes it again */
 			c->lagged = false;
+			c->lag_t = 0;
 		}
 		i++;
 	}
@@ -1069,7 +1070,8 @@ static bool gate_match(const struct sched_cmd *c, uint32_t gate_mask)
 int datax_sched_cancel_gates(struct datax_sched *s, uint32_t gate_mask, const char *detail)
 {
 	struct datax_io_hold h;
-	bool written = false;
+	bool written = false, fresh, any = false;
+	unsigned long long now;
 	int ret;
 
 	if (!s)
@@ -1078,6 +1080,14 @@ int datax_sched_cancel_gates(struct datax_sched *s, uint32_t gate_mask, const ch
 		return io_busy(s, "cancel_gates");
 	datax_sched_io_lock(s, &h);
 	pthread_mutex_lock(&s->lock);
+	for (size_t i = 0; i < s->ncmds && !any; i++)
+		any = gate_match(&s->cmds[i], gate_mask) && s->cmds[i].state == CMD_WRITTEN;
+	pthread_mutex_unlock(&s->lock);
+	/* Device time now, to tell a written command that already ran (an
+	 * unreported one stays WRITTEN until prune) from one still in Tick. */
+	fresh = any && !datax_poller_read_time(s);
+	pthread_mutex_lock(&s->lock);
+	now = s->last_hw;
 	/* 1. Finish them, one at a time: a hook may move the table. */
 	for (size_t i = 0; i < s->ncmds; i++) {
 		struct sched_cmd *c = &s->cmds[i];
@@ -1089,6 +1099,11 @@ int datax_sched_cancel_gates(struct datax_sched *s, uint32_t gate_mask, const ch
 
 		if (!gate_match(c, gate_mask))
 			continue;
+		if (c->state == CMD_WRITTEN && !c->report && fresh && c->hw_ts <= now) {
+			datax_sched_remove(s, c);     /* it ran: as prune() would */
+			i = (size_t)-1;
+			continue;
+		}
 		written = written || c->state == CMD_WRITTEN;
 		res.requested_ticks = c->api_ts;
 		snprintf(res.detail, sizeof(res.detail), "%s", detail ? detail : "cancelled");
@@ -1096,7 +1111,7 @@ int datax_sched_cancel_gates(struct datax_sched *s, uint32_t gate_mask, const ch
 		i = (size_t)-1;
 	}
 	pthread_mutex_unlock(&s->lock);
-	/* 2. Nothing of theirs is in Tick: no Tick I/O. */
+	/* 2. Nothing of theirs is in Tick: no flush. */
 	ret = written ? flush_and_repend(s, &h, "a stream stop", false) : 0;
 	datax_sched_io_unlock(s, &h);
 	if (ret < 0)

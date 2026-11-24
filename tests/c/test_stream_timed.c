@@ -409,6 +409,22 @@ static uint64_t recv_block(struct fx *x, struct datax_stream *s, struct datax_bl
 	return first - skip;
 }
 
+/* No TX frame was played: every segment is muted or an underflow. */
+static void nothing_played(struct fx *x)
+{
+	struct fake_dma_tx_segment seg[64];
+	size_t n = fake_dma_tx_segments(x->d, seg, 64);
+
+	for (size_t i = 0; i < n && i < 64; i++) {
+		if (!seg[i].muted && !seg[i].underflow)
+			fprintf(stderr, "played: [%llu, %llu) from frame %llu\n",
+				(unsigned long long)seg[i].t_start,
+				(unsigned long long)seg[i].t_end,
+				(unsigned long long)seg[i].first_frame);
+		CHECK(seg[i].muted || seg[i].underflow);
+	}
+}
+
 /* ---- tests ------------------------------------------------------------------ */
 
 static void test_start_at_guard_margin_late(void)
@@ -1119,15 +1135,19 @@ static void test_start_at_tx_partial_mask_enotsup(void)
 	s = stream(&x, DATAX_TX, 0xf, false);              /* every TX channel */
 	CHECK(preload(s, BS) == (int)BS);
 	CHECK(datax_stream_start_at(s, at(&x, 50)) == 0);
-	/* the clock stands still: the forced-open drain may time out */
-	CHECK(datax_stream_stop(s) == 0 || strstr(lasterr(&x), "did not drain"));
+	/* stopped before T: the DMA is cancelled, nothing drains or plays */
+	CHECK(datax_stream_stop(s) == 0);
+	fake_tick_advance(x.f, 100 * MS);
+	nothing_played(&x);
 	fx_close(&x);
 
 	fx_open(&x, true);                                  /* without the token */
 	s = stream(&x, DATAX_TX, 0x1, false);
 	CHECK(preload(s, BS) == (int)BS);
 	CHECK(datax_stream_start_at(s, at(&x, 50)) == 0);
-	CHECK(datax_stream_stop(s) == 0 || strstr(lasterr(&x), "did not drain"));
+	CHECK(datax_stream_stop(s) == 0);
+	fake_tick_advance(x.f, 100 * MS);
+	nothing_played(&x);
 	fx_close(&x);
 }
 
@@ -1383,6 +1403,207 @@ static void test_sched_destroy_while_armed(void)
 	fx_close(&x);
 }
 
+
+static void test_stop_armed_tx_bounded(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct clockthr c;
+	unsigned long long t0;
+
+	fx_open(&x, true);
+	fake_dma_set_wait_ms(x.d, 5000);
+	s = stream(&x, DATAX_TX, 0x1, false);
+	CHECK(preload(s, NB * BS + 10) == (int)(NB * BS));
+	CHECK(datax_stream_start_at(s, at(&x, 2000)) == 0);
+	settle(&x);
+	c.f = x.f;
+	c.stop = 0;
+	CHECK(pthread_create(&c.t, NULL, clock_main, &c) == 0);
+	msleep(20);
+	/* armed, never opened: the DMA is cancelled before the gate opens */
+	t0 = mono_ms();
+	CHECK(datax_stream_stop(s) == 0);
+	CHECK(mono_ms() - t0 < 1000);
+	msleep(20);                        /* the forced-open gate, the clock running */
+	c.stop = 1;
+	pthread_join(c.t, NULL);
+	CHECK(!gate_bit(&x, x.txm));
+	nothing_played(&x);
+	fx_close(&x);
+}
+
+static void test_start_at_tx_failed_commit_transmits_nothing(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, false);
+	CHECK(preload(s, NB * BS) == (int)(NB * BS));
+	/* the guard check passes at step 4; the commit's time read, three
+	 * accesses later at 2 ms each, is inside the margin */
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	T = at(&x, 15);
+	fake_tick_set_access_cost(x.f, 2 * MS);
+	CHECK(datax_stream_start_at(s, T) == DATAX_ERR_LATE);
+	fake_tick_set_access_cost(x.f, 0);
+	CHECK(strstr(lasterr(&x), "guard margin") != NULL);
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	CHECK(!gate_bit(&x, x.txm) && !gate_bit(&x, x.txl));   /* forced open again */
+	step_to(&x, T + (NB + 2) * BS * FT, 1 * MS);
+	nothing_played(&x);
+	fx_close(&x);
+}
+
+static void test_held_slot_tx_open_fails(void)
+{
+	struct fx x;
+	struct datax_stream *rx, *tx;
+	unsigned long long T;
+	int16_t b[BS * 2];
+	unsigned long d0;
+	long g;
+
+	/* the same-T loopback setup behind an earlier unacked reported GPIO:
+	 * the held RX opening blocks Tick's queue, so the unreported TX opening
+	 * behind it runs late with no record and no late_count rise */
+	fx_open(&x, true);
+	rx = stream(&x, DATAX_RX, 0x1, false);
+	tx = stream(&x, DATAX_TX, 0x1, false);
+	CHECK(preload(tx, NB * BS) == (int)(NB * BS));
+	T = at(&x, 40);
+	g = datax_sched_queue_gpio(x.s, T - 5 * MS, 0x2, 0x2);
+	CHECK(g > 0 && datax_sched_report(x.s, g) == 0 && datax_sched_commit(x.s) == 0);
+	d0 = shim_get(&x.sh, &x.sh.desc);
+	CHECK(datax_stream_start_at(tx, T) == 0);
+	CHECK(datax_stream_start_at(rx, T) == 0);
+	WAIT_FOR(shim_get(&x.sh, &x.sh.desc) >= d0 + 7 && !sched_count(&x, CMD_PENDING));
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	fake_tick_advance(x.f, T + 5 * MS - now(&x));
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	WAIT_FOR(events(&x.ev, DATAX_EVT_LATE_COMMAND, "held completion slot"));
+	CHECK(preload(tx, 1) == DATAX_ERR_LATE);
+	CHECK(strstr(lasterr(&x), "held completion slot") != NULL);
+	CHECK(datax_stream_recv(rx, b, BS, NULL, 2000) == DATAX_ERR_LATE);
+	CHECK(strstr(lasterr(&x), "poller lagged") != NULL);
+	CHECK(datax_stream_stop(rx) == 0);
+	CHECK(datax_stream_stop(tx) == 0);
+	fx_close(&x);
+}
+
+static void test_stop_after_tx_open_ran_no_flush(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct clockthr c;
+	unsigned long long T, tg;
+	unsigned long fl0;
+	size_t e0, it = 0;
+	bool ok = false;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_TX, 0x1, false);
+	CHECK(preload(s, NB * BS) == (int)(NB * BS));
+	e0 = fake_tick_exec_log(x.f, 0, NULL, 0);
+	T = at(&x, 30);
+	tg = T + 20 * MS;
+	CHECK(datax_stream_start_at(s, T) == 0);
+	CHECK(datax_sched_queue_gpio(x.s, tg, 0x2, 0x2) > 0 && datax_sched_commit(x.s) == 0);
+	settle(&x);
+	/* the open runs; the poller is paused, so it is still WRITTEN */
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	fake_tick_advance(x.f, T + 1 * MS - now(&x));
+	CHECK(gate_execs(&x, e0, x.txl, T, &it, NULL) == 1);
+	CHECK(sched_count(&x, CMD_WRITTEN) == 2);
+	fl0 = shim_get(&x.sh, &x.sh.flushes);
+	c.f = x.f;
+	c.stop = 0;
+	CHECK(pthread_create(&c.t, NULL, clock_main, &c) == 0);
+	CHECK(datax_stream_stop(s) == 0);          /* it ran: the preload drains */
+	c.stop = 1;
+	pthread_join(c.t, NULL);
+	CHECK(shim_get(&x.sh, &x.sh.flushes) == fl0);   /* no flush for an open that ran */
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	step_to(&x, tg + 1 * MS, 1 * MS);
+	CHECK(gpio_execs(&x, e0, tg, &ok) == 1 && ok);
+	CHECK(events(&x.ev, DATAX_EVT_LATE_COMMAND, NULL) == 0);
+	fx_close(&x);
+}
+
+struct cbrec {
+	struct datax_stream *s;
+	pthread_mutex_t m;
+	int done, stop_rc;
+	char stop_err[256], destroy_err[256];
+	struct datax_context *ctx;
+};
+static struct cbrec g_cb;
+
+static void destroy_cb(const struct datax_event *evt, void *user)
+{
+	struct cbrec *r = user;
+
+	if (evt->type != DATAX_EVT_LATE_COMMAND)
+		return;
+	pthread_mutex_lock(&r->m);
+	if (!r->done) {
+		r->stop_rc = datax_stream_stop(r->s);
+		snprintf(r->stop_err, sizeof(r->stop_err), "%s",
+			 datax_context_get_last_error(r->ctx));
+		datax_stream_destroy(r->s);
+		snprintf(r->destroy_err, sizeof(r->destroy_err), "%s",
+			 datax_context_get_last_error(r->ctx));
+		r->done = 1;
+	}
+	pthread_mutex_unlock(&r->m);
+}
+
+static int cb_done(void)
+{
+	int d;
+
+	pthread_mutex_lock(&g_cb.m);
+	d = g_cb.done;
+	pthread_mutex_unlock(&g_cb.m);
+	return d;
+}
+
+static void test_destroy_from_event_callback_refused(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	unsigned long long T;
+	int16_t b[8];
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	memset(&g_cb, 0, sizeof(g_cb));
+	CHECK(pthread_mutex_init(&g_cb.m, NULL) == 0);
+	g_cb.s = s;
+	g_cb.ctx = x.ctx;
+	CHECK(datax_context_set_event_callback(x.ctx, destroy_cb, &g_cb) == 0);
+	/* a host-late open raises the event on the poller thread */
+	T = at(&x, 30);
+	CHECK(datax_internal_sched_pause(x.s, true) == 0);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	fake_tick_advance(x.f, T - 5 * MS - now(&x));
+	CHECK(datax_internal_sched_pause(x.s, false) == 0);
+	WAIT_FOR(cb_done());
+	CHECK(g_cb.stop_rc == -EDEADLK);
+	CHECK(strstr(g_cb.stop_err, "stream_stop from the scheduler's poller thread") != NULL);
+	CHECK(strstr(g_cb.destroy_err, "stream_destroy from the scheduler's poller thread") !=
+	      NULL);
+	CHECK(datax_context_set_event_callback(x.ctx, on_event, &x.ev) == 0);
+	/* the stream is still valid: it reports its failure and stops */
+	CHECK(datax_stream_recv(s, b, 1, NULL, 1000) == DATAX_ERR_LATE);
+	CHECK(datax_stream_stop(s) == 0);
+	datax_stream_destroy(s);
+	pthread_mutex_destroy(&g_cb.m);
+	fx_close(&x);
+}
+
 static const struct { const char *name; void (*fn)(void); } tests[] = {
 #define T_(n) { #n, n }
 	T_(test_start_at_guard_margin_late),
@@ -1412,6 +1633,11 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_tx_preload_rules),
 	T_(test_sched_flush_fails_armed),
 	T_(test_sched_destroy_while_armed),
+	T_(test_stop_armed_tx_bounded),
+	T_(test_start_at_tx_failed_commit_transmits_nothing),
+	T_(test_held_slot_tx_open_fails),
+	T_(test_stop_after_tx_open_ran_no_flush),
+	T_(test_destroy_from_event_callback_refused),
 #undef T_
 };
 

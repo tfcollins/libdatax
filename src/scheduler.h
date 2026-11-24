@@ -221,6 +221,8 @@ struct sched_cmd {
 	bool consume;                      /* see datax_sched_cmd_spec */
 	bool lead, late_probe;             /* see datax_sched_cmd_spec */
 	bool lagged;                       /* a drain came after hw_ts: may be held */
+	unsigned long long lag_t;          /* lagged: the drain time (after the ack
+					    * that released it) that marked it */
 	datax_sched_complete_fn on_complete;
 	void *user;
 	/* CMD_DONE */

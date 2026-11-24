@@ -668,6 +668,9 @@ int datax_stream_stop(struct datax_stream *s)
 
 	if (!s)
 		return -EINVAL;
+	ret = datax_stream_on_poller(s, "stop");
+	if (ret)
+		return ret;
 	if (!s->started)
 		return 0;
 	/* Timed: cancel the gate commands, then force open, so the drain
@@ -732,6 +735,10 @@ int datax_stream_stop(struct datax_stream *s)
 void datax_stream_destroy(struct datax_stream *s)
 {
 	if (!s)
+		return;
+	/* Refused (last error set) on the poller thread: the stream stays
+	 * valid; destroy it from another thread. */
+	if (datax_stream_on_poller(s, "destroy"))
 		return;
 	datax_stream_stop(s);
 	datax_stream_hw_close(s);

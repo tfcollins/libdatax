@@ -103,6 +103,11 @@ int datax_stream_force_open(struct datax_stream *s, bool clear_tag);
  * gate commands on the device scheduler, then force the gate open. 0 or the
  * first -errno (with last-error); the teardown runs either way. */
 int datax_stream_timed_stop(struct datax_stream *s);
+/* -EDEADLK with a last error when the caller is the device scheduler's
+ * poller thread or holds its io (an event callback or a hook): stop() and
+ * destroy() refuse there, so a stream is never freed under its own pending
+ * hook. 0 otherwise. */
+int datax_stream_on_poller(struct datax_stream *s, const char *verb);
 /* A failed timed stream: fail (DATAX_ERR_LATE or -ECANCELED) with a last
  * error naming the cause, unless quiet; 0 otherwise. */
 int datax_stream_timed_failed(struct datax_stream *s, const char *verb, bool quiet);

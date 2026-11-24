@@ -402,7 +402,10 @@ if(DATAX_LIBIIO_BUILD)
     test_start_at_report_spacing_restores_gate test_spacing_ignores_unreported
     test_start_at_tx_partial_mask_enotsup test_start_at_clears_idle_overflow
     test_same_t_rx_open_before_tx test_start_at_tx_cyclic test_start_at_tx_stream_preload
-    test_tx_preload_rules test_sched_flush_fails_armed test_sched_destroy_while_armed)
+    test_tx_preload_rules test_sched_flush_fails_armed test_sched_destroy_while_armed
+    test_stop_armed_tx_bounded test_start_at_tx_failed_commit_transmits_nothing
+    test_held_slot_tx_open_fails test_stop_after_tx_open_ran_no_flush
+    test_destroy_from_event_callback_refused)
   foreach(tt ${DATAX_STREAM_TIMED_TESTS})
     add_test(NAME stream_timed_${tt}
       COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh

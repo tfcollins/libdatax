@@ -18,10 +18,22 @@
  *  - TX: unreported (controller ruling, Task 3): a reported TX opening at
  *    the same T as an RX one would be refused by the report-spacing rule, or
  *    held behind the RX one's completion record. It therefore has no
- *    completion: its lateness shows only as host-late (the feeder's guard
- *    rule, through the hook) or as late on submit, which the feeder detects
- *    by sampling late_count around its push (late_probe). An on-time TX
- *    opening is never confirmed: it leaves the table once due.
+ *    completion, and its lateness is detected three ways, each through the
+ *    hook: host-late (the feeder's guard rule); late on submit, which the
+ *    feeder detects by sampling late_count around its push (late_probe);
+ *    and running behind a held completion slot. A reported head held by a
+ *    full slot blocks Tick's whole queue (RTL line 351), so a TX opening due
+ *    from that head's time to the ack that released it runs late, yet Tick
+ *    records it nowhere (no record, no late_count rise): when the poller
+ *    classes the head LATE "poller lagged" it finishes those LATE too
+ *    (poller.c held_behind). An on-time TX opening is never confirmed: it
+ *    leaves the table once due.
+ *
+ * A TX preload whose opening has not run must never reach the DAC: stop()
+ * and a failed start_at cancel the DMA (no drain) before the gate commands
+ * are cancelled and the gate is forced open. "Has not run" is decided on a
+ * fresh device-time read against T, not on the table (an unreported opening
+ * stays WRITTEN after it ran, until the poller prunes it).
  *
  * Lifetime: a stream holds no scheduler reference across calls. stop()
  * finishes every gate command of its direction (datax_sched_cancel_gates)
@@ -324,15 +336,17 @@ static int arm(struct datax_stream *s)
 	return datax_stream_enqueue_held(s, "start_at");
 }
 
-/* Undo a start_at past step 5: forced open again, nothing left armed. The
- * caller's error stays the last error. */
+/* Undo a start_at past step 5: nothing left armed, then forced open again.
+ * The caller's error stays the last error. */
 static void undo(struct datax_stream *s)
 {
 	char keep[256];
 
 	snprintf(keep, sizeof(keep), "%s", datax_context_get_last_error(s->dev->ctx));
-	(void)datax_stream_force_open(s, true);
+	/* The DMA first (cancel, no drain): forcing the gate open with a TX
+	 * preload armed would play it. */
 	datax_stream_hw_close(s);
+	(void)datax_stream_force_open(s, true);
 	datax_stream_timed_reset(s);
 	datax_error_set(s->dev->ctx, SUB, "%s", keep);
 }
@@ -500,12 +514,44 @@ undo:
 	return ret;
 }
 
+/* TX: the opening has not run (or failed): device time is before T. A
+ * failed time read counts as not run (cancel: never play a preload late). */
+static bool tx_not_opened(struct datax_stream *s)
+{
+	unsigned long long now, hz;
+
+	if (atomic_load(&s->fail))
+		return true;
+	return datax_device_get_time(s->dev, &now, &hz) || now < s->t_open;
+}
+
+int datax_stream_on_poller(struct datax_stream *s, const char *verb)
+{
+	struct datax_sched *sch = datax_device_sched_get(s->dev);
+	bool self = sch && (datax_poller_is_self(sch) || datax_sched_holds_io(sch));
+
+	datax_sched_put(sch);
+	if (!self)
+		return 0;
+	return datax_error_ret(s->dev->ctx, EDEADLK, SUB,
+			       "stream_%s from the scheduler's poller thread (an event callback "
+			       "or hook) would deadlock or free a stream its commands still "
+			       "reference; call it from another thread", verb);
+}
+
 int datax_stream_timed_stop(struct datax_stream *s)
 {
 	struct datax_sched *sch;
 	int ret = 0, fret;
 
 	atomic_store(&s->stopping, true);
+	/* A TX preload whose opening has not run: cancel the DMA before the
+	 * opening is cancelled (it stays in Tick until the flush) and before
+	 * the gate is forced open, so no sample reaches the DAC. stop()'s P2
+	 * teardown then finds nothing open: no flush of the partial block, no
+	 * drain. */
+	if (!is_rx(s) && s->hw && tx_not_opened(s))
+		datax_stream_hw_close(s);
 	sch = datax_device_sched_get(s->dev);
 	if (sch) {
 		ret = datax_sched_cancel_gates(sch, 1u << (unsigned int)level_bit(s),

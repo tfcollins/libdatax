@@ -200,6 +200,29 @@ static int finish_lost(struct datax_sched *s)
 	return 0;
 }
 
+/* Finish LATE every written late_probe command (the TX opening gate) due in
+ * [from, until]: it ran behind the held completion slot of seq. s->lock. */
+static void held_behind(struct datax_sched *s, long seq, unsigned long long from,
+			unsigned long long until)
+{
+	for (size_t i = 0; i < s->ncmds; i++) {
+		struct sched_cmd *p = &s->cmds[i];
+		struct datax_sched_result res = {
+			.status = DATAX_COMPLETION_LATE,
+			.tick_status = UINT32_MAX,
+		};
+
+		if (p->state != CMD_WRITTEN || !p->late_probe || p->hw_ts < from ||
+		    p->hw_ts > until)
+			continue;
+		res.requested_ticks = p->api_ts;
+		snprintf(res.detail, sizeof(res.detail),
+			 "late: ran behind a held completion slot (seq %ld; poller lagged)", seq);
+		datax_sched_finish(s, p, &res);   /* may drop s->lock for a hook */
+		i = (size_t)-1;                   /* the table may have moved: rescan */
+	}
+}
+
 /* One drained record v, its drain read at hardware time t (estimated: the
  * time read failed after the ack; the command then counts as lagged).
  * s->lock held. */
@@ -220,8 +243,11 @@ static void process(struct datax_sched *s, const unsigned long long v[7], unsign
 		struct sched_cmd *o = &s->cmds[i];
 
 		if (o->state == CMD_WRITTEN && o->report &&
-		    (uint32_t)o->seq != rseq && o->hw_ts <= t)
+		    (uint32_t)o->seq != rseq && o->hw_ts <= t) {
 			o->lagged = true;
+			if (t > o->lag_t)
+				o->lag_t = t;
+		}
 	}
 	for (size_t i = 0; i < s->ncmds && !c; i++)
 		if (s->cmds[i].state == CMD_WRITTEN && s->cmds[i].report &&
@@ -233,16 +259,29 @@ static void process(struct datax_sched *s, const unsigned long long v[7], unsign
 	 * drop, which late_count already reports. */
 	if (!c)
 		return;
-	if (estimated)
+	if (estimated) {
 		c->lagged = true;
+		if (t > c->lag_t)
+			c->lag_t = t;
+	}
 	memset(&res, 0, sizeof(res));
 	datax_sched_map_status((uint32_t)v[R_STATUS], &res);
 	res.requested_ticks = c->api_ts;
 	res.executed_ticks = v[R_EXEC] ? datax_devtime_from_hw(s->dev, v[R_EXEC]) : 0;
 	if (res.status == DATAX_COMPLETION_OK && c->lagged) {
+		unsigned long long from = c->hw_ts, until = c->lag_t;
+		long lseq = c->seq;
+
 		res.status = DATAX_COMPLETION_LATE;
 		snprintf(res.detail, sizeof(res.detail),
 			 "poller lagged; execution may have been held");
+		datax_sched_finish(s, c, &res);
+		/* A held reported head blocks Tick's whole queue (RTL line 351):
+		 * an unreported late_probe command due from its time to the ack
+		 * that released it ran late too, recorded nowhere (no record, no
+		 * late_count rise). */
+		held_behind(s, lseq, from, until);
+		return;
 	}
 	datax_sched_finish(s, c, &res);
 }

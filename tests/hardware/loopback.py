@@ -303,10 +303,13 @@ def set_digital_loopback(ctx, family, on):
 # ---- stream counters ----------------------------------------------------------
 
 class StatsC(C.Structure):
-    """struct datax_internal_stream_stats."""
+    """struct datax_internal_stream_stats (include/datax/datax_internal.h). Keep
+    it field for field: the C side writes the whole struct, so a short mirror
+    is a heap overflow (tests/python/test_ctypes_mirrors.py checks it)."""
     _fields_ = [("enabled", C.c_bool), ("blocks_done", C.c_ulonglong),
                 ("overflows", C.c_ulonglong), ("underflows", C.c_ulonglong),
-                ("status_polls", C.c_ulonglong), ("overflow_detect", C.c_bool)]
+                ("status_polls", C.c_ulonglong), ("overflow_detect", C.c_bool),
+                ("tag_errors", C.c_ulonglong)]
 
 
 def stream_stats(stream):

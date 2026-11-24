@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include <datax/datax.h>
 
@@ -21,6 +22,7 @@ struct datax_internal_stream_stats {
 	unsigned long long overflows, underflows;
 	unsigned long long status_polls; /* status-register polls */
 	bool overflow_detect;            /* the status register is readable */
+	unsigned long long tag_errors;   /* timed RX: block 0 tags that did not parse or anchor */
 };
 
 /* Snapshot of a stream's counters. 0, or -EINVAL for a NULL argument. */
@@ -101,6 +103,27 @@ int datax_internal_gate_map_parse(const char *text, int out[7]);
  * the others are not, and the capture tag header size, as one line without a
  * prefix. 0, or -EINVAL. */
 int datax_internal_gate_info(const struct datax_device *dev, char *buf, size_t len);
+
+/* The in-band capture tag (Tick capture.py CaptureHeader), 32 bytes. */
+struct datax_tag {
+	uint32_t magic;
+	uint16_t version;
+	uint8_t header_words, flags;
+	uint64_t capture_tick;
+	uint32_t seq;
+	uint16_t target, command;
+	uint32_t tick_hz, burst;
+};
+
+/* Parse a capture tag. 0, or -EINVAL for a short buffer, a wrong magic or
+ * an unsupported version. */
+int datax_internal_tag_parse(const void *buf, size_t len, struct datax_tag *out);
+
+/* Whole ticks of n sample frames at fs frames/s on a hz Hz timebase:
+ * round-half-up of n * hz / fs, without overflowing 64 bits for the n of a
+ * long capture. */
+unsigned long long datax_internal_frames_to_ticks(unsigned long long n, unsigned long long fs,
+						  unsigned long long hz);
 
 #ifdef __cplusplus
 }

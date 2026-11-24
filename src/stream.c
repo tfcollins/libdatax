@@ -103,6 +103,7 @@
 
 #include "error.h"
 #include "platform/family.h"
+#include "scheduler.h"
 #include "stream.h"
 
 #define SUB "stream"
@@ -265,7 +266,9 @@ void datax_stream_hw_close(struct datax_stream *s)
 	free(s->queued);
 	free(s->lent);
 	free(s->lend_fifo);
+	free(s->lent_ptr);
 	free(s->held);
+	s->lent_ptr = NULL;
 	s->queued = NULL;
 	s->held = NULL;
 	s->lent = NULL;
@@ -293,7 +296,8 @@ int datax_stream_hw_open(struct datax_stream *s)
 	s->lent = calloc(s->nblocks, sizeof(*s->lent));
 	s->lend_fifo = calloc(s->nblocks, sizeof(*s->lend_fifo));
 	s->held = calloc(s->nblocks, sizeof(*s->held));
-	if (!s->queued || !s->lent || !s->lend_fifo || !s->held) {
+	s->lent_ptr = calloc(s->nblocks, sizeof(*s->lent_ptr));
+	if (!s->queued || !s->lent || !s->lend_fifo || !s->held || !s->lent_ptr) {
 		datax_stream_hw_close(s);
 		return datax_error_ret(s->dev->ctx, ENOMEM, SUB, "out of memory");
 	}
@@ -750,6 +754,81 @@ void datax_stream_destroy(struct datax_stream *s)
 }
 
 /*
+ * RX block 0 of a timed stream is at cur and the opening ran on time: parse
+ * the capture tag at its front. A tag that parses is stripped (strip_frames
+ * whole frames, which is also what keeps a rejected tag's frames out of the
+ * data) and anchors the timestamps only if datax_tag_anchors says so; one
+ * that does not parse is left in place and anchors nothing. Either way a bad
+ * tag counts in stats.tag_errors with a last-error warning.
+ */
+static void rx_block0_tag(struct datax_stream *s)
+{
+	struct datax_context *ctx = s->dev->ctx;
+	const unsigned char *p = s->src->data(s->src_h, s->cur);
+	size_t bb = block_bytes(s), tb = s->strip_frames * s->frame_bytes;
+	struct datax_tag t;
+	const char *why = NULL;
+
+	if (!p || s->strip_frames >= s->blk_samples || tb > bb) {
+		why = "no room for it in the block";
+	} else if (datax_tag_parse(p, tb < 32 ? tb : 32, &t)) {
+		datax_error_set(ctx, SUB, "recv: block 0 of the timed start on %s carries no "
+				"capture tag (bad length, magic or version): its timestamps are unknown",
+				iio_name(s));
+		s->stats.tag_errors++;
+		return;
+	} else {
+		s->blk_strip = s->strip_frames;
+		s->blk_valid = s->blk_samples - s->strip_frames;
+		if (s->fs && s->tick_hz &&
+		    datax_tag_anchors(&t, s->dev->caps.gate_map.rx_level, s->tick_hz)) {
+			s->anchored = true;
+			s->anchor_hw = t.capture_tick;
+			return;
+		}
+		why = "not a valid, fresh, on-time tag of the RX gate";
+	}
+	if (s->fs == 0)
+		why = "the sample rate could not be read";
+	datax_error_set(ctx, SUB, "recv: capture tag of block 0 on %s ignored (%s): its "
+			"timestamps are unknown", iio_name(s), why);
+	s->stats.tag_errors++;
+}
+
+/* The block just taken (rx_take): its stripped front, valid frames and the
+ * API time of its first delivered sample. n_b is released sample 1 + b *
+ * block_samples, plus the stripped frames for block 0 (util_cpack2 drops
+ * the first sample after a gap). An overflow (disc_pending, set by the
+ * status check) makes the timestamps unknown until the next start_at. */
+static void rx_block_meta(struct datax_stream *s)
+{
+	s->blk_strip = 0;
+	s->blk_ts = 0;
+	s->blk_valid = s->blk_samples;
+	if (!s->timed || !s->strip_frames)
+		return;
+	if (s->blk == 0)
+		rx_block0_tag(s);
+}
+
+/* After the status check: the block's time, and the count of blocks. */
+static void rx_block_time(struct datax_stream *s)
+{
+	unsigned long long n;
+
+	if (!s->timed || !s->strip_frames)
+		return;
+	if (s->disc_pending)
+		s->unknown = true;
+	if (s->anchored && !s->unknown) {
+		n = 1 + s->blk * s->blk_samples + s->blk_strip;
+		s->blk_ts = datax_devtime_from_hw(s->dev, s->anchor_hw +
+						  datax_frames_to_ticks(n, s->fs, s->tick_hz));
+	}
+	s->blk++;
+}
+
+/*
  * RX: dequeue the block at the cursor, waiting as dequeue() describes. A
  * block libiio no longer holds (-EPERM: on the legacy path a failed or
  * timed-out read consumed it; its data is lost) is re-armed as the newest
@@ -829,7 +908,9 @@ hold:
 		}
 		s->blk0_held = false;
 		s->stats.blocks_done++;
+		rx_block_meta(s);
 		datax_stream_status_check(s, false);
+		rx_block_time(s);
 		return 0;
 	}
 }
@@ -928,12 +1009,13 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 			ret = rx_take(s, timeout_ms, deadline, "recv", done > 0);
 			if (ret)
 				return done ? (int)done : ret;
+			s->cur_off = s->blk_strip * s->frame_bytes;   /* past a stripped tag */
 		}
 		if (first) {
 			if (info) {
-				info->timestamp_ticks = 0;
-				info->discontinuous = s->disc_pending;
-				info->valid_samples = s->cfg.block_samples;
+				info->timestamp_ticks = s->blk_ts;
+				info->discontinuous = s->disc_pending || s->unknown;
+				info->valid_samples = s->blk_valid;
 			}
 			s->disc_pending = false;
 		}
@@ -1205,10 +1287,17 @@ int datax_stream_get_block(struct datax_stream *s, void **data,
 	s->nlent++;
 	s->cur = (i + 1) % s->nblocks;
 	*data = s->src->data(s->src_h, i);
+	if (s->cfg.direction == DATAX_RX && !s->cfg.cyclic) {
+		/* past a stripped capture tag */
+		*data = (unsigned char *)*data + s->blk_strip * s->frame_bytes;
+	}
+	s->lent_ptr[i] = *data;
 	if (info) {
-		info->timestamp_ticks = 0;
-		info->discontinuous = s->disc_pending;
-		info->valid_samples = s->blk_samples;
+		bool rx = s->cfg.direction == DATAX_RX && !s->cfg.cyclic;
+
+		info->timestamp_ticks = rx ? s->blk_ts : 0;
+		info->discontinuous = s->disc_pending || (rx && s->unknown);
+		info->valid_samples = rx ? s->blk_valid : s->blk_samples;
 	}
 	s->disc_pending = false;
 	return 0;
@@ -1227,7 +1316,7 @@ int datax_stream_put_block(struct datax_stream *s, void *data)
 	if (ret)
 		return ret;
 	for (k = 0; data && k < s->nlent; k++)
-		if (s->src->data(s->src_h, s->lend_fifo[(s->lend_head + k) % s->nblocks]) == data)
+		if (s->lent_ptr[s->lend_fifo[(s->lend_head + k) % s->nblocks]] == data)
 			break;
 	if (!data || k == s->nlent)
 		return datax_error_ret(ctx, EINVAL, SUB,

@@ -63,6 +63,8 @@ LIBDATAX_0.1 {
     datax_internal_pps_present;
     datax_internal_gate_map_parse;
     datax_internal_gate_info;
+    datax_internal_tag_parse;
+    datax_internal_frames_to_ticks;
   local:
     *;
 };

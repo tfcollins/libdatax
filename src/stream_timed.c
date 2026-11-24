@@ -180,6 +180,12 @@ void datax_stream_timed_reset(struct datax_stream *s)
 	atomic_store(&s->open_state, 0);
 	atomic_store(&s->open_seq, 0);
 	s->blk0_held = false;
+	s->anchored = false;
+	s->unknown = false;
+	s->blk = 0;
+	s->blk_strip = 0;
+	s->blk_ts = 0;
+	s->blk_valid = 0;
 	s->fail_detail[0] = '\0';
 	pthread_mutex_unlock(&s->tmu);
 }
@@ -463,6 +469,11 @@ int datax_stream_start_at(struct datax_stream *s, datax_time when)
 	}
 	datax_stream_timed_reset(s);
 	s->fs = fs;
+	s->tick_hz = sch->tick_hz;
+	s->strip_frames = 0;
+	if (is_rx(s) && (s->dev->caps.flags & (1u << DATAX_CAP_TIMESTAMPS)) && s->dev->caps.tag_bytes)
+		s->strip_frames = (unsigned int)((s->dev->caps.tag_bytes + s->frame_bytes - 1) /
+						 s->frame_bytes);
 	s->t_open = when;
 	/* 6. Arm behind the closed gate. */
 	ret = arm(s);

@@ -82,6 +82,25 @@ struct datax_stream {
 	pthread_mutex_t tmu;
 	pthread_cond_t tcv;
 	char fail_detail[160];
+
+	/* P3b Task 4 (stream_tag.c, stream.c): RX block timestamps of a timed
+	 * stream. strip_frames: whole frames of the capture tag, ceil(tag
+	 * bytes / frame_bytes), 0 when the device cannot tag. tick_hz: the
+	 * Tick's, read at start_at. anchored / anchor_hw: block 0's tag gave
+	 * the hardware tick of the release. blk: blocks taken since the
+	 * release. unknown: an overflow was seen; sticky until the next
+	 * start_at. blk_*: the block at cur: frames stripped from its front,
+	 * its first delivered sample's API time (0 unknown) and its valid
+	 * frames. lent_ptr: what each lent block's get_block returned (past
+	 * its tag). */
+	unsigned int strip_frames;
+	unsigned long long tick_hz, anchor_hw;
+	bool anchored, unknown;
+	unsigned long long blk;
+	unsigned int blk_strip;
+	unsigned long long blk_ts;
+	size_t blk_valid;
+	void **lent_ptr;
 };
 
 /* stream.c helpers shared with stream_timed.c. Each sets the last error
@@ -120,6 +139,23 @@ void datax_stream_timed_reset(struct datax_stream *s);
 /* TX: held blocks, and enqueueing them in ring order (start, start_at). */
 unsigned int datax_stream_held_count(const struct datax_stream *s);
 int datax_stream_enqueue_held(struct datax_stream *s, const char *verb);
+
+/* stream_tag.c. Capture tag (struct datax_tag is in datax_internal.h): 0, or
+ * -EINVAL for a short buffer, wrong magic or unsupported version (no last
+ * error). */
+#define DATAX_TAG_MAGIC 0x4b434954u
+#define DATAX_TAG_VERSION 1u
+#define DATAX_TAG_VALID (1u << 0)
+#define DATAX_TAG_STALE (1u << 1)
+#define DATAX_TAG_LATE_EXECUTED (1u << 2)
+#define DATAX_TAG_GATE(flags) (((flags) >> 4) & 0xfu)
+int datax_tag_parse(const void *buf, size_t len, struct datax_tag *out);
+/* Whether a parsed tag anchors block timestamps: VALID, not STALE, not
+ * LATE_EXECUTED, written by gate rx_level, and tick_hz 0 or equal to the
+ * Tick's. */
+bool datax_tag_anchors(const struct datax_tag *t, int rx_level, unsigned long long tick_hz);
+unsigned long long datax_frames_to_ticks(unsigned long long n, unsigned long long fs,
+					 unsigned long long hz);
 
 /* stream_status.c. Poll the core status register: select it, read it, clear
  * the sticky bit by writing it back. 0, or a negative errno (no last error is

@@ -49,6 +49,7 @@ set(DATAX_SOURCES
   src/tick_descriptor.c
   src/stream.c
   src/stream_status.c
+  src/stream_tag.c
   src/stream_timed.c
   src/sched.c
   src/poller.c

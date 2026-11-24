@@ -389,7 +389,8 @@ if(DATAX_LIBIIO_BUILD)
   target_include_directories(test_stream_timed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
   target_compile_options(test_stream_timed PRIVATE ${DATAX_WARNINGS})
-  target_compile_definitions(test_stream_timed PRIVATE _POSIX_C_SOURCE=200809L)
+  target_compile_definitions(test_stream_timed PRIVATE _POSIX_C_SOURCE=200809L
+    DATAX_TAG_VECTORS="${PROJECT_SOURCE_DIR}/tests/vectors/capture_tags.json")
   set(DATAX_STREAM_TIMED_TESTS
     test_start_at_guard_margin_late test_start_at_order test_start_at_rx_first_frame_at_T
     test_start_at_late_at_dispatch_fails test_start_at_tx_late_on_submit
@@ -405,7 +406,11 @@ if(DATAX_LIBIIO_BUILD)
     test_tx_preload_rules test_sched_flush_fails_armed test_sched_destroy_while_armed
     test_stop_armed_tx_bounded test_start_at_tx_failed_commit_transmits_nothing
     test_held_slot_tx_open_fails test_stop_after_tx_open_ran_no_flush
-    test_destroy_from_event_callback_refused)
+    test_destroy_from_event_callback_refused
+    test_tag_vectors test_mode_bit_tag_ignored test_frames_to_ticks_no_overflow
+    test_block0_tag_parsed_stripped test_strip_by_channel_count test_derived_timestamps
+    test_overflow_zeroes_timestamps test_tag_bad_magic_unanchored test_tag_flags_rejected
+    test_untimed_ts_zero test_zero_copy_block0 test_soft_offset_timestamps)
   foreach(tt ${DATAX_STREAM_TIMED_TESTS})
     add_test(NAME stream_timed_${tt}
       COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh

@@ -26,6 +26,8 @@
 #include <datax/datax.h>
 #include <datax/datax_internal.h>
 
+#include <iio/iio.h>
+
 #include "check.h"
 #include "fake_dma.h"
 #include "fake_tick.h"
@@ -39,6 +41,7 @@
 #define US  (HZ / 1000000)
 #define COST (100 * US)          /* while the scheduler measures: spacing 2.7 ms */
 #define FS  1000000ULL           /* 100 ticks per frame */
+#define FS_3072 30720000ULL      /* 3.2552 ticks per frame: rounds */
 #define FT  (HZ / FS)
 #define BS  256u                 /* frames per block */
 #define NB  4u
@@ -187,6 +190,23 @@ struct fx {
 };
 
 /* map NULL: no stream_gate_map attribute. fhm: bind the fake Talise FHM. */
+static unsigned long long g_fs = FS;     /* the fake DMA's and the device's sample rate */
+
+/* Set the emulated phy's sampling_frequency (what start_at reads). */
+static void set_device_fs(struct fx *x, unsigned long long fs)
+{
+	struct iio_device *ph = iio_context_find_device(x->ctx->iio, "adrv9009-phy");
+	struct iio_channel *ch;
+	const struct iio_attr *a;
+
+	CHECK(ph != NULL);
+	ch = iio_device_find_channel(ph, "voltage0", false);
+	CHECK(ch != NULL);
+	a = iio_channel_find_attr(ch, "sampling_frequency");
+	CHECK(a != NULL);
+	CHECK(iio_attr_write_longlong(a, (long long)fs) == 0);
+}
+
 static void fx_open_ex(struct fx *x, const char *map, bool create, bool fhm)
 {
 	const char *uri = getenv("DATAX_TEST_URI");
@@ -215,7 +235,8 @@ static void fx_open_ex(struct fx *x, const char *map, bool create, bool fhm)
 	fake_tick_advance(x->f, 1000 * MS);
 	/* Controller ruling (b): the fake's bit positions come from the map
 	 * the device parsed, never from literals. */
-	dc = fake_dma_config_from_map(FS, &x->dev->caps.gate_map);
+	set_device_fs(x, g_fs);
+	dc = fake_dma_config_from_map(g_fs, &x->dev->caps.gate_map);
 	x->rxl = dc.rx_level;
 	x->rxm = dc.rx_mode;
 	x->txl = dc.tx_level;
@@ -391,9 +412,10 @@ static void foreign_gate(struct fx *x, unsigned int bit, unsigned int level)
 	CHECK(fake_tick_write(x->f, "command_descriptor", csv) == 0);
 }
 
-/* recv one block; checks the frames past the unstripped tag region carry
- * consecutive indices from first (Task 4 strips the header). Returns the
- * block's first frame index past the tag. */
+/* One RX block of 1 channel by recv. tagged: block 0 of a start_at, whose
+ * 8 tag frames are stripped, so it delivers BS - 8 frames; either way the
+ * frames are consecutive indices. Returns the index of the block's first
+ * stored frame (what the stripped frames would have been, for tagged). */
 static uint64_t recv_block(struct fx *x, struct datax_stream *s, struct datax_block_info *info,
 			   bool tagged)
 {
@@ -402,10 +424,10 @@ static uint64_t recv_block(struct fx *x, struct datax_stream *s, struct datax_bl
 	uint64_t first;
 
 	(void)x;
-	CHECK(datax_stream_recv(s, buf, BS, info, 3000) == (int)BS);
-	first = fake_dma_frame_index(&buf[2 * skip]);
-	for (unsigned int k = skip; k < BS; k++)
-		CHECK(fake_dma_frame_index(&buf[2 * k]) == first + (k - skip));
+	CHECK(datax_stream_recv(s, buf, BS - skip, info, 3000) == (int)(BS - skip));
+	first = fake_dma_frame_index(&buf[0]);
+	for (unsigned int k = 0; k < BS - skip; k++)
+		CHECK(fake_dma_frame_index(&buf[2 * k]) == first + k);
 	return first - skip;
 }
 
@@ -1604,6 +1626,412 @@ static void test_destroy_from_event_callback_refused(void)
 	fx_close(&x);
 }
 
+
+/* ---- Task 4: RX block timestamps -------------------------------------------- */
+
+#define VEC_PATH DATAX_TAG_VECTORS
+
+static const char *vkey(const char *line, const char *key)
+{
+	char pat[48];
+	const char *p;
+
+	snprintf(pat, sizeof(pat), "\"%s\": ", key);
+	p = strstr(line, pat);
+	CHECK(p != NULL);
+	return p + strlen(pat);
+}
+
+static unsigned long long vnum(const char *line, const char *key)
+{
+	return strtoull(vkey(line, key), NULL, 10);
+}
+
+/* The golden headers of the vendored Tick codec: positives parse to their
+ * inputs (flags carry gate << 4), negatives are -EINVAL, and a short buffer
+ * too. */
+static void test_tag_vectors(void)
+{
+	FILE *fp = fopen(VEC_PATH, "r");
+	char line[1024];
+	unsigned int pos = 0, neg = 0;
+
+	CHECK(fp != NULL);
+	while (fgets(line, sizeof(line), fp)) {
+		const char *hex;
+		uint8_t b[32];
+		struct datax_tag t;
+		bool positive = strstr(line, "\"positive\": true") != NULL;
+
+		if (!positive && !strstr(line, "\"positive\": false"))
+			continue;
+		hex = vkey(line, "bytes");
+		CHECK(*hex == '"');
+		for (unsigned int i = 0; i < 32; i++) {
+			unsigned int v;
+
+			CHECK(sscanf(hex + 1 + 2 * i, "%2x", &v) == 1);
+			b[i] = (uint8_t)v;
+		}
+		if (!positive) {
+			CHECK(datax_tag_parse(b, 32, &t) == -EINVAL);
+			CHECK(datax_internal_tag_parse(b, 32, &t) == -EINVAL);
+			neg++;
+			continue;
+		}
+		CHECK(datax_tag_parse(b, 32, &t) == 0);
+		CHECK(t.magic == DATAX_TAG_MAGIC && t.version == 1 && t.header_words == 8);
+		CHECK(t.capture_tick == vnum(line, "capture_tick"));
+		CHECK(t.flags == vnum(line, "flags"));
+		CHECK(DATAX_TAG_GATE(t.flags) == vnum(line, "gate"));
+		CHECK(t.seq == vnum(line, "seq") && t.target == vnum(line, "target"));
+		CHECK(t.command == vnum(line, "cmd") && t.tick_hz == vnum(line, "tick_hz"));
+		CHECK(t.burst == vnum(line, "burst"));
+		CHECK(datax_tag_parse(b, 31, &t) == -EINVAL);
+		pos++;
+	}
+	fclose(fp);
+	CHECK(pos >= 6 && neg >= 2);
+	CHECK(datax_tag_parse(NULL, 32, &(struct datax_tag){0}) == -EINVAL);
+}
+
+/* The anchoring rule: gate 0's valid, fresh, on-time tag only. */
+static void test_mode_bit_tag_ignored(void)
+{
+	struct datax_tag t = { .magic = DATAX_TAG_MAGIC, .version = 1, .header_words = 8,
+			       .capture_tick = 1000, .tick_hz = HZ,
+			       .flags = DATAX_TAG_VALID };
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	unsigned long long T;
+
+	CHECK(datax_tag_anchors(&t, 0, HZ));
+	CHECK(!datax_tag_anchors(&t, 0, 0));             /* the Tick's hz must match */
+	t.tick_hz = 0;
+	CHECK(datax_tag_anchors(&t, 0, HZ));             /* hz 0: unspecified */
+	t.tick_hz = HZ + 1;
+	CHECK(!datax_tag_anchors(&t, 0, HZ));
+	t.tick_hz = HZ;
+	t.flags = DATAX_TAG_VALID | (2u << 4) | DATAX_TAG_LATE_EXECUTED;   /* the mode bit's */
+	CHECK(!datax_tag_anchors(&t, 0, HZ));
+	t.flags = DATAX_TAG_VALID | (2u << 4);                              /* gate 2 */
+	CHECK(!datax_tag_anchors(&t, 0, HZ));
+	CHECK(datax_tag_anchors(&t, 2, HZ));                                /* only by the map */
+	t.flags = DATAX_TAG_VALID | DATAX_TAG_STALE;
+	CHECK(!datax_tag_anchors(&t, 0, HZ));
+	t.flags = DATAX_TAG_VALID | DATAX_TAG_LATE_EXECUTED;
+	CHECK(!datax_tag_anchors(&t, 0, HZ));
+	t.flags = 0;
+	CHECK(!datax_tag_anchors(&t, 0, HZ));
+	CHECK(!datax_tag_anchors(&t, -1, HZ));
+
+	/* end to end: the time is the release's, not the mode-bit write's */
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 2 * BS * FT, 1 * MS);
+	CHECK(datax_stream_recv(s, (int16_t[BS * 2]){0}, 1, &info, 3000) == 1);
+	CHECK(info.timestamp_ticks == T + 9 * FT);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_frames_to_ticks_no_overflow(void)
+{
+	static const struct { unsigned long long fs, hz; } rates[] = {
+		{ 1000000ULL, HZ }, { FS_3072, HZ }, { 245760000ULL, HZ },
+		{ 61440000ULL, 245760000ULL },
+	};
+	static const unsigned long long ns[] = { 0, 1, 2, 3, 255, 4097, 1ULL << 32,
+		(1ULL << 32) + 12345, 1ULL << 40, (1ULL << 50) + 7, 1ULL << 50 };
+
+	for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); r++)
+		for (size_t i = 0; i < sizeof(ns) / sizeof(ns[0]); i++) {
+			unsigned __int128 want = ((unsigned __int128)ns[i] * rates[r].hz +
+						  rates[r].fs / 2) / rates[r].fs;
+
+			CHECK(datax_frames_to_ticks(ns[i], rates[r].fs, rates[r].hz) ==
+			      (unsigned long long)want);
+			CHECK(datax_internal_frames_to_ticks(ns[i], rates[r].fs, rates[r].hz) ==
+			      (unsigned long long)want);
+		}
+	CHECK(datax_frames_to_ticks(5, 1000000, HZ) == 500);       /* exact */
+	CHECK(datax_frames_to_ticks(1, FS_3072, HZ) == 3);         /* 3.255 */
+	CHECK(datax_frames_to_ticks(2, FS_3072, HZ) == 7);         /* 6.510 */
+	CHECK(datax_frames_to_ticks(0, 0, HZ) == 0);               /* no division by zero */
+}
+
+/* Receive count frames of `nch` channels in one call; checks frames are
+ * consecutive; returns the first frame's index. */
+static uint64_t recv_n(struct datax_stream *s, size_t count, unsigned int nch,
+		       struct datax_block_info *info)
+{
+	static int16_t buf[BS * 2 * 4];
+	uint64_t first;
+
+	CHECK(datax_stream_recv(s, buf, count, info, 3000) == (int)count);
+	first = fake_dma_frame_index(&buf[0]);
+	for (size_t k = 0; k < count; k++)
+		CHECK(fake_dma_frame_index(&buf[2 * nch * k]) == first + k);
+	return first;
+}
+
+static void test_block0_tag_parsed_stripped(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	struct datax_internal_stream_stats st;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x3, false);               /* 2 channels: 4 frames */
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 3 * BS * FT, 1 * MS);
+	/* one cpack drop plus the strip */
+	CHECK(recv_n(s, BS - 4, 2, &info) == T / FT + 5);
+	CHECK(info.timestamp_ticks == T + 5 * FT);
+	CHECK(info.valid_samples == BS - 4);
+	CHECK(!info.discontinuous);
+	CHECK(recv_n(s, BS, 2, &info) == T / FT + 1 + BS);
+	CHECK(info.timestamp_ticks == T + (1 + BS) * FT);
+	CHECK(info.valid_samples == BS && !info.discontinuous);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.tag_errors == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_strip_by_channel_count(void)
+{
+	static const unsigned int mask[] = { 0x1, 0x3, 0x7, 0xf };
+	static const unsigned int want[] = { 8, 4, 3, 2 };
+
+	for (unsigned int i = 0; i < 4; i++) {
+		struct fx x;
+		struct datax_stream *s;
+		struct datax_block_info info;
+		unsigned long long T;
+
+		fx_open(&x, true);
+		s = stream(&x, DATAX_RX, mask[i], false);
+		T = at(&x, 20);
+		CHECK(datax_stream_start_at(s, T) == 0);
+		step_to(&x, T + 3 * BS * FT, 1 * MS);
+		CHECK(recv_n(s, BS - want[i], i + 1, &info) == T / FT + 1 + want[i]);
+		CHECK(info.valid_samples == BS - want[i]);
+		CHECK(info.timestamp_ticks == T + (1 + want[i]) * FT);
+		CHECK(datax_stream_stop(s) == 0);
+		fx_close(&x);
+	}
+}
+
+/* Blocks 0..3 of a start_at at the given rate: block b's first delivered
+ * sample is released sample 1 + b * BS (+ strip for b = 0). */
+static void derived(unsigned long long fs)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	unsigned long long T, n;
+
+	g_fs = fs;
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20) + 7;                                  /* not frame aligned */
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 8 * BS * HZ / fs, 1 * MS);
+	recv_n(s, BS - 8, 1, &info);
+	n = 1 + 8;
+	CHECK(info.timestamp_ticks == T + datax_internal_frames_to_ticks(n, fs, HZ));
+	for (unsigned int b = 1; b < 4; b++) {
+		recv_n(s, BS, 1, &info);
+		n = 1 + b * BS;
+		CHECK(info.valid_samples == BS && !info.discontinuous);
+		CHECK(info.timestamp_ticks == T + datax_internal_frames_to_ticks(n, fs, HZ));
+	}
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+	g_fs = FS;
+}
+
+static void test_derived_timestamps(void)
+{
+	derived(FS);                       /* exact: 100 ticks a frame */
+	derived(FS_3072);                  /* rounded */
+}
+
+static void test_overflow_zeroes_timestamps(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	struct datax_internal_stream_stats st;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 2 * BS * FT, 1 * MS);
+	recv_n(s, BS - 8, 1, &info);
+	CHECK(info.timestamp_ticks == T + 9 * FT && !info.discontinuous);
+	fake_dma_inject_overflow(x.d, 2);
+	step_to(&x, now(&x) + 4 * BS * FT, 1 * MS);
+	msleep(150);                                  /* past the status rate limit */
+	recv_n(s, BS, 1, &info);
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);
+	recv_n(s, BS, 1, &info);                      /* sticky: no new overflow */
+	CHECK(info.discontinuous && info.timestamp_ticks == 0);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.overflows == 1);
+	CHECK(datax_stream_stop(s) == 0);
+
+	/* the next start_at anchors again */
+	step_to(&x, now(&x) + 5 * MS, 1 * MS);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 3 * BS * FT, 1 * MS);
+	recv_n(s, BS - 8, 1, &info);
+	CHECK(!info.discontinuous && info.timestamp_ticks == T + 9 * FT);
+	recv_n(s, BS, 1, &info);
+	CHECK(!info.discontinuous && info.timestamp_ticks == T + (1 + BS) * FT);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+/* A tag that does not parse: not stripped, unanchored, counted, warned. */
+static void test_tag_bad_magic_unanchored(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	struct datax_internal_stream_stats st;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	fake_dma_corrupt_next_tag(x.d, FAKE_DMA_TAG_BAD_MAGIC);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 3 * BS * FT, 1 * MS);
+	{
+		static int16_t raw[BS * 2];
+
+		/* the whole block, the tag still in its first 8 frames */
+		CHECK(datax_stream_recv(s, raw, BS, &info, 3000) == (int)BS);
+		CHECK(raw[2] == 1);                                   /* the tag's version word */
+		CHECK(fake_dma_frame_index(&raw[2 * 8]) == T / FT + 9);
+	}
+	CHECK(info.timestamp_ticks == 0 && info.valid_samples == BS && !info.discontinuous);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.timestamp_ticks == 0 && !info.discontinuous);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.tag_errors == 1);
+	CHECK(strstr(lasterr(&x), "tag") != NULL);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+/* A tag that parses but is not VALID: stripped, unanchored, counted. */
+static void test_tag_flags_rejected(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	struct datax_internal_stream_stats st;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	fake_dma_corrupt_next_tag(x.d, FAKE_DMA_TAG_BAD_FLAGS);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 3 * BS * FT, 1 * MS);
+	CHECK(recv_n(s, BS - 8, 1, &info) == T / FT + 9);
+	CHECK(info.timestamp_ticks == 0 && info.valid_samples == BS - 8 && !info.discontinuous);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.timestamp_ticks == 0 && !info.discontinuous);
+	CHECK(datax_internal_stream_stats(s, &st) == 0 && st.tag_errors == 1);
+	CHECK(strstr(lasterr(&x), "tag") != NULL);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_untimed_ts_zero(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	void *p;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	CHECK(datax_stream_start(s) == 0);
+	fake_tick_advance(x.f, 3 * BS * FT);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.timestamp_ticks == 0 && info.valid_samples == BS);
+	CHECK(datax_stream_stop(s) == 0);
+	datax_stream_destroy(s);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	CHECK(datax_stream_start(s) == 0);
+	fake_tick_advance(x.f, 3 * BS * FT);
+	CHECK(datax_stream_get_block(s, &p, &info, 3000) == 0);
+	CHECK(info.timestamp_ticks == 0 && info.valid_samples == BS);
+	CHECK(datax_stream_put_block(s, p) == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_zero_copy_block0(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	unsigned long long T;
+	void *p0, *p1;
+
+	fx_open(&x, true);
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20);
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T + 4 * BS * FT, 1 * MS);
+	CHECK(datax_stream_get_block(s, &p0, &info, 3000) == 0);
+	CHECK(fake_dma_frame_index(p0) == T / FT + 9);       /* past the tag */
+	CHECK(info.valid_samples == BS - 8 && info.timestamp_ticks == T + 9 * FT);
+	CHECK(!info.discontinuous);
+	CHECK(datax_stream_get_block(s, &p1, &info, 3000) == 0);
+	CHECK(fake_dma_frame_index(p1) == T / FT + 1 + BS);
+	CHECK(info.valid_samples == BS && info.timestamp_ticks == T + (1 + BS) * FT);
+	CHECK(datax_stream_put_block(s, p1) == -EINVAL);     /* lend order */
+	CHECK(datax_stream_put_block(s, p0) == 0);           /* the stripped pointer */
+	CHECK(datax_stream_put_block(s, p1) == 0);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
+static void test_soft_offset_timestamps(void)
+{
+	struct fx x;
+	struct datax_stream *s;
+	struct datax_block_info info;
+	const unsigned long long off = 7000000000ULL;
+	unsigned long long T;
+
+	fx_open(&x, true);
+	atomic_store(&x.dev->time_off, off);                /* as a soft alignment leaves it */
+	s = stream(&x, DATAX_RX, 0x1, false);
+	T = at(&x, 20) + off;                               /* API time */
+	CHECK(datax_stream_start_at(s, T) == 0);
+	step_to(&x, T - off + 3 * BS * FT, 1 * MS);
+	recv_n(s, BS - 8, 1, &info);
+	CHECK(info.timestamp_ticks == T + 9 * FT);
+	recv_n(s, BS, 1, &info);
+	CHECK(info.timestamp_ticks == T + (1 + BS) * FT);
+	CHECK(datax_stream_stop(s) == 0);
+	fx_close(&x);
+}
+
 static const struct { const char *name; void (*fn)(void); } tests[] = {
 #define T_(n) { #n, n }
 	T_(test_start_at_guard_margin_late),
@@ -1638,6 +2066,18 @@ static const struct { const char *name; void (*fn)(void); } tests[] = {
 	T_(test_held_slot_tx_open_fails),
 	T_(test_stop_after_tx_open_ran_no_flush),
 	T_(test_destroy_from_event_callback_refused),
+	T_(test_tag_vectors),
+	T_(test_mode_bit_tag_ignored),
+	T_(test_frames_to_ticks_no_overflow),
+	T_(test_block0_tag_parsed_stripped),
+	T_(test_strip_by_channel_count),
+	T_(test_derived_timestamps),
+	T_(test_overflow_zeroes_timestamps),
+	T_(test_tag_bad_magic_unanchored),
+	T_(test_tag_flags_rejected),
+	T_(test_untimed_ts_zero),
+	T_(test_zero_copy_block0),
+	T_(test_soft_offset_timestamps),
 #undef T_
 };
 

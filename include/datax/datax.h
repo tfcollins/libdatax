@@ -140,7 +140,7 @@ struct datax_stream_config {
 };
 
 struct datax_block_info {
-	unsigned long long timestamp_ticks; /* first-sample time; 0 if untagged */
+	unsigned long long timestamp_ticks; /* first delivered sample; 0 = unknown */
 	bool discontinuous;                 /* overflow occurred before this block */
 	size_t valid_samples;
 };

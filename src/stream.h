@@ -10,6 +10,7 @@
 #include <datax/datax_internal.h>
 
 #include "internal.h"
+#include "stream_src.h"
 
 struct iio_channels_mask;
 struct iio_buffer_stream;
@@ -19,7 +20,15 @@ struct datax_stream {
 	struct datax_device *dev;
 	struct datax_stream_config cfg;
 	struct iio_channels_mask *mask;
-	struct iio_buffer_stream *bs;       /* NULL after a failed start/stop reset */
+	/* The block source (stream_src.h) and its handle, copied from the
+	 * device at create. hw: it is open (false after a failed start/stop
+	 * reset). */
+	const struct datax_stream_src_ops *src;
+	void *src_h;
+	bool hw;
+	/* State of the libiio source only (stream.c): the buffer (NULL when
+	 * closed) and blocks. */
+	struct iio_buffer_stream *bs;
 	struct iio_block **blocks;
 	unsigned int nblocks;
 	size_t frame_bytes;                 /* 4 * popcount(channel_mask) */

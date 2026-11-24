@@ -238,7 +238,7 @@ endif()
 
 # Fake Tick + fake Talise FHM: a test-only shared library (never installed)
 # so C tests link it and Python tests can load it through ctypes.
-add_library(datax_fake_tick SHARED fake_tick.c)
+add_library(datax_fake_tick SHARED fake_tick.c fake_dma.c)
 target_include_directories(datax_fake_tick PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(datax_fake_tick PRIVATE ${DATAX_WARNINGS})
@@ -262,6 +262,17 @@ foreach(tr ${DATAX_TRACES})
   add_test(NAME test_fake_tick_${tn} COMMAND test_fake_tick trace ${tr})
 endforeach()
 add_test(NAME test_fake_tick_unit COMMAND test_fake_tick unit)
+
+# The fake DMA (stream block seam endpoint gated by the fake Tick) and the
+# golden capture-tag vectors it is checked against. No emulator needed.
+add_executable(test_fake_dma test_fake_dma.c)
+target_link_libraries(test_fake_dma PRIVATE datax_fake_tick Threads::Threads)
+target_include_directories(test_fake_dma PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_fake_dma PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(test_fake_dma PRIVATE _POSIX_C_SOURCE=200809L
+  DATAX_TAG_VECTORS="${PROJECT_SOURCE_DIR}/tests/vectors/capture_tags.json")
+add_test(NAME test_fake_dma COMMAND test_fake_dma)
 if(DATAX_LIBIIO_BUILD)
   # The seam: bind the fake to a live device of a fixture without Tick.
   foreach(fx ad936x adrv9009-zu11eg)

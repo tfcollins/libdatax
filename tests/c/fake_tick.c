@@ -101,8 +101,15 @@ struct fake_tick {
 	uint32_t cap_seq, cap_count;
 	uint16_t cap_target, cap_cmd;
 	uint8_t cap_gate;
-	bool cap_unread, cap_overrun;
+	bool cap_unread, cap_overrun, cap_late;
 	uint32_t tag_enable;
+	/* The same latch kept per gate, for a fake DMA that tags from one gate. */
+	struct fake_tick_tag gate_tag[STREAM_GATE_COUNT];
+	/* stream_gate_map attribute text (NULL: absent) and tag attribute hiding. */
+	char *gate_map;
+	bool tag_attrs_hidden;
+	fake_tick_gate_hook gate_hook;
+	void *gate_hook_user;
 
 	fake_tick_gpio_hook hook;
 	void *hook_user;
@@ -259,21 +266,41 @@ static void set_gpio(struct fake_tick *f, uint32_t v)
 
 /* Capture-tag latch: gate and arm commands only (RTL lines 790-801, 813-826,
  * 958-969, 983-995); GPIO never latches. */
-static void latch_tag(struct fake_tick *f, const struct q_entry *e, uint64_t at)
+static void latch_tag(struct fake_tick *f, const struct q_entry *e, uint64_t at, bool late)
 {
+	struct fake_tick_tag *g = &f->gate_tag[e->a[0] % STREAM_GATE_COUNT];
+
 	f->cap_ticks = at;
 	f->cap_seq = e->seq;
 	f->cap_target = e->target;
 	f->cap_cmd = e->cmd;
 	f->cap_gate = (uint8_t)(e->a[0] & 0xf);
+	f->cap_late = late;
 	f->cap_count = (f->cap_count + 1) & 0xffffffu;   /* 24-bit counter */
 	f->cap_overrun = f->cap_overrun || f->cap_unread;
 	f->cap_unread = true;
+	g->ticks = at;
+	g->seq = e->seq;
+	g->target = e->target;
+	g->cmd = e->cmd;
+	g->late = late;
+	g->count++;
+}
+
+/* A change of the stream gate levels, reported to the gate hook. */
+static void set_gate(struct fake_tick *f, uint32_t v)
+{
+	uint32_t old = f->gate;
+
+	f->gate = v;
+	if (old != v && f->gate_hook)
+		f->gate_hook(f->gate_hook_user, old, v, f->now);
 }
 
 /* Target side effects (RTL dispatch case, lines 947-1000; late execute-now
- * case, lines 779-835). at is the tick the effect is recorded with. */
-static void apply(struct fake_tick *f, const struct q_entry *e, uint64_t at)
+ * case, lines 779-835). at is the tick the effect is recorded with; late is
+ * set when the command ran late (late on submit, or dispatched late). */
+static void apply(struct fake_tick *f, const struct q_entry *e, uint64_t at, bool late)
 {
 	switch (e->cmd) {
 	case CMD_GPIO:
@@ -285,18 +312,19 @@ static void apply(struct fake_tick *f, const struct q_entry *e, uint64_t at)
 		f->marker |= 1u << (e->a[0] % MARKER_COUNT);
 		break;
 	case CMD_GATE:
+		/* Latch first: the gate hook may read the latch. */
 		if (e->a[1] & 1) {
-			f->gate |= 1u << (e->a[0] % STREAM_GATE_COUNT);
-			latch_tag(f, e, at);
+			latch_tag(f, e, at, late);
+			set_gate(f, f->gate | (1u << (e->a[0] % STREAM_GATE_COUNT)));
 		} else {
-			f->gate &= ~(1u << (e->a[0] % STREAM_GATE_COUNT));
+			set_gate(f, f->gate & ~(1u << (e->a[0] % STREAM_GATE_COUNT)));
 		}
 		break;
 	case CMD_CAPTURE:
 	case CMD_TRANSMIT:
 		/* One-shot pulse; like hdl_model it only ever sets the bit. */
-		f->gate |= 1u << (e->a[0] % STREAM_GATE_COUNT);
-		latch_tag(f, e, at);
+		latch_tag(f, e, at, late);
+		set_gate(f, f->gate | (1u << (e->a[0] % STREAM_GATE_COUNT)));
 		break;
 	default:   /* TDD sync, SPI: no state the attribute surface shows */
 		break;
@@ -336,7 +364,7 @@ static bool dispatch_head(struct fake_tick *f)
 	if (f->comp_valid && produces)
 		return false;
 	if (!drop)
-		apply(f, &e, exec);
+		apply(f, &e, exec, late);
 	if (rlate && !e.late_on_submit)                              /* line 1008 */
 		f->late = sat_inc(f->late);
 	status = rovf ? ST_REPEAT_OVERFLOW : drop ? ST_LATE_DROPPED :
@@ -430,7 +458,7 @@ static void push(struct fake_tick *f, const uint32_t w[12])
 				record(f, e.seq, e.cmd, e.target, e.ts, 0, ST_OVERFLOW, 0);
 			log_exec(f, e.seq, e.cmd, e.target, e.ts, 0, ST_OVERFLOW, 0, rep);
 		} else if (e.flags & F_LATE_NOW) {                       /* lines 778-846 */
-			apply(f, &e, f->now);
+			apply(f, &e, f->now, true);
 			if (e.flags & F_REPORT)
 				record(f, e.seq, e.cmd, e.target, e.ts, f->now, ST_LATE_EXECUTED, 0);
 			log_exec(f, e.seq, e.cmd, e.target, e.ts, f->now, ST_LATE_EXECUTED, 0,
@@ -500,7 +528,17 @@ static const struct {
 	{ "edge_capture_target_id", A_RO }, { "edge_capture_command_id", A_RO },
 	{ "edge_capture_ack", A_WO }, { "capture_tag_enable", A_RW },
 	{ "capture_tag_header_bytes", A_RO }, { "capture_tag_magic", A_RO },
+	{ "stream_gate_map", A_RO },
 };
+
+/* An attribute the configured fake does not have: the gate map unless set,
+ * the capture-tag attributes when hidden (an image without the tagger). */
+static bool attr_absent(const struct fake_tick *f, const char *name)
+{
+	if (!strcmp(name, "stream_gate_map"))
+		return !f->gate_map;
+	return f->tag_attrs_hidden && !strncmp(name, "capture_tag_", 12);
+}
 
 static int attr_mode(const char *name)
 {
@@ -567,6 +605,11 @@ static int read_locked(struct fake_tick *f, const char *a, char *buf, size_t len
 		return emit(buf, len, u, f->cap_target);
 	if (!strcmp(a, "edge_capture_command_id"))
 		return emit(buf, len, u, f->cap_cmd);
+	if (!strcmp(a, "stream_gate_map")) {
+		int n = snprintf(buf, len, "%s\n", f->gate_map);
+
+		return n < 0 ? -EIO : (size_t)n >= len ? (int)(len - 1) : n;
+	}
 	if (!strcmp(a, "capture_tag_enable"))
 		return emit(buf, len, u, f->tag_enable);
 	if (!strcmp(a, "capture_tag_header_bytes"))
@@ -646,7 +689,7 @@ static int tick_access(struct fake_tick *f, const char *attr, bool write, char *
 		ret = f->inj_err;
 		goto out;
 	}
-	mode = attr_mode(attr);
+	mode = attr_absent(f, attr) ? 0 : attr_mode(attr);
 	if (!mode) {
 		ret = -ENOENT;
 		goto out;
@@ -708,6 +751,7 @@ void fake_tick_free(struct fake_tick *f)
 	if (!f)
 		return;
 	pthread_mutex_destroy(&f->lock);
+	free(f->gate_map);
 	free(f->log);
 	free(f->counts);
 	free(f);
@@ -765,6 +809,54 @@ void fake_tick_set_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void
 	f->hook = hook;
 	f->hook_user = user;
 	pthread_mutex_unlock(&f->lock);
+}
+
+void fake_tick_set_gate_hook(struct fake_tick *f, fake_tick_gate_hook hook, void *user)
+{
+	pthread_mutex_lock(&f->lock);
+	f->gate_hook = hook;
+	f->gate_hook_user = user;
+	pthread_mutex_unlock(&f->lock);
+}
+
+void fake_tick_set_gate_map(struct fake_tick *f, const char *text)
+{
+	char *copy = text ? strdup(text) : NULL;
+
+	pthread_mutex_lock(&f->lock);
+	free(f->gate_map);
+	f->gate_map = copy;
+	pthread_mutex_unlock(&f->lock);
+}
+
+void fake_tick_hide_tag_attrs(struct fake_tick *f, bool hide)
+{
+	pthread_mutex_lock(&f->lock);
+	f->tag_attrs_hidden = hide;
+	pthread_mutex_unlock(&f->lock);
+}
+
+int fake_tick_gate_tag_locked(struct fake_tick *f, unsigned int gate, struct fake_tick_tag *out)
+{
+	if (gate >= STREAM_GATE_COUNT || !out)
+		return -EINVAL;
+	*out = f->gate_tag[gate];
+	return 0;
+}
+
+uint32_t fake_tick_tag_enable_locked(struct fake_tick *f)
+{
+	return f->tag_enable;
+}
+
+int fake_tick_gate_tag(struct fake_tick *f, unsigned int gate, struct fake_tick_tag *out)
+{
+	int ret;
+
+	pthread_mutex_lock(&f->lock);
+	ret = fake_tick_gate_tag_locked(f, gate, out);
+	pthread_mutex_unlock(&f->lock);
+	return ret;
 }
 
 size_t fake_tick_exec_log(struct fake_tick *f, size_t first, struct fake_tick_exec *out,

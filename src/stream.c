@@ -3,6 +3,11 @@
  * Stream lifecycle, copying I/O (recv/send) and zero-copy I/O
  * (get_block/put_block) over libiio v1 buffer streams and blocks.
  *
+ * Block I/O goes through the source seam (stream_src.h): every buffer and
+ * block call is an op of s->src, libiio's (datax_stream_iio_src, below) by
+ * default, a fake DMA's when a test binds one. The mask, channel lookup and
+ * sample-size check stay on the IIO streaming device.
+ *
  * A stream owns one iio_buffer_stream on the device's streaming (DMA) IIO
  * device and block_count blocks of block_samples frames. The frame layout
  * is the DMA's: per instant, enabled radio channels ascending, I then Q,
@@ -145,32 +150,127 @@ static void unlend_all(struct datax_stream *s)
 	s->nlent = 0;
 }
 
+/* The libiio block source: h is the stream, whose iio_dev and mask it
+ * opens. Failures set the last error here. */
+static void iio_src_close(void *h)
+{
+	struct datax_stream *s = h;
+
+	for (unsigned int i = 0; s->blocks && i < s->nblocks; i++)
+		if (s->blocks[i])
+			iio_block_destroy(s->blocks[i]);
+	free(s->blocks);
+	s->blocks = NULL;
+	if (s->bs)
+		iio_buffer_close(s->bs);
+	s->bs = NULL;
+}
+
+static int iio_src_open(void *h, size_t bytes, unsigned int nblocks, size_t frame_bytes)
+{
+	struct datax_stream *s = h;
+	struct iio_buffer *buf = iio_device_get_buffer(s->iio_dev, 0);
+	struct iio_buffer_stream *bs;
+	int ret;
+
+	(void)frame_bytes;
+	if (!buf)
+		return datax_error_ret(s->dev->ctx, ENOTSUP, SUB,
+				       "%s has no buffer", iio_name(s));
+	bs = iio_buffer_open(buf, s->mask);
+	ret = iio_err(bs);
+	if (ret)
+		return fail_iio(s, ret, "opening the buffer");
+	s->bs = bs;
+	s->blocks = calloc(nblocks, sizeof(*s->blocks));
+	if (!s->blocks) {
+		iio_src_close(s);
+		return datax_error_ret(s->dev->ctx, ENOMEM, SUB, "out of memory");
+	}
+	for (unsigned int i = 0; i < nblocks; i++) {
+		struct iio_block *b = iio_buffer_stream_create_block(bs, bytes);
+
+		ret = iio_err(b);
+		if (ret) {
+			iio_src_close(s);
+			return fail_iio(s, ret, "creating a block");
+		}
+		s->blocks[i] = b;
+	}
+	return 0;
+}
+
+static void *iio_src_data(void *h, unsigned int i)
+{
+	struct datax_stream *s = h;
+	void *p = iio_block_start(s->blocks[i]);
+
+	return iio_err(p) ? NULL : p;
+}
+
+static int iio_src_enqueue(void *h, unsigned int i, bool cyclic)
+{
+	struct datax_stream *s = h;
+
+	return iio_block_enqueue(s->blocks[i], 0, cyclic);
+}
+
+static int iio_src_dequeue(void *h, unsigned int i, bool nonblock)
+{
+	struct datax_stream *s = h;
+
+	return iio_block_dequeue(s->blocks[i], nonblock);
+}
+
+static int iio_src_start(void *h)
+{
+	struct datax_stream *s = h;
+
+	return iio_buffer_stream_start(s->bs);
+}
+
+static int iio_src_stop(void *h)
+{
+	struct datax_stream *s = h;
+
+	return iio_buffer_stream_stop(s->bs);
+}
+
+static void iio_src_cancel(void *h)
+{
+	struct datax_stream *s = h;
+
+	iio_buffer_stream_cancel(s->bs);
+}
+
+const struct datax_stream_src_ops datax_stream_iio_src = {
+	.open = iio_src_open, .close = iio_src_close, .data = iio_src_data,
+	.enqueue = iio_src_enqueue, .dequeue = iio_src_dequeue,
+	.start = iio_src_start, .stop = iio_src_stop, .cancel = iio_src_cancel,
+	.status = NULL,
+};
+
 /* Free the blocks and close the buffer. Queued blocks are cancelled first. */
 static void hw_close(struct datax_stream *s)
 {
 	bool any_queued = false;
 
-	if (!s->bs)
+	if (!s->hw)
 		return;
 	for (unsigned int i = 0; i < s->nblocks; i++)
 		any_queued |= s->queued && s->queued[i];
 	if (any_queued)
-		iio_buffer_stream_cancel(s->bs);
-	for (unsigned int i = 0; s->blocks && i < s->nblocks; i++)
-		if (s->blocks[i])
-			iio_block_destroy(s->blocks[i]);
-	free(s->blocks);
+		s->src->cancel(s->src_h);
+	s->src->close(s->src_h);
 	free(s->queued);
 	free(s->lent);
 	free(s->lend_fifo);
-	s->blocks = NULL;
 	s->queued = NULL;
 	s->lent = NULL;
 	s->lend_fifo = NULL;
 	s->lend_head = 0;
 	s->nlent = 0;
-	iio_buffer_close(s->bs);
-	s->bs = NULL;
+	s->hw = false;
 	s->enabled = false;
 	s->cyclic_sent = false;
 	s->cur = 0;
@@ -180,35 +280,19 @@ static void hw_close(struct datax_stream *s)
 /* Open the buffer and create the blocks; on failure nothing is left open. */
 static int hw_open(struct datax_stream *s)
 {
-	struct iio_buffer *buf = iio_device_get_buffer(s->iio_dev, 0);
-	struct iio_buffer_stream *bs;
-	int ret;
+	int ret = s->src->open(s->src_h, block_bytes(s), s->nblocks, s->frame_bytes);
 
-	if (!buf)
-		return datax_error_ret(s->dev->ctx, ENOTSUP, SUB,
-				       "%s has no buffer", iio_name(s));
-	bs = iio_buffer_open(buf, s->mask);
-	ret = iio_err(bs);
 	if (ret)
-		return fail_iio(s, ret, "opening the buffer");
-	s->bs = bs;
-	s->blocks = calloc(s->nblocks, sizeof(*s->blocks));
+		/* The libiio source sets the last error itself. */
+		return s->src == &datax_stream_iio_src ? ret :
+			fail_iio(s, ret, "opening the block source");
+	s->hw = true;
 	s->queued = calloc(s->nblocks, sizeof(*s->queued));
 	s->lent = calloc(s->nblocks, sizeof(*s->lent));
 	s->lend_fifo = calloc(s->nblocks, sizeof(*s->lend_fifo));
-	if (!s->blocks || !s->queued || !s->lent || !s->lend_fifo) {
+	if (!s->queued || !s->lent || !s->lend_fifo) {
 		hw_close(s);
 		return datax_error_ret(s->dev->ctx, ENOMEM, SUB, "out of memory");
-	}
-	for (unsigned int i = 0; i < s->nblocks; i++) {
-		struct iio_block *b = iio_buffer_stream_create_block(bs, block_bytes(s));
-
-		ret = iio_err(b);
-		if (ret) {
-			hw_close(s);
-			return fail_iio(s, ret, "creating a block");
-		}
-		s->blocks[i] = b;
 	}
 	s->cur = 0;
 	s->cur_off = 0;
@@ -229,12 +313,11 @@ static int hw_open(struct datax_stream *s)
 static int dequeue(struct datax_stream *s, unsigned int i, int timeout_ms,
 		   long long deadline, bool retry, bool *waited)
 {
-	struct iio_block *b = s->blocks[i];
 	int ret;
 
 	*waited = false;
 	for (;;) {
-		ret = iio_block_dequeue(b, timeout_ms == 0);
+		ret = s->src->dequeue(s->src_h, i, timeout_ms == 0);
 		if (timeout_ms == 0) {
 			if (ret == -EBUSY)
 				ret = -ETIMEDOUT;
@@ -257,7 +340,7 @@ static int dequeue(struct datax_stream *s, unsigned int i, int timeout_ms,
 /* Enqueue the whole block i (cyclic on a cyclic stream). */
 static int enqueue(struct datax_stream *s, unsigned int i)
 {
-	int ret = iio_block_enqueue(s->blocks[i], 0, s->cfg.cyclic);
+	int ret = s->src->enqueue(s->src_h, i, s->cfg.cyclic);
 
 	if (!ret)
 		s->queued[i] = true;
@@ -420,8 +503,11 @@ int datax_stream_create(struct datax_device *dev,
 
 	pthread_mutex_lock(&ctx->lock);
 	busy = dev->stream[dir] != NULL;
-	if (!busy)
+	if (!busy) {
 		dev->stream[dir] = s;
+		s->src = dev->src_ops[dir] ? dev->src_ops[dir] : &datax_stream_iio_src;
+		s->src_h = dev->src_ops[dir] ? dev->src_h[dir] : s;
+	}
 	pthread_mutex_unlock(&ctx->lock);
 	if (busy) {
 		free(s);
@@ -465,7 +551,7 @@ int datax_stream_start(struct datax_stream *s)
 		datax_stream_status_check(s, true);
 		return 0;
 	}
-	if (!s->bs) {
+	if (!s->hw) {
 		ret = hw_open(s);
 		if (ret)
 			return ret;
@@ -479,7 +565,7 @@ int datax_stream_start(struct datax_stream *s)
 			}
 		}
 	}
-	ret = iio_buffer_stream_start(s->bs);
+	ret = s->src->start(s->src_h);
 	if (ret)
 		goto err;
 	s->enabled = true;
@@ -515,7 +601,7 @@ static int tx_flush(struct datax_stream *s)
 	if (!s->cur_off)
 		return 0;
 	if (s->cur_off < bb)
-		memset((unsigned char *)iio_block_start(s->blocks[s->cur]) + s->cur_off,
+		memset((unsigned char *)s->src->data(s->src_h, s->cur) + s->cur_off,
 		       0, bb - s->cur_off);
 	ret = enqueue(s, s->cur);
 	if (ret)
@@ -537,11 +623,11 @@ int datax_stream_stop(struct datax_stream *s)
 		return 0;
 	tx_oneshot = s->cfg.direction == DATAX_TX && !s->cfg.cyclic;
 	unlend_all(s); /* lent blocks are not queued: the drain skips them */
-	if (s->bs && tx_oneshot)
+	if (s->hw && tx_oneshot)
 		fret = tx_flush(s);
-	if (s->bs && !s->cfg.cyclic)
+	if (s->hw && !s->cfg.cyclic)
 		dret = drain(s);
-	if (s->bs && s->cfg.cyclic && s->queued[0]) {
+	if (s->hw && s->cfg.cyclic && s->queued[0]) {
 		/* Cyclic: take the block back before disabling, so the buffer
 		 * closes without a cancel. It must come first: on the legacy
 		 * path the block's write runs on libiio's worker, which
@@ -557,8 +643,8 @@ int datax_stream_stop(struct datax_stream *s)
 		if (cret == -EPERM)
 			cret = 0;
 	}
-	if (s->bs && s->enabled) {
-		ret = iio_buffer_stream_stop(s->bs);
+	if (s->hw && s->enabled) {
+		ret = s->src->stop(s->src_h);
 		if (ret)
 			ret = fail_iio(s, ret, "stream_stop: disabling the buffer");
 	}
@@ -726,7 +812,7 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 	if (s->zero_copy_used)
 		return datax_error_ret(ctx, EINVAL, SUB,
 				       "recv: stream is in zero-copy mode (get_block/put_block)");
-	if (!s->started || !s->bs)
+	if (!s->started || !s->hw)
 		return datax_error_ret(ctx, EINVAL, SUB, "recv: stream not started");
 	s->copy_used = true;
 	if (samples > INT_MAX)
@@ -759,10 +845,9 @@ int datax_stream_recv(struct datax_stream *s, void *dst, size_t samples,
 			s->disc_pending = false;
 		}
 		first = false;
-		src = iio_block_start(s->blocks[s->cur]);
-		ret = iio_err(src);
-		if (ret)
-			return done ? (int)done : fail_iio(s, ret, "recv: mapping a block");
+		src = s->src->data(s->src_h, s->cur);
+		if (!src)
+			return done ? (int)done : fail_iio(s, -EIO, "recv: mapping a block");
 		n = (bb - s->cur_off) / s->frame_bytes;
 		if (n > samples - done)
 			n = samples - done;
@@ -798,7 +883,7 @@ static int cyclic_arm(struct datax_stream *s, const char *verb)
 		snprintf(what, sizeof(what), "%s: enqueueing the cyclic block", verb);
 		goto err;
 	}
-	ret = iio_buffer_stream_start(s->bs);
+	ret = s->src->start(s->src_h);
 	if (ret) {
 		snprintf(what, sizeof(what), "%s: enabling the buffer", verb);
 		goto err;
@@ -829,7 +914,7 @@ static int send_cyclic(struct datax_stream *s, const void *src, size_t samples)
 	ret = cyclic_open(s, samples);
 	if (ret)
 		return ret;
-	memcpy(iio_block_start(s->blocks[0]), src, samples * s->frame_bytes);
+	memcpy(s->src->data(s->src_h, 0), src, samples * s->frame_bytes);
 	ret = cyclic_arm(s, "send");
 	return ret ? ret : (int)samples;
 }
@@ -853,7 +938,7 @@ int datax_stream_send(struct datax_stream *s, const void *src, size_t samples,
 	if (s->zero_copy_used)
 		return datax_error_ret(ctx, EINVAL, SUB,
 				       "send: stream is in zero-copy mode (get_block/put_block)");
-	if (!s->started || (!s->cfg.cyclic && !s->bs))
+	if (!s->started || (!s->cfg.cyclic && !s->hw))
 		return datax_error_ret(ctx, EINVAL, SUB, "send: stream not started");
 	if (s->cfg.cyclic)
 		return send_cyclic(s, src, samples);
@@ -886,7 +971,7 @@ int datax_stream_send(struct datax_stream *s, const void *src, size_t samples,
 		n = (bb - s->cur_off) / s->frame_bytes;
 		if (n > samples - done)
 			n = samples - done;
-		memcpy((unsigned char *)iio_block_start(s->blocks[s->cur]) + s->cur_off,
+		memcpy((unsigned char *)s->src->data(s->src_h, s->cur) + s->cur_off,
 		       (const unsigned char *)src + done * s->frame_bytes,
 		       n * s->frame_bytes);
 		done += n;
@@ -924,7 +1009,7 @@ int datax_stream_get_block(struct datax_stream *s, void **data,
 	if (s->copy_used)
 		return datax_error_ret(ctx, EINVAL, SUB,
 				       "get_block: stream is in copy mode (recv/send)");
-	if (!s->started || (!s->cfg.cyclic && !s->bs))
+	if (!s->started || (!s->cfg.cyclic && !s->hw))
 		return datax_error_ret(ctx, EINVAL, SUB, "get_block: stream not started");
 	s->zero_copy_used = true;
 	if (timeout_ms > 0)
@@ -934,10 +1019,10 @@ int datax_stream_get_block(struct datax_stream *s, void **data,
 		if (s->cyclic_sent)
 			return datax_error_ret(ctx, EBUSY, SUB,
 					       "get_block: the cyclic block is already transmitting; stop() first");
-		if (s->bs && s->lent[0])
+		if (s->hw && s->lent[0])
 			return datax_error_ret(ctx, EBUSY, SUB,
 					       "get_block: the cyclic block is already lent");
-		if (!s->bs)
+		if (!s->hw)
 			ret = cyclic_open(s, s->cfg.block_samples);
 	} else if (s->cfg.direction == DATAX_RX) {
 		ret = rx_take(s, timeout_ms, deadline, "get_block", false);
@@ -951,7 +1036,7 @@ int datax_stream_get_block(struct datax_stream *s, void **data,
 	s->lend_fifo[(s->lend_head + s->nlent) % s->nblocks] = i;
 	s->nlent++;
 	s->cur = (i + 1) % s->nblocks;
-	*data = iio_block_start(s->blocks[i]);
+	*data = s->src->data(s->src_h, i);
 	if (info) {
 		info->timestamp_ticks = 0;
 		info->discontinuous = s->disc_pending;
@@ -971,7 +1056,7 @@ int datax_stream_put_block(struct datax_stream *s, void *data)
 		return -EINVAL;
 	ctx = s->dev->ctx;
 	for (k = 0; data && k < s->nlent; k++)
-		if (iio_block_start(s->blocks[s->lend_fifo[(s->lend_head + k) % s->nblocks]]) == data)
+		if (s->src->data(s->src_h, s->lend_fifo[(s->lend_head + k) % s->nblocks]) == data)
 			break;
 	if (!data || k == s->nlent)
 		return datax_error_ret(ctx, EINVAL, SUB,
@@ -994,6 +1079,27 @@ int datax_stream_put_block(struct datax_stream *s, void *data)
 		datax_stream_status_check(s, false);
 	}
 	return 0;
+}
+
+int datax_internal_stream_bind_source(struct datax_device *dev, enum datax_direction dir,
+				      const struct datax_stream_src_ops *ops, void *h)
+{
+	int ret = 0;
+
+	if (!dev || (dir != DATAX_RX && dir != DATAX_TX))
+		return -EINVAL;
+	if (ops && (!ops->open || !ops->close || !ops->data || !ops->enqueue ||
+		    !ops->dequeue || !ops->start || !ops->stop || !ops->cancel))
+		return -EINVAL;
+	pthread_mutex_lock(&dev->ctx->lock);
+	if (dev->stream[dir]) {
+		ret = -EBUSY;
+	} else {
+		dev->src_ops[dir] = ops;
+		dev->src_h[dir] = ops ? h : NULL;
+	}
+	pthread_mutex_unlock(&dev->ctx->lock);
+	return ret;
 }
 
 int datax_internal_stream_stats(const struct datax_stream *s,

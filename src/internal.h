@@ -10,6 +10,7 @@
 struct iio_device;
 struct datax_stream;
 struct datax_tick_ops;
+struct datax_stream_src_ops;
 
 enum datax_family {
 	DATAX_FAMILY_UNKNOWN,
@@ -57,6 +58,11 @@ struct datax_device {
 	struct datax_stream *stream[2];
 	/* Status-register detection seen by streams: 0 unknown, 1 yes, 2 no. */
 	unsigned char status_detect[2];
+	/* Stream block-I/O seam (stream_src.h), per direction: NULL ops mean
+	 * libiio. A stream copies them at create; tests bind a fake DMA
+	 * (datax_internal_stream_bind_source), under ctx->lock. */
+	const struct datax_stream_src_ops *src_ops[2];
+	void *src_h[2];
 	/* Tick seam (tick_ops.h): every Tick access goes through tick_ops with
 	 * tick_h. Bound at fold time to the libiio ops on the context's Tick
 	 * device; NULL ops when there is none. Tests rebind a fake. */

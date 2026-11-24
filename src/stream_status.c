@@ -92,6 +92,16 @@ int datax_stream_status_poll(struct datax_stream *s, bool *overflow, bool *under
 		*overflow = false;
 	if (underflow)
 		*underflow = false;
+	if (s->src && s->src->status) {
+		bool ovf = false, unf = false;
+		int ret = s->src->status(s->src_h, &ovf, &unf);
+
+		if (overflow)
+			*overflow = ovf && dir == DATAX_RX;
+		if (underflow)
+			*underflow = unf && dir == DATAX_TX;
+		return ret;
+	}
 	attr = iio_device_find_debug_attr(s->iio_dev, ATTR);
 	if (!attr)
 		return -ENOENT;

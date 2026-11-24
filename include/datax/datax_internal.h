@@ -35,6 +35,16 @@ int datax_internal_device_stream_info(const struct datax_device *dev,
 				      enum datax_direction dir, char *name,
 				      size_t len, int *detect);
 
+/* Stream block-I/O seam (ops in src/stream_src.h): replace the libiio
+ * buffer and blocks of a direction's streams with ops/h, for tests driving
+ * a fake DMA; NULL ops restore libiio. Streams copy the binding at create;
+ * the mask, channel lookup and sample-size check still use the device's IIO
+ * streaming device. 0, -EINVAL (bad direction, or ops missing a function
+ * other than status) or -EBUSY while a stream exists in that direction. */
+struct datax_stream_src_ops;
+int datax_internal_stream_bind_source(struct datax_device *dev, enum datax_direction dir,
+				      const struct datax_stream_src_ops *ops, void *h);
+
 /* Tick ops seam (layout in src/tick_ops.h: two function pointers, read then
  * write). Replace the Tick access of a live device with ops/h, for tests
  * driving a fake Tick; NULL ops detaches Tick. Capabilities and limits are

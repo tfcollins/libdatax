@@ -72,6 +72,41 @@ typedef void (*fake_tick_gpio_hook)(void *user, uint32_t old_gpio, uint32_t new_
 				    uint64_t ticks);
 void fake_tick_set_gpio_hook(struct fake_tick *f, fake_tick_gpio_hook hook, void *user);
 
+/* ---- stream gate levels, the tag latch and the gate map ---- */
+
+/* Called with the fake's lock held (do not call back into this fake, except
+ * the *_locked accessors below) each time stream_gate_level changes, with the
+ * old and new level bitmaps and the tick. The tag latch of a level-raising
+ * command is already updated when the hook runs. */
+typedef void (*fake_tick_gate_hook)(void *user, uint32_t old_level, uint32_t new_level,
+				    uint64_t ticks);
+void fake_tick_set_gate_hook(struct fake_tick *f, fake_tick_gate_hook hook, void *user);
+
+/* The capture-tag latch (RTL capture_tag_*), kept per gate: the last command
+ * that raised (or pulsed) that gate. late: it ran late (late on submit, or
+ * dispatched late). count: how many times the gate latched. */
+struct fake_tick_tag {
+	uint64_t ticks;
+	uint32_t seq;
+	uint16_t target, cmd;
+	bool late;
+	uint32_t count;
+};
+/* 0, or -EINVAL for a gate >= 8. A gate that never latched reads all zero. */
+int fake_tick_gate_tag(struct fake_tick *f, unsigned int gate, struct fake_tick_tag *out);
+/* The same, and capture_tag_enable, for use inside the gate hook only (the
+ * fake's lock is already held). */
+int fake_tick_gate_tag_locked(struct fake_tick *f, unsigned int gate, struct fake_tick_tag *out);
+uint32_t fake_tick_tag_enable_locked(struct fake_tick *f);
+
+/* The stream_gate_map attribute text (read-only attribute; gate roles by
+ * position, see src/tick_ops.c). NULL, the default: the attribute is absent
+ * (-ENOENT), as on a Tick driver without it. */
+void fake_tick_set_gate_map(struct fake_tick *f, const char *text);
+/* Hide (true) the capture_tag_enable, capture_tag_header_bytes and
+ * capture_tag_magic attributes: -ENOENT, as on an image without the tagger. */
+void fake_tick_hide_tag_attrs(struct fake_tick *f, bool hide);
+
 /* ---- ground truth and fault injection for tests ---- */
 
 /* Every command the fake executed or dropped, reported or not. */

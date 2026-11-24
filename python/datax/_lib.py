@@ -95,6 +95,7 @@ def get_lib():
     _sig(lib, "datax_internal_pps_present", C.c_int, c_void_p)
     _sig(lib, "datax_internal_mcs_info", C.c_int, c_void_p, C.c_char_p, C.c_size_t,
          C.c_char_p, C.c_size_t)
+    _sig(lib, "datax_internal_gate_info", C.c_int, c_void_p, C.c_char_p, C.c_size_t)
     _sig(lib, "datax_internal_device_stream_info", C.c_int, c_void_p, C.c_int,
          C.c_char_p, C.c_size_t, P(C.c_int))
     _sig(lib, "datax_stream_create", C.c_int, c_void_p, P(StreamConfig), P(c_void_p))

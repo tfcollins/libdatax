@@ -61,6 +61,8 @@ LIBDATAX_0.1 {
     datax_internal_mcs_info;
     datax_internal_mcs_force_phase_sync;
     datax_internal_pps_present;
+    datax_internal_gate_map_parse;
+    datax_internal_gate_info;
   local:
     *;
 };

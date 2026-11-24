@@ -7,6 +7,8 @@
 
 #include <datax/datax.h>
 
+#include "tick_ops.h"
+
 struct iio_device;
 struct datax_stream;
 struct datax_tick_ops;
@@ -30,6 +32,15 @@ struct datax_caps {
 	 * has the GPIO target and a usable queue; the phy has the FHM
 	 * attributes; both phys have jesd204_fsm_ctrl. */
 	bool tick_usable, fhm_attrs, mcs_attrs;
+	/* P3b inputs (caps.c): the Tick capability bitmap, its stream gate map
+	 * (gate_map_rejected: the attribute was there but did not parse),
+	 * capture_tag_header_bytes, and whether capture_tag_enable, _header_bytes
+	 * and _magic are all readable. */
+	unsigned int tick_bitmap;
+	struct datax_gate_map gate_map;
+	bool gate_map_rejected;
+	unsigned long long tag_bytes;
+	bool tag_attrs;
 };
 
 struct datax_context {

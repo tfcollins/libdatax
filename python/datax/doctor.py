@@ -9,7 +9,8 @@ from ._lib import get_lib
 
 
 def _streams_line(dev):
-    """rx=<name>|none tx=<name>|none overflow-detect=yes|no|unknown."""
+    """rx=<name>|none tx=<name>|none overflow-detect=yes|no|unknown; then the
+    stream gate map, the timed flags (and why not) and the tag header size."""
     lib = get_lib()
     names, states = [], []
     for direction in (0, 1):  # DATAX_RX, DATAX_TX
@@ -28,7 +29,11 @@ def _streams_line(dev):
         det = "yes"
     else:
         det = "unknown"
-    return f"streams: rx={names[0]} tx={names[1]} overflow-detect={det}"
+    info = C.create_string_buffer(512)
+    gates = ""
+    if lib.datax_internal_gate_info(dev._ptr, info, len(info)) == 0:
+        gates = "; " + info.value.decode()
+    return f"streams: rx={names[0]} tx={names[1]} overflow-detect={det}{gates}"
 
 
 # enum datax_time_source order.

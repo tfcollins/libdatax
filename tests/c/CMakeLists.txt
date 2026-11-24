@@ -245,6 +245,24 @@ target_compile_options(datax_fake_tick PRIVATE ${DATAX_WARNINGS})
 target_compile_definitions(datax_fake_tick PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(datax_fake_tick PRIVATE Threads::Threads)
 
+# P3b capability probe: the gate-map grammar (no emulator) and the flag matrix
+# on the fake Tick bound to the adrv9009-zu11eg fixture.
+add_executable(test_caps_p3b test_caps_p3b.c)
+target_link_libraries(test_caps_p3b PRIVATE datax datax_fake_tick)
+target_include_directories(test_caps_p3b PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_caps_p3b PRIVATE ${DATAX_WARNINGS})
+target_compile_definitions(test_caps_p3b PRIVATE _POSIX_C_SOURCE=200809L)
+add_test(NAME test_gate_map_parse COMMAND test_caps_p3b parse)
+if(DATAX_LIBIIO_BUILD)
+  add_test(NAME test_caps_p3b_matrix
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/emu/emu.sh
+            ${PROJECT_SOURCE_DIR}/tests/emu/adrv9009-zu11eg.xml $<TARGET_FILE:test_caps_p3b> matrix)
+  set_tests_properties(test_caps_p3b_matrix PROPERTIES
+    ENVIRONMENT "DATAX_LIBIIO_BUILD=${DATAX_LIBIIO_BUILD}"
+    TIMEOUT 60)
+endif()
+
 # The fake against every golden hdl_model trace (one test per trace), and
 # its own surface/PPS/FHM checks. No emulator needed.
 add_executable(test_fake_tick test_fake_tick.c)

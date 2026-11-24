@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 
 #include <iio/iio.h>
@@ -178,4 +179,115 @@ int datax_tick_read_limits(const struct datax_device *dev, unsigned long long *t
 		*capability_bitmap = (unsigned)v;
 	}
 	return 0;
+}
+
+/* ---- stream gate map ---- */
+
+/* The attribute name is not final (Tick driver): a rename is this one line. */
+#define DATAX_TICK_GATE_MAP_ATTR "stream_gate_map"
+
+/*
+ * Grammar: tokens separated by comma, space or newline. The position k of a
+ * gate token among the gate tokens is gate bit k; "-" holds a spare position
+ * and an unknown token is ignored but advances the position. The last two
+ * roles are presence tokens: they are not gate bits and do not advance the
+ * position. A duplicated role rejects the whole map.
+ */
+enum gate_role {
+	ROLE_RX_LEVEL, ROLE_TX_LEVEL, ROLE_RX_MODE, ROLE_TX_MODE,
+	ROLE_FHM_B, ROLE_TX_FULLMASK_ONLY,
+	ROLE_COUNT, ROLE_FIRST_PRESENCE = ROLE_FHM_B
+};
+
+static const char *const gate_roles[ROLE_COUNT] = {
+	"rx-dma", "tx-dma", "rx-mode", "tx-mode", "fhm-b", "tx-start-fullmask-only"
+};
+
+#define GATE_BITS 8
+
+static void gate_map_absent(struct datax_gate_map *out)
+{
+	out->present = false;
+	out->rx_level = out->tx_level = out->rx_mode = out->tx_mode = -1;
+	out->fhm_b = out->tx_fullmask_only = false;
+}
+
+int datax_tick_parse_gate_map(const char *text, struct datax_gate_map *out)
+{
+	int bit_of[ROLE_COUNT];
+	int pos = 0;
+	const char *p = text;
+
+	if (!out)
+		return -EINVAL;
+	gate_map_absent(out);
+	if (!text)
+		return -EINVAL;
+	for (int i = 0; i < ROLE_COUNT; i++)
+		bit_of[i] = -1;
+
+	while (*p) {
+		size_t n = strcspn(p, ", \t\r\n");
+		int role = -1;
+
+		for (int i = 0; i < ROLE_COUNT && n; i++)
+			if (strlen(gate_roles[i]) == n && !strncmp(p, gate_roles[i], n))
+				role = i;
+		if (role >= 0) {
+			if (bit_of[role] != -1)
+				return -EINVAL;   /* duplicate: reject the map */
+			if (role >= ROLE_FIRST_PRESENCE) {
+				bit_of[role] = 1;
+			} else {
+				/* A position past the gate bits names no bit; keep
+				 * the role seen so a later duplicate still rejects. */
+				bit_of[role] = pos < GATE_BITS ? pos : -2;
+				pos++;
+			}
+		} else if (n) {
+			pos++;                   /* "-" and unknown tokens */
+		}
+		p += n;
+		p += strspn(p, ", \t\r\n");
+	}
+	out->present = true;
+	out->rx_level = bit_of[ROLE_RX_LEVEL] >= 0 ? bit_of[ROLE_RX_LEVEL] : -1;
+	out->tx_level = bit_of[ROLE_TX_LEVEL] >= 0 ? bit_of[ROLE_TX_LEVEL] : -1;
+	out->rx_mode = bit_of[ROLE_RX_MODE] >= 0 ? bit_of[ROLE_RX_MODE] : -1;
+	out->tx_mode = bit_of[ROLE_TX_MODE] >= 0 ? bit_of[ROLE_TX_MODE] : -1;
+	out->fhm_b = bit_of[ROLE_FHM_B] == 1;
+	out->tx_fullmask_only = bit_of[ROLE_TX_FULLMASK_ONLY] == 1;
+	return 0;
+}
+
+int datax_tick_read_gate_map(const struct datax_device *dev, struct datax_gate_map *out)
+{
+	char buf[256];
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+	gate_map_absent(out);
+	ret = datax_tick_read_str(dev, DATAX_TICK_GATE_MAP_ATTR, buf, sizeof(buf));
+	if (ret < 0)
+		return ret;
+	return datax_tick_parse_gate_map(buf, out);
+}
+
+/* Test export: the parse as seven ints in struct field order. */
+int datax_internal_gate_map_parse(const char *text, int out[7])
+{
+	struct datax_gate_map m;
+	int ret = datax_tick_parse_gate_map(text, &m);
+
+	if (out) {
+		out[0] = m.present;
+		out[1] = m.rx_level;
+		out[2] = m.tx_level;
+		out[3] = m.rx_mode;
+		out[4] = m.tx_mode;
+		out[5] = m.fhm_b;
+		out[6] = m.tx_fullmask_only;
+	}
+	return ret;
 }

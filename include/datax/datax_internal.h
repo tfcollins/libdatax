@@ -92,6 +92,16 @@ void datax_internal_mcs_force_phase_sync(struct datax_device *dev, bool on);
  * Tick). */
 int datax_internal_pps_present(const struct datax_device *dev);
 
+/* Parse a Tick stream_gate_map text into out = {present, rx_level, tx_level,
+ * rx_mode, tx_mode, fhm_b, tx_fullmask_only} (-1: role absent). 0, or
+ * -EINVAL for a NULL text or a duplicated role (out then reads as absent). */
+int datax_internal_gate_map_parse(const char *text, int out[7]);
+
+/* Doctor: the stream gate map as parsed, which timed flags are set and why
+ * the others are not, and the capture tag header size, as one line without a
+ * prefix. 0, or -EINVAL. */
+int datax_internal_gate_info(const struct datax_device *dev, char *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
